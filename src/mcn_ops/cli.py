@@ -15,7 +15,7 @@ from .collection.douyin_login_cookie import login_and_fetch_douyin_cookie, write
 from .collection.mock_tools import build_mock_source_registry
 from .collection.mxnzp_client import MxnzpConfig, MxnzpDouyinProClient
 from .collection.mxnzp_tools import build_mxnzp_douyin_registry
-from .collection.runner import CollectionConfig, TopicCollectionRunner
+from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
 from .collection.tools import parse_json_object
 from .collection.understanding import build_material_understanding, evaluate_role_match, validate_understanding
 from .feishu import build_publish_job_payload, write_payload
@@ -86,6 +86,33 @@ def build_parser() -> argparse.ArgumentParser:
     douyin_login_cookie.add_argument("--show-cookie", action="store_true")
     douyin_login_cookie.add_argument("--close-browser", action="store_true")
     douyin_login_cookie.add_argument("--json", action="store_true")
+
+    author = collect_sub.add_parser("author", help="Manage Douyin source authors")
+    author_sub = author.add_subparsers(dest="author_command", required=True)
+    author_list = author_sub.add_parser("list", help="List stored Douyin authors")
+    author_list.add_argument("--json", action="store_true")
+    author_videos = author_sub.add_parser("videos", help="List and rank stored videos for one Douyin author")
+    author_videos.add_argument("--sec-uid")
+    author_videos.add_argument("--name")
+    author_videos.add_argument("--like-floor", type=int, default=5000)
+    author_videos.add_argument("--min-duration-seconds", type=int, default=20)
+    author_videos.add_argument("--max-duration-seconds", type=int, default=300)
+    author_videos.add_argument("--top", type=int, default=20)
+    author_videos.add_argument("--json", action="store_true")
+    author_expand = author_sub.add_parser("expand", help="Fetch posted videos for one Douyin author and rank viral works")
+    author_expand.add_argument("--sec-uid")
+    author_expand.add_argument("--name")
+    author_expand.add_argument("--cursor", default="")
+    author_expand.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
+    author_expand.add_argument("--max-pages", type=int, default=20, help="Use 0 to continue until MXNZP reports no next page")
+    author_expand.add_argument("--like-floor", type=int, default=5000)
+    author_expand.add_argument("--min-duration-seconds", type=int, default=20)
+    author_expand.add_argument("--max-duration-seconds", type=int, default=300)
+    author_expand.add_argument("--top", type=int, default=20)
+    author_expand.add_argument("--stop-after-nonviral-pages", type=int, default=2, help="Use 0 to disable early stop")
+    author_expand.add_argument("--login-cookie", action="store_true")
+    author_expand.add_argument("--no-cache", action="store_true")
+    author_expand.add_argument("--json", action="store_true")
 
     role = collect_sub.add_parser("role", help="Manage IP role profiles")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -424,6 +451,9 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
                 print(json.dumps(payload, ensure_ascii=False))
         return 0 if result.cookie_valid else 1
 
+    if args.collect_command == "author":
+        return handle_collect_author(args, store)
+
     if args.collect_command == "role":
         return handle_collect_role(args, store)
 
@@ -518,6 +548,269 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
         return 0
 
     raise ValueError(args.collect_command)
+
+
+def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
+    if args.author_command == "list":
+        authors = [_author_summary(author) for author in store.list_douyin_authors()]
+        if args.json:
+            json_print({"authors": authors})
+        else:
+            for author in authors:
+                print(
+                    "\t".join(
+                        [
+                            author.get("sec_uid") or "",
+                            author.get("nickname") or "",
+                            str(author.get("follower_count") or ""),
+                            str(author.get("aweme_count") or ""),
+                        ]
+                    )
+                )
+        return 0
+
+    if args.author_command == "videos":
+        author = _resolve_douyin_author(store, sec_uid=args.sec_uid, name=args.name)
+        videos = _rank_author_videos(
+            store.list_douyin_author_videos(author["sec_uid"]),
+            like_floor=args.like_floor,
+            min_duration_seconds=args.min_duration_seconds,
+            max_duration_seconds=args.max_duration_seconds,
+        )
+        payload = {"author": _author_summary(author), "videos": videos[: args.top], "viral_count": len(videos)}
+        if args.json:
+            json_print(payload)
+        else:
+            for video in payload["videos"]:
+                print(f"{video['score']}\t{video['likes']}\t{video['work_id']}\t{video['title']}")
+        return 0
+
+    if args.author_command == "expand":
+        author = _resolve_douyin_author(store, sec_uid=args.sec_uid, name=args.name)
+        config = MxnzpConfig.from_env()
+        cookie = None
+        if args.login_cookie and not config.douyin_cookie:
+            if not args.json:
+                print("请在打开的浏览器窗口登录抖音；登录成功后本命令会自动检测长 cookie。", file=sys.stderr)
+            login_result = login_and_fetch_douyin_cookie()
+            if not login_result.cookie_valid:
+                raise ValueError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
+            cookie = login_result.cookie
+        client = MxnzpDouyinProClient(config)
+        cursor = args.cursor or ""
+        page_limit = args.max_pages if args.max_pages > 0 else 1000
+        pages: list[dict[str, Any]] = []
+        saved_video_ids: list[str] = []
+        seen_cursors: set[str] = set()
+        nonviral_page_streak = 0
+        stop_reason = "max_pages"
+        for page_number in range(1, page_limit + 1):
+            params: dict[str, Any] = {
+                "userId": author["sec_uid"],
+                "sortType": args.sort_type,
+                "cursor": cursor,
+            }
+            if cookie:
+                params["cookie"] = cookie
+            result = client.call("user_post", params=params, use_cache=not args.no_cache)
+            normalized = result.get("normalized") if isinstance(result.get("normalized"), dict) else {}
+            items = normalized.get("items") if isinstance(normalized.get("items"), list) else []
+            packages = normalized.get("source_packages") if isinstance(normalized.get("source_packages"), list) else []
+            page_saved = 0
+            page_videos: list[dict[str, Any]] = []
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                source_package = packages[index] if index < len(packages) and isinstance(packages[index], dict) else {}
+                video = _author_video_from_normalized_item(item, source_package)
+                page_videos.append(video)
+                video_id = store.upsert_douyin_author_video(
+                    author["sec_uid"],
+                    video,
+                    raw=item.get("raw") if isinstance(item.get("raw"), dict) else None,
+                )
+                saved_video_ids.append(video_id)
+                page_saved += 1
+            paging = result.get("paging") if isinstance(result.get("paging"), dict) else {}
+            next_cursor = str(paging.get("cursor") or "")
+            has_next = bool(paging.get("has_next"))
+            page_viral_count = len(
+                _rank_author_videos(
+                    page_videos,
+                    like_floor=args.like_floor,
+                    min_duration_seconds=args.min_duration_seconds,
+                    max_duration_seconds=args.max_duration_seconds,
+                )
+            )
+            nonviral_page_streak = nonviral_page_streak + 1 if page_viral_count == 0 else 0
+            pages.append(
+                {
+                    "page": page_number,
+                    "fetched_count": len(items),
+                    "saved_count": page_saved,
+                    "viral_count": page_viral_count,
+                    "cursor": cursor,
+                    "next_cursor": next_cursor,
+                    "has_next": has_next,
+                }
+            )
+            if not has_next:
+                stop_reason = "no_next_page"
+                break
+            if not next_cursor or next_cursor in seen_cursors:
+                stop_reason = "cursor_exhausted"
+                break
+            if args.stop_after_nonviral_pages > 0 and nonviral_page_streak >= args.stop_after_nonviral_pages:
+                stop_reason = "nonviral_page_streak"
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        ranked_videos = _rank_author_videos(
+            store.list_douyin_author_videos(author["sec_uid"]),
+            like_floor=args.like_floor,
+            min_duration_seconds=args.min_duration_seconds,
+            max_duration_seconds=args.max_duration_seconds,
+        )
+        payload = {
+            "author": _author_summary(author),
+            "pages": pages,
+            "saved_count": len(set(saved_video_ids)),
+            "total_stored_count": len(store.list_douyin_author_videos(author["sec_uid"])),
+            "viral_count": len(ranked_videos),
+            "stop_reason": stop_reason,
+            "top_videos": ranked_videos[: args.top],
+        }
+        if args.json:
+            json_print(payload)
+        else:
+            print(f"saved={payload['saved_count']} total={payload['total_stored_count']} viral={payload['viral_count']}")
+            for video in payload["top_videos"]:
+                print(f"{video['score']}\t{video['likes']}\t{video['work_id']}\t{video['title']}")
+        return 0
+
+    raise ValueError(args.author_command)
+
+
+def _author_summary(author: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sec_uid": author.get("sec_uid"),
+        "uid": author.get("uid"),
+        "douyin_id": author.get("douyin_id"),
+        "nickname": author.get("nickname"),
+        "signature": author.get("signature"),
+        "profile_url": author.get("profile_url"),
+        "ip_location": author.get("ip_location"),
+        "follower_count": author.get("follower_count"),
+        "following_count": author.get("following_count"),
+        "aweme_count": author.get("aweme_count"),
+        "total_favorited": author.get("total_favorited"),
+        "source_material_id": author.get("source_material_id"),
+        "source_work_id": author.get("source_work_id"),
+        "fetched_at": author.get("fetched_at"),
+        "updated_at": author.get("updated_at"),
+    }
+
+
+def _resolve_douyin_author(store: Store, *, sec_uid: str | None = None, name: str | None = None) -> dict[str, Any]:
+    if sec_uid:
+        author = store.get_douyin_author(sec_uid)
+        if not author:
+            raise KeyError(f"douyin author not found: {sec_uid}")
+        return author
+    if not name:
+        raise ValueError("--sec-uid or --name is required")
+    matches = [author for author in store.list_douyin_authors() if author.get("nickname") == name]
+    if not matches:
+        matches = [author for author in store.list_douyin_authors() if name in str(author.get("nickname") or "")]
+    if not matches:
+        raise KeyError(f"douyin author not found: {name}")
+    if len(matches) > 1:
+        names = ", ".join(str(author.get("nickname")) for author in matches[:5])
+        raise ValueError(f"multiple douyin authors matched {name!r}: {names}; use --sec-uid")
+    return matches[0]
+
+
+def _author_video_from_normalized_item(item: dict[str, Any], source_package: dict[str, Any]) -> dict[str, Any]:
+    metrics = source_package.get("public_metrics") if isinstance(source_package.get("public_metrics"), dict) else item.get("metrics")
+    return {
+        "work_id": item.get("id") or source_package.get("work_id"),
+        "source_url": source_package.get("source_link") or item.get("share_url") or item.get("short_url"),
+        "title": source_package.get("title") or item.get("title"),
+        "platform_caption": source_package.get("platform_caption") or item.get("caption") or item.get("title"),
+        "caption": source_package.get("platform_caption") or item.get("caption") or item.get("title"),
+        "post_time": source_package.get("post_time") or item.get("post_time"),
+        "duration_ms": source_package.get("duration_ms") or item.get("duration"),
+        "cover_url": source_package.get("cover_url") or item.get("cover_url"),
+        "metrics": metrics or {},
+        "source_package": source_package,
+    }
+
+
+def _rank_author_videos(
+    videos: list[dict[str, Any]],
+    *,
+    like_floor: int,
+    min_duration_seconds: int,
+    max_duration_seconds: int,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for video in videos:
+        metrics = _author_video_metrics(video)
+        candidate = {"source_package": {"public_metrics": metrics}}
+        likes = metric_value(metrics, "digg_count", "likes")
+        score = engagement_score(candidate)
+        duration_ms = _optional_int(video.get("duration_ms"))
+        if duration_ms is not None:
+            duration_seconds = duration_ms / 1000
+            if duration_seconds < min_duration_seconds or duration_seconds > max_duration_seconds:
+                continue
+        if likes < like_floor and score < max(like_floor * 2, 1):
+            continue
+        ranked.append(
+            {
+                "id": video.get("id"),
+                "work_id": video.get("work_id"),
+                "title": video.get("title"),
+                "source_url": video.get("source_url"),
+                "post_time": video.get("post_time"),
+                "duration_ms": duration_ms,
+                "likes": likes,
+                "collects": metric_value(metrics, "collect_count", "favorites", "favorite_count"),
+                "comments": metric_value(metrics, "comment_count", "comments"),
+                "shares": metric_value(metrics, "share_count", "shares"),
+                "score": score,
+                "metrics": metrics,
+            }
+        )
+    return sorted(
+        ranked,
+        key=lambda item: (
+            int(item["score"]),
+            int(item["shares"]),
+            int(item["collects"]),
+            int(item["comments"]),
+            int(item["likes"]),
+        ),
+        reverse=True,
+    )
+
+
+def _author_video_metrics(video: dict[str, Any]) -> dict[str, Any]:
+    metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
+    if metrics:
+        return dict(metrics)
+    source_package = video.get("source_package") if isinstance(video.get("source_package"), dict) else {}
+    package_metrics = source_package.get("public_metrics") if isinstance(source_package.get("public_metrics"), dict) else {}
+    return dict(package_metrics)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def handle_collect_role(args: argparse.Namespace, store: Store) -> int:
@@ -694,8 +987,7 @@ def main(argv: list[str] | None = None) -> int:
             store.init_db()
             return handle_publish(args, store)
         if args.command == "collect":
-            no_db_collect_commands = {"catalog", "mxnzp-call", "douyin-cookie", "douyin-login-cookie"}
-            if getattr(args, "collect_command", None) not in no_db_collect_commands:
+            if _collect_command_needs_db_init(args):
                 store.init_db()
             return handle_collect(args, store)
         if args.command == "material":
@@ -713,6 +1005,14 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 2
+
+
+def _collect_command_needs_db_init(args: argparse.Namespace) -> bool:
+    if getattr(args, "collect_command", None) in {"catalog", "mxnzp-call", "douyin-cookie", "douyin-login-cookie"}:
+        return False
+    if getattr(args, "collect_command", None) == "author" and getattr(args, "author_command", None) in {"list", "videos"}:
+        return False
+    return True
 
 
 def _build_collection_tools(provider: str):

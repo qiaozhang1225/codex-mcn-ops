@@ -143,6 +143,37 @@ def test_mxnzp_video_to_text_normalizes_caption_media_and_author() -> None:
     assert package["audio_url"] == "https://example.com/audio.mp3"
 
 
+def test_mxnzp_user_post_normalizes_as_video_list() -> None:
+    def transport(method, url, body, headers, timeout):
+        return {
+            "code": 1,
+            "data": {
+                "aweme_list": [
+                    {
+                        "aweme_id": "756",
+                        "desc": "八个旺自己的秘密 #女性成长",
+                        "shareUrl": "https://v.douyin.com/test/",
+                        "duration": 257700,
+                        "statistics": {"digg_count": 26144, "comment_count": 123},
+                    }
+                ],
+                "max_cursor": "20",
+                "has_more": 1,
+            },
+        }
+
+    client = MxnzpDouyinProClient(
+        MxnzpConfig(app_id="app", app_secret="secret", douyin_cookie="cookie"),
+        transport=transport,
+    )
+    result = client.call("user_post", params={"userId": "sec_1"})
+
+    assert result["normalized"]["items"][0]["id"] == "756"
+    assert result["normalized"]["source_packages"][0]["hashtags"] == ["女性成长"]
+    assert result["paging"]["has_next"] is True
+    assert result["paging"]["cursor"] == "20"
+
+
 def test_search_prefilter_rejects_out_of_range_duration() -> None:
     candidates = [
         {"source_package": {"title": "太短", "duration_seconds": 12}},

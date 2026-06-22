@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 
 from mcn_ops.cli import main
+from mcn_ops.store import Store
 
 
 def _read_json(capsys):
@@ -142,3 +143,50 @@ def test_cli_collection_material_flow(tmp_path: Path, capsys) -> None:
     creations_payload = _read_json(capsys)
     assert creations_payload["creations"][0]["role_id"] == role_id
     assert creations_payload["creations"][0]["content_package_id"] == promote_payload["content_id"]
+
+
+def test_cli_author_videos_ranks_stored_viral_candidates(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    store = Store(db_path)
+    store.init_db()
+    sec_uid = store.upsert_douyin_author({"sec_uid": "sec_1", "nickname": "娜说智慧"})
+    store.upsert_douyin_author_video(
+        sec_uid,
+        {
+            "work_id": "low",
+            "title": "普通作品",
+            "duration_ms": 60000,
+            "metrics": {"digg_count": 100},
+        },
+    )
+    store.upsert_douyin_author_video(
+        sec_uid,
+        {
+            "work_id": "hot",
+            "title": "爆款作品",
+            "duration_ms": 90000,
+            "metrics": {"digg_count": 3000, "share_count": 2000},
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "author",
+                "videos",
+                "--name",
+                "娜说智慧",
+                "--like-floor",
+                "5000",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = _read_json(capsys)
+    assert payload["viral_count"] == 1
+    assert payload["videos"][0]["work_id"] == "hot"
+    assert payload["videos"][0]["score"] == 11000

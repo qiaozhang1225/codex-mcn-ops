@@ -215,7 +215,7 @@ def normalize_response(method_key: str, raw: dict[str, Any]) -> dict[str, Any]:
             return {"items": [_normalize_rank_item(item) for item in items]}
         return {"items": items}
 
-    if method_key in {"video_search", "user_favorite_list", "user_mix_list", "user_series_list"}:
+    if method_key in {"video_search", "user_post", "user_favorite_list", "user_mix_list", "user_series_list"}:
         items = [_normalize_video_item(item) for item in _items(data)]
         return {"items": items, "source_packages": [_source_package_from_video(item) for item in items]}
     if method_key == "user_search":
