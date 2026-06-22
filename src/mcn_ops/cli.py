@@ -113,6 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
     author_expand.add_argument("--login-cookie", action="store_true")
     author_expand.add_argument("--no-cache", action="store_true")
     author_expand.add_argument("--json", action="store_true")
+    author_materialize = author_sub.add_parser(
+        "materialize",
+        help="Transcribe ranked author videos into collected materials and run material understanding",
+    )
+    author_materialize.add_argument("--sec-uid")
+    author_materialize.add_argument("--name")
+    author_materialize.add_argument("--topic")
+    author_materialize.add_argument("--top", type=int, default=5)
+    author_materialize.add_argument("--like-floor", type=int, default=5000)
+    author_materialize.add_argument("--min-duration-seconds", type=int, default=20)
+    author_materialize.add_argument("--max-duration-seconds", type=int, default=300)
+    author_materialize.add_argument("--provider", default="local-rules")
+    author_materialize.add_argument("--model", default="material-understanding-rules-v2")
+    author_materialize.add_argument("--duplicate-existing", action="store_true")
+    author_materialize.add_argument("--no-cache", action="store_true")
+    author_materialize.add_argument("--json", action="store_true")
 
     role = collect_sub.add_parser("role", help="Manage IP role profiles")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -688,6 +704,134 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
                 print(f"{video['score']}\t{video['likes']}\t{video['work_id']}\t{video['title']}")
         return 0
 
+    if args.author_command == "materialize":
+        author = _resolve_douyin_author(store, sec_uid=args.sec_uid, name=args.name)
+        topic = args.topic or f"{author.get('nickname') or 'Douyin author'} 爆款作品"
+        run_id = store.create_collection_run(
+            task_id=None,
+            role_id=None,
+            topic=topic,
+            target_count=args.top,
+            like_floor=args.like_floor,
+            super_like_threshold=100000,
+            tool_provider="mxnzp_author",
+        )
+        client = MxnzpDouyinProClient(MxnzpConfig.from_env())
+        ranked_videos = _rank_author_videos(
+            store.list_douyin_author_videos(author["sec_uid"]),
+            like_floor=args.like_floor,
+            min_duration_seconds=args.min_duration_seconds,
+            max_duration_seconds=args.max_duration_seconds,
+        )[: args.top]
+        materialized: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            for video in ranked_videos:
+                existing = _find_collected_material_by_work_id(store, str(video.get("work_id") or ""))
+                if existing and not args.duplicate_existing:
+                    understanding = build_material_understanding(existing, provider=args.provider, model=args.model)
+                    validate_understanding(understanding)
+                    store.update_material_understanding(
+                        existing["id"],
+                        understanding=understanding,
+                        provider=args.provider,
+                        model=args.model,
+                    )
+                    store.log_material_understanding(
+                        run_id=existing.get("run_id") or run_id,
+                        material_id=existing["id"],
+                        provider=args.provider,
+                        model=args.model,
+                        status="ok",
+                        output=understanding,
+                    )
+                    materialized.append(
+                        {
+                            "material_id": existing["id"],
+                            "work_id": video.get("work_id"),
+                            "title": video.get("title"),
+                            "status": "existing_understanding_refreshed",
+                        }
+                    )
+                    continue
+                source_url = video.get("source_url")
+                if not source_url:
+                    skipped.append({"work_id": video.get("work_id"), "title": video.get("title"), "reason": "missing_source_url"})
+                    continue
+                extract_result = client.call("video_to_text_v2", body={"url": source_url}, use_cache=not args.no_cache)
+                normalized = extract_result.get("normalized") if isinstance(extract_result.get("normalized"), dict) else {}
+                transcript_text = str(
+                    normalized.get("text")
+                    or (normalized.get("source_package") or {}).get("transcript_text")
+                    or ""
+                ).strip()
+                if not transcript_text:
+                    skipped.append({"work_id": video.get("work_id"), "title": video.get("title"), "reason": "empty_transcript"})
+                    continue
+                source_package = _source_package_from_author_video(author, video)
+                extract_package = normalized.get("source_package") if isinstance(normalized.get("source_package"), dict) else {}
+                for key, value in extract_package.items():
+                    if value in (None, "", []):
+                        continue
+                    if key in {"title", "clean_title", "platform_caption", "caption_text"} and source_package.get(key):
+                        continue
+                    if source_package.get(key) in (None, "", []):
+                        source_package[key] = value
+                source_package["transcript_text"] = transcript_text
+                understanding = build_material_understanding(source_package, provider=args.provider, model=args.model)
+                validate_understanding(understanding)
+                source_package["material_understanding"] = understanding
+                source_package["understanding_status"] = str(understanding.get("status") or "success")
+                material_id = store.insert_collected_material(
+                    run_id=run_id,
+                    source_package=source_package,
+                    material_understanding=understanding,
+                    raw={"author": _author_summary(author), "author_video": video, "video_to_text_v2_result": extract_result},
+                )
+                store.log_material_understanding(
+                    run_id=run_id,
+                    material_id=material_id,
+                    provider=args.provider,
+                    model=args.model,
+                    status="ok",
+                    output=understanding,
+                )
+                materialized.append(
+                    {
+                        "material_id": material_id,
+                        "work_id": video.get("work_id"),
+                        "title": video.get("title"),
+                        "status": "created",
+                    }
+                )
+            status = "completed" if materialized else "empty"
+            store.finish_collection_run(
+                run_id,
+                status=status,
+                summary={"materialized": materialized, "skipped": skipped, "author": _author_summary(author)},
+            )
+        except Exception as exc:
+            store.finish_collection_run(
+                run_id,
+                status="failed",
+                summary={"materialized": materialized, "skipped": skipped, "author": _author_summary(author)},
+                error=str(exc),
+            )
+            raise
+        payload = {
+            "run_id": run_id,
+            "author": _author_summary(author),
+            "materialized": materialized,
+            "skipped": skipped,
+        }
+        if args.json:
+            json_print(payload)
+        else:
+            print(f"run={run_id} materialized={len(materialized)} skipped={len(skipped)}")
+            for item in materialized:
+                print(f"{item['material_id']}\t{item['status']}\t{item['title']}")
+        return 0
+
     raise ValueError(args.author_command)
 
 
@@ -744,6 +888,44 @@ def _author_video_from_normalized_item(item: dict[str, Any], source_package: dic
         "metrics": metrics or {},
         "source_package": source_package,
     }
+
+
+def _source_package_from_author_video(author: dict[str, Any], video: dict[str, Any]) -> dict[str, Any]:
+    metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
+    return {
+        "source_type": "mxnzp_douyin_author",
+        "source_platform": "douyin",
+        "source_link": video.get("source_url"),
+        "title": video.get("title"),
+        "clean_title": video.get("title"),
+        "platform_caption": video.get("title"),
+        "caption_text": video.get("title"),
+        "hashtags": [],
+        "author_name": author.get("nickname"),
+        "author_sec_uid": author.get("sec_uid"),
+        "author_profile_url": author.get("profile_url"),
+        "author_douyin_id": author.get("douyin_id"),
+        "work_id": video.get("work_id"),
+        "post_time": video.get("post_time"),
+        "duration_ms": video.get("duration_ms"),
+        "public_metrics": {
+            "digg_count": metrics.get("digg_count") or video.get("likes"),
+            "collect_count": metrics.get("collect_count") or video.get("collects"),
+            "comment_count": metrics.get("comment_count") or video.get("comments"),
+            "share_count": metrics.get("share_count") or video.get("shares"),
+            "play_count": metrics.get("play_count"),
+        },
+        "collection_notes": ["author_hot_work"],
+    }
+
+
+def _find_collected_material_by_work_id(store: Store, work_id: str) -> dict[str, Any] | None:
+    if not work_id:
+        return None
+    for material in store.list_collected_materials():
+        if str(material.get("work_id") or "") == work_id:
+            return material
+    return None
 
 
 def _rank_author_videos(

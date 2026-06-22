@@ -98,6 +98,32 @@ mcn collect mxnzp-call user_post \
 
 `user_post` requires a valid logged-in `DOUYIN_COOKIE`. Without it, run `mcn collect douyin-login-cookie --write-env --json` first, or add `--login-cookie` to the `mxnzp-call` command. Keep the author profile and source work if login is not available yet, then mark the author as ready for expansion once a valid cookie is configured. Use `sortType=1` first when the goal is to find the author's high-performing material. Continue pagination with the returned cursor until either the target count is reached or no more high-potential videos appear.
 
+The reusable author workflow is:
+
+```bash
+mcn collect author expand \
+  --name "娜说智慧" \
+  --sort-type 1 \
+  --max-pages 0 \
+  --like-floor 5000 \
+  --top 50 \
+  --json
+```
+
+This stores posted works in `douyin_author_videos` and ranks high-potential works by weighted engagement.
+
+To turn ranked author works into formal collected materials, including `video_to_text_v2` transcript extraction and material understanding:
+
+```bash
+mcn collect author materialize \
+  --name "娜说智慧" \
+  --top 5 \
+  --like-floor 5000 \
+  --json
+```
+
+Existing collected materials with the same `work_id` are not duplicated by default; their material understanding is refreshed instead. Use `--duplicate-existing` only when a deliberate duplicate sample is needed.
+
 For author-level爆款 expansion, rank `douyin_author_videos` with the same engagement score used in keyword search:
 
 - likes

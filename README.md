@@ -94,6 +94,8 @@ Each adapter currently supplies package names, content validation, audit steps, 
 - MXNZP credentials: `MXNZP_APP_ID`, `MXNZP_APP_SECRET`, optional `DOUYIN_COOKIE`
 - Douyin anonymous cookie probe: `mcn collect douyin-cookie --json`
 - Douyin logged-in cookie flow: `mcn collect douyin-login-cookie --write-env --json`; author `user_post` can also use `--login-cookie` when `DOUYIN_COOKIE` is missing.
+- Douyin author expansion: `mcn collect author expand --name "娜说智慧" --sort-type 1 --max-pages 0 --json`
+- Douyin author materialization: `mcn collect author materialize --name "娜说智慧" --top 5 --json`
 
 ## Local Inspection
 
