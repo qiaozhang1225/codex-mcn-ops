@@ -9,7 +9,7 @@ from typing import Any
 
 from ..store import Store
 from .tools import ToolExecutionError, ToolRegistry
-from .understanding import build_material_understanding, validate_understanding
+from .understanding import DEFAULT_UNDERSTANDING_MODEL, DEFAULT_UNDERSTANDING_PROVIDER, build_material_understanding, validate_understanding
 
 
 @dataclass
@@ -27,8 +27,8 @@ class CollectionConfig:
     role_id: str | None = None
     role_profile: dict[str, Any] | None = None
     search_keywords: list[str] = field(default_factory=list)
-    understanding_provider: str = "local-rules"
-    understanding_model: str = "material-understanding-rules-v2"
+    understanding_provider: str = DEFAULT_UNDERSTANDING_PROVIDER
+    understanding_model: str = DEFAULT_UNDERSTANDING_MODEL
     reuse_existing: bool = True
 
 

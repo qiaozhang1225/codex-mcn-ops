@@ -58,7 +58,7 @@ mcn collect task report --task-id ctask_xxxxxxxxxxxx
 mcn collect task resume --task-id ctask_xxxxxxxxxxxx
 ```
 
-Reports include saved materials, skipped candidates, discovered source authors, understanding provider/model/status, next recommended keywords/authors, and API call/cache counts.
+Reports include saved materials, skipped candidates, discovered source authors, understanding provider/model/status, next recommended keywords/authors, and API call/cache counts. A collected material is not considered metadata-ready until material understanding has written the promoted columns and `material_understanding_json`.
 
 ## Real MXNZP Collection
 
@@ -218,11 +218,39 @@ It also means the search can stop early when enough good candidates already exis
 
 Public metrics are ranked by a weighted engagement score. Likes matter, but saves and shares carry extra weight because they better indicate reusable material value.
 
+## Material Understanding
+
+Material understanding is a required part of collection, not a later optional cleanup step.
+
+The default provider/model/status is:
+
+- `understanding_provider = codex-agent`
+- `understanding_model = gpt-5.5`
+- `understanding_status = success`
+
+This step creates the reusable metadata for later二创 retrieval and IP matching:
+
+- `summary_text`
+- `hook_text`
+- `core_claim`
+- `content_type`
+- `oral_script_pattern`
+- `audience`
+- `emotion_trigger`
+- `risk_level`
+- `content_structure_json`
+- `key_points_json`
+- `rewrite_angles_json`
+- `usable_quotes_json`
+- `risk_notes_json`
+- `recommended_platforms_json`
+- `next_collection_keywords_json`
+- full `material_understanding_json`
+
+`local-rules/material-understanding-rules-v2` is only an explicit fallback for exceptional cases. It must remain `draft_local_understanding` and should be treated as not fully metadata-ready.
+
 ## Boundaries
 
-- Automated CLI collection can create a `local-rules/material-understanding-rules-v2` draft to keep the workflow moving.
-- Final material understanding is only the result marked `codex-agent/gpt-5-codex/success`.
-- Task reports must distinguish final Codex understanding from local draft understanding.
 - SQLite owns audit and state.
 - MXNZP owns data acquisition only.
 - No DeepSeek client, no React/FastAPI center, no confirmation-card system.

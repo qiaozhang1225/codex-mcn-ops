@@ -108,7 +108,7 @@ V1 adapters are conservative. They validate and capture, then mark UI-specific a
 
 ## Material Collection
 
-Collection is CLI-first and has no server process. MXNZP is used only for Douyin data acquisition. The CLI currently writes a local-rules material understanding draft; Codex/GPT can later overwrite or deepen that draft through the same promoted columns and JSON payload.
+Collection is CLI-first and has no server process. MXNZP is used only for Douyin data acquisition. Every collection path should run material understanding by default because the promoted understanding columns and `material_understanding_json` are the searchable metadata used later for IP matching and rewrite selection.
 
 The high-level task layer is `mcn collect task ...`:
 
@@ -118,6 +118,8 @@ The high-level task layer is `mcn collect task ...`:
 - `show/report/resume`: reads `collection_tasks` and linked `collection_runs` to summarize saved materials, skipped candidates, source authors, understanding status, next recommendations, API calls, and cache hits.
 
 Low-level `collect run`, `collect author expand`, and `collect author materialize` remain stable execution primitives. High-level tasks reuse them conceptually through a workflow module and link work with `collection_runs.task_id`.
+
+The default understanding identity is `codex-agent/gpt-5.5/success`. `local-rules/material-understanding-rules-v2` is an explicit fallback only, remains `draft_local_understanding`, and should not be treated as fully metadata-ready.
 
 The global default collection policy is:
 
@@ -139,4 +141,4 @@ The CLI exposes duration overrides with `mcn collect run --min-duration-seconds`
 
 The fixed material understanding JSON fields are `topic_summary`, `hook`, `core_claim`, `content_structure`, `key_points`, `content_type`, `oral_script_pattern`, `audience`, `emotion_trigger`, `risk_level`, `rewrite_angles`, `risk_notes`, `usable_quotes`, `recommended_platforms`, `role_fit_notes`, and `next_collection_keywords`.
 
-`mcn collect understand` writes the local-rules material understanding draft and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. High-level task reports treat `local-rules/material-understanding-rules-v2` as draft understanding, not final Codex understanding. Final deep understanding should be stored as `codex-agent/gpt-5-codex/success`. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.
+`mcn collect understand` writes or refreshes material understanding and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. High-level task reports expose `metadata_ready_count`, `draft_local_count`, and pending understanding counts so collection output can be audited before二创. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.

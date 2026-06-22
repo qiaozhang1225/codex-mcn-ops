@@ -17,13 +17,20 @@ from .runner import (
     metric_value,
     request_fingerprint,
 )
-from .understanding import build_material_understanding, validate_understanding
+from .understanding import (
+    DEFAULT_UNDERSTANDING_MODEL,
+    DEFAULT_UNDERSTANDING_PROVIDER,
+    RULES_UNDERSTANDING_MODEL,
+    RULES_UNDERSTANDING_PROVIDER,
+    build_material_understanding,
+    validate_understanding,
+)
 
 
-LOCAL_UNDERSTANDING_PROVIDER = "local-rules"
-LOCAL_UNDERSTANDING_MODEL = "material-understanding-rules-v2"
-TARGET_UNDERSTANDING_PROVIDER = "codex-agent"
-TARGET_UNDERSTANDING_MODEL = "gpt-5-codex"
+LOCAL_UNDERSTANDING_PROVIDER = RULES_UNDERSTANDING_PROVIDER
+LOCAL_UNDERSTANDING_MODEL = RULES_UNDERSTANDING_MODEL
+TARGET_UNDERSTANDING_PROVIDER = DEFAULT_UNDERSTANDING_PROVIDER
+TARGET_UNDERSTANDING_MODEL = DEFAULT_UNDERSTANDING_MODEL
 
 
 @dataclass
@@ -51,6 +58,8 @@ class CollectionTaskOrchestrator:
         keywords: list[str] | None = None,
         related_keywords: list[str] | None = None,
         role_id: str | None = None,
+        understanding_provider: str = TARGET_UNDERSTANDING_PROVIDER,
+        understanding_model: str = TARGET_UNDERSTANDING_MODEL,
         task_id: str | None = None,
     ) -> dict[str, Any]:
         policy = policy or CollectionPolicy()
@@ -70,7 +79,7 @@ class CollectionTaskOrchestrator:
             "keywords": _unique_strings([topic, *(keywords or [])]),
             "related_keywords": _unique_strings(related_keywords or []),
             "policy": asdict(policy),
-            "target_understanding": _target_understanding(),
+            "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
         }
         if task_id is None:
             task_id = self.store.create_collection_task(
@@ -107,8 +116,8 @@ class CollectionTaskOrchestrator:
                         role_id=role_id,
                         role_profile=role_profile,
                         search_keywords=[keyword],
-                        understanding_provider=LOCAL_UNDERSTANDING_PROVIDER,
-                        understanding_model=LOCAL_UNDERSTANDING_MODEL,
+                        understanding_provider=understanding_provider,
+                        understanding_model=understanding_model,
                     )
                 )
                 exhausted_keywords.append(keyword)
@@ -157,6 +166,8 @@ class CollectionTaskOrchestrator:
         login_cookie: bool = False,
         no_cache: bool = False,
         refresh_existing_understanding: bool = False,
+        understanding_provider: str = TARGET_UNDERSTANDING_PROVIDER,
+        understanding_model: str = TARGET_UNDERSTANDING_MODEL,
         task_id: str | None = None,
         finish_task: bool = True,
     ) -> dict[str, Any]:
@@ -173,7 +184,7 @@ class CollectionTaskOrchestrator:
             "sort_type": sort_type,
             "skip_expand": skip_expand,
             "policy": asdict(policy),
-            "target_understanding": _target_understanding(),
+            "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
         }
         if task_id is None:
             task_id = self.store.create_collection_task(
@@ -230,6 +241,8 @@ class CollectionTaskOrchestrator:
                 client=client,
                 use_cache=not no_cache,
                 refresh_existing_understanding=refresh_existing_understanding,
+                understanding_provider=understanding_provider,
+                understanding_model=understanding_model,
             )
             run_status = "completed" if materialized else "empty"
             self.store.finish_collection_run(
@@ -286,6 +299,8 @@ class CollectionTaskOrchestrator:
         login_cookie: bool = False,
         no_cache: bool = False,
         dry_run: bool = False,
+        understanding_provider: str = TARGET_UNDERSTANDING_PROVIDER,
+        understanding_model: str = TARGET_UNDERSTANDING_MODEL,
         policy: CollectionPolicy | None = None,
         task_id: str | None = None,
     ) -> dict[str, Any]:
@@ -304,7 +319,7 @@ class CollectionTaskOrchestrator:
             "dry_run": dry_run,
             "authors": discovered,
             "policy": asdict(policy),
-            "target_understanding": _target_understanding(),
+            "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
         }
         if task_id is None:
             task_id = self.store.create_collection_task(
@@ -335,6 +350,8 @@ class CollectionTaskOrchestrator:
                     skip_expand=skip_expand,
                     login_cookie=login_cookie,
                     no_cache=no_cache,
+                    understanding_provider=understanding_provider,
+                    understanding_model=understanding_model,
                     task_id=task_id,
                     finish_task=False,
                 )
@@ -382,6 +399,8 @@ class CollectionTaskOrchestrator:
                 keywords=list(parsed.get("keywords") or []),
                 related_keywords=list(parsed.get("related_keywords") or []),
                 role_id=parsed.get("role_id"),
+                understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
+                understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
             )
         if entrypoint == "author":
@@ -394,6 +413,8 @@ class CollectionTaskOrchestrator:
                 max_pages=int(parsed.get("max_pages") or 0),
                 sort_type=int(parsed.get("sort_type") or 1),
                 skip_expand=bool(parsed.get("skip_expand")),
+                understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
+                understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
             )
         if entrypoint == "discovered_authors":
@@ -406,6 +427,8 @@ class CollectionTaskOrchestrator:
                 sort_type=int(parsed.get("sort_type") or 1),
                 skip_expand=bool(parsed.get("skip_expand")),
                 dry_run=bool(parsed.get("dry_run")),
+                understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
+                understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 policy=policy,
                 task_id=task_id,
             )
@@ -665,6 +688,8 @@ class CollectionTaskOrchestrator:
         client: MxnzpDouyinProClient | None,
         use_cache: bool,
         refresh_existing_understanding: bool,
+        understanding_provider: str,
+        understanding_model: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         ranked = _rank_author_videos(
             self.store.list_douyin_author_videos(author["sec_uid"]),
@@ -682,21 +707,21 @@ class CollectionTaskOrchestrator:
                 if refresh_existing_understanding:
                     understanding = build_material_understanding(
                         existing,
-                        provider=LOCAL_UNDERSTANDING_PROVIDER,
-                        model=LOCAL_UNDERSTANDING_MODEL,
+                        provider=understanding_provider,
+                        model=understanding_model,
                     )
                     validate_understanding(understanding)
                     self.store.update_material_understanding(
                         existing["id"],
                         understanding=understanding,
-                        provider=LOCAL_UNDERSTANDING_PROVIDER,
-                        model=LOCAL_UNDERSTANDING_MODEL,
+                        provider=understanding_provider,
+                        model=understanding_model,
                     )
                     self.store.log_material_understanding(
                         run_id=existing.get("run_id") or run_id,
                         material_id=existing["id"],
-                        provider=LOCAL_UNDERSTANDING_PROVIDER,
-                        model=LOCAL_UNDERSTANDING_MODEL,
+                        provider=understanding_provider,
+                        model=understanding_model,
                         status="ok",
                         output=understanding,
                     )
@@ -734,12 +759,12 @@ class CollectionTaskOrchestrator:
             source_package["transcript_text"] = transcript_text
             understanding = build_material_understanding(
                 source_package,
-                provider=LOCAL_UNDERSTANDING_PROVIDER,
-                model=LOCAL_UNDERSTANDING_MODEL,
+                provider=understanding_provider,
+                model=understanding_model,
             )
             validate_understanding(understanding)
             source_package["material_understanding"] = understanding
-            source_package["understanding_status"] = str(understanding.get("status") or "draft_local_understanding")
+            source_package["understanding_status"] = str(understanding.get("status") or "success")
             material_id = self.store.insert_collected_material(
                 run_id=run_id,
                 source_package=source_package,
@@ -749,8 +774,8 @@ class CollectionTaskOrchestrator:
             self.store.log_material_understanding(
                 run_id=run_id,
                 material_id=material_id,
-                provider=LOCAL_UNDERSTANDING_PROVIDER,
-                model=LOCAL_UNDERSTANDING_MODEL,
+                provider=understanding_provider,
+                model=understanding_model,
                 status="ok",
                 output=understanding,
             )
@@ -829,7 +854,7 @@ def format_task_show(report: dict[str, Any]) -> str:
             f"scope={task['target_scope']} topic={task.get('topic') or ''}",
             f"saved={report['saved_count']} created={report['created_material_count']} reused={report['existing_reused_count']} remaining={report['remaining_count']}",
             f"runs={len(report['runs'])} skipped={len(report['skipped_candidates'])} api_calls={report['api_call_summary']['total_calls']} cache_hits={report['api_call_summary']['cache_hits']}",
-            f"understanding final={understanding['final_codex_count']} draft={understanding['draft_local_count']} pending_codex={understanding['pending_codex_understanding_count']}",
+            f"understanding metadata_ready={understanding['metadata_ready_count']} codex_default={understanding['final_codex_count']} rules_draft={understanding['draft_local_count']} pending_material={understanding['pending_material_understanding_count']}",
         ]
     )
 
@@ -854,13 +879,14 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
     understanding = report["understanding_summary"]
     lines.extend(
         [
+            f"- metadata_ready_count: {understanding['metadata_ready_count']}",
             f"- final_codex_count: {understanding['final_codex_count']}",
             f"- draft_local_count: {understanding['draft_local_count']}",
-            f"- pending_codex_understanding_count: {understanding['pending_codex_understanding_count']}",
+            f"- pending_material_understanding_count: {understanding['pending_material_understanding_count']}",
         ]
     )
     if understanding["pending_codex_understanding_count"]:
-        lines.append("- note: 有素材仍是本地规则草稿，待 Codex 深度理解。")
+        lines.append("- note: 有素材缺少正式 material understanding，需要补齐后再作为二创检索 metadata 使用。")
     lines.extend(["", "## Saved Materials", ""])
     for material in report["saved_materials"]:
         lines.append(
@@ -1049,8 +1075,12 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _target_understanding() -> dict[str, str]:
-    return {"provider": TARGET_UNDERSTANDING_PROVIDER, "model": TARGET_UNDERSTANDING_MODEL, "status": "success"}
+def _target_understanding(
+    *,
+    provider: str = TARGET_UNDERSTANDING_PROVIDER,
+    model: str = TARGET_UNDERSTANDING_MODEL,
+) -> dict[str, str]:
+    return {"provider": provider, "model": model, "status": "success"}
 
 
 def _target_count(task: dict[str, Any]) -> int:
@@ -1068,19 +1098,24 @@ def _task_saved_count(report: dict[str, Any]) -> int:
 def _understanding_summary(materials: list[dict[str, Any]]) -> dict[str, Any]:
     final_codex_count = 0
     draft_local_count = 0
+    metadata_ready_count = 0
     for material in materials:
         provider = str(material.get("understanding_provider") or "")
         model = str(material.get("understanding_model") or "")
         status = str(material.get("understanding_status") or "")
         if provider == TARGET_UNDERSTANDING_PROVIDER and model == TARGET_UNDERSTANDING_MODEL and status == "success":
             final_codex_count += 1
-        elif provider == LOCAL_UNDERSTANDING_PROVIDER or status == "draft_local_understanding":
+        if provider != LOCAL_UNDERSTANDING_PROVIDER and status == "success":
+            metadata_ready_count += 1
+        if provider == LOCAL_UNDERSTANDING_PROVIDER or status == "draft_local_understanding":
             draft_local_count += 1
     return {
         "total": len(materials),
+        "metadata_ready_count": metadata_ready_count,
         "final_codex_count": final_codex_count,
         "draft_local_count": draft_local_count,
-        "pending_codex_understanding_count": max(len(materials) - final_codex_count, 0),
+        "pending_material_understanding_count": max(len(materials) - metadata_ready_count, 0),
+        "pending_codex_understanding_count": max(len(materials) - metadata_ready_count, 0),
     }
 
 

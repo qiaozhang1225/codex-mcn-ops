@@ -14,7 +14,7 @@ from mcn_ops.collection.runner import (
     filter_candidates_for_duration,
     should_continue_search_pages,
 )
-from mcn_ops.collection.understanding import build_material_understanding
+from mcn_ops.collection.understanding import RULES_UNDERSTANDING_MODEL, RULES_UNDERSTANDING_PROVIDER, build_material_understanding
 from mcn_ops.store import Store
 
 
@@ -225,13 +225,13 @@ def test_mock_collection_run_writes_materials(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     assert len(materials) == 2
-    assert materials[0]["understanding_provider"] == "local-rules"
-    assert materials[0]["understanding_model"] == "material-understanding-rules-v2"
-    assert materials[0]["understanding_status"] == "draft_local_understanding"
+    assert materials[0]["understanding_provider"] == "codex-agent"
+    assert materials[0]["understanding_model"] == "gpt-5.5"
+    assert materials[0]["understanding_status"] == "success"
     assert report["saved_count"] == 2
 
 
-def test_local_understanding_generates_summary_not_opening_clip() -> None:
+def test_codex_understanding_generates_summary_not_opening_clip() -> None:
     understanding = build_material_understanding(
         {
             "clean_title": "财运来了有什么征兆？",
@@ -244,4 +244,23 @@ def test_local_understanding_generates_summary_not_opening_clip() -> None:
     assert understanding["topic_summary"] != "财运来了有什么特征？"
     assert "围绕「财运征兆」展开" in understanding["topic_summary"]
     assert understanding["audience"] == "对财运转运、民俗玄学和自我状态改善话题感兴趣的人群"
+    assert understanding["understanding_provider"] == "codex-agent"
+    assert understanding["understanding_model"] == "gpt-5.5"
+    assert understanding["status"] == "success"
+
+
+def test_rules_understanding_is_explicit_fallback_draft() -> None:
+    understanding = build_material_understanding(
+        {
+            "clean_title": "财运来了有什么征兆？",
+            "platform_caption": "财运来了有什么征兆？ #财运 #玄学",
+            "transcript_text": "财运来了有什么特征？第一，你会突然遇到贵人。第二，做事会越来越顺。",
+            "hashtags": ["财运", "玄学"],
+        },
+        provider=RULES_UNDERSTANDING_PROVIDER,
+        model=RULES_UNDERSTANDING_MODEL,
+    )
+
+    assert understanding["understanding_provider"] == "local-rules"
+    assert understanding["understanding_model"] == "material-understanding-rules-v2"
     assert understanding["status"] == "draft_local_understanding"

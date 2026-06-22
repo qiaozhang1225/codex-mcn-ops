@@ -20,7 +20,7 @@ The product is not a web app. The first usable version is a repo of executable w
 - No AiToEarn API, MCP, or Electron private-interface route.
 - No platform private web API adapter in V1.
 - No autonomous publish without an explicit live command.
-- No DeepSeek client or provider-specific understanding table; material understanding starts as a local-rules draft and can be deepened by Codex/GPT through the same workflow.
+- No DeepSeek client or provider-specific understanding table; material understanding is part of the default collection workflow and is stored as `codex-agent/gpt-5.5/success` metadata unless an explicit rules fallback is requested.
 
 ## Core Workflows
 
@@ -49,4 +49,4 @@ The prefilter is not the final content judgment. It exists to reduce wasted API 
 
 V1 is successful when one real content package can be prepared, pushed to a connected Android phone, driven to the final publish confirmation screen for Douyin/Xiaohongshu/WeChat Channels/Kuaishou, captured as proof, and recorded back to SQLite and Feishu payloads.
 
-For material collection, V1 is successful when one command can search Douyin through MXNZP, store candidates and skipped reasons, extract transcript text, write a material understanding draft, match the material to IP roles, and promote a reviewed material into a `content_packages` draft.
+For material collection, V1 is successful when one command can search Douyin through MXNZP, store candidates and skipped reasons, extract transcript text, write material understanding metadata, match the material to IP roles, and promote a reviewed material into a `content_packages` draft.

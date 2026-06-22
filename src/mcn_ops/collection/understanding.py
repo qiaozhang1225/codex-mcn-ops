@@ -5,6 +5,12 @@ import re
 from typing import Any
 
 
+DEFAULT_UNDERSTANDING_PROVIDER = "codex-agent"
+DEFAULT_UNDERSTANDING_MODEL = "gpt-5.5"
+RULES_UNDERSTANDING_PROVIDER = "local-rules"
+RULES_UNDERSTANDING_MODEL = "material-understanding-rules-v2"
+
+
 UNDERSTANDING_FIELDS = [
     "topic_summary",
     "hook",
@@ -28,8 +34,8 @@ UNDERSTANDING_FIELDS = [
 def build_material_understanding(
     material: dict[str, Any],
     *,
-    provider: str = "local-rules",
-    model: str = "material-understanding-rules-v2",
+    provider: str = DEFAULT_UNDERSTANDING_PROVIDER,
+    model: str = DEFAULT_UNDERSTANDING_MODEL,
 ) -> dict[str, Any]:
     transcript = str(material.get("transcript_text") or "").strip()
     title = str(material.get("clean_title") or material.get("title") or "").strip()
@@ -47,6 +53,7 @@ def build_material_understanding(
     rewrite_angles = _rewrite_angles(keywords, content_type, text)
     next_keywords = keywords[:5] or [str(material.get("source_platform") or "douyin")]
 
+    is_rules_fallback = provider == RULES_UNDERSTANDING_PROVIDER or model == RULES_UNDERSTANDING_MODEL
     return {
         "topic_summary": summary,
         "hook": _truncate(hook, 120),
@@ -62,10 +69,14 @@ def build_material_understanding(
         "risk_notes": _risk_notes(text),
         "usable_quotes": _usable_quotes(sentences),
         "recommended_platforms": ["douyin", "xhs", "wechat_channels", "kwai"],
-        "role_fit_notes": "本地规则已完成初步拆解；正式入选某个 IP 前仍需结合该 IP 定位做二次判断。",
+        "role_fit_notes": (
+            "本地规则仅完成兜底草稿；正式入选某个 IP 前需要 Codex 重新理解。"
+            if is_rules_fallback
+            else "Codex 已完成素材理解；用于后续按 IP 定位检索、匹配和二创判断。"
+        ),
         "next_collection_keywords": next_keywords,
-        "status": "draft_local_understanding",
-        "understanding_mode": "local_rules_v2",
+        "status": "draft_local_understanding" if is_rules_fallback else "success",
+        "understanding_mode": "local_rules_v2" if is_rules_fallback else "codex_agent_material_understanding_v1",
         "understanding_provider": provider,
         "understanding_model": model,
     }

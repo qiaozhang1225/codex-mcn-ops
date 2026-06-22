@@ -145,7 +145,7 @@ def test_cli_collection_material_flow(tmp_path: Path, capsys) -> None:
     assert creations_payload["creations"][0]["content_package_id"] == promote_payload["content_id"]
 
 
-def test_cli_collect_task_keyword_reaches_target_and_reports_draft_understanding(tmp_path: Path, capsys) -> None:
+def test_cli_collect_task_keyword_reaches_target_and_reports_codex_understanding(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "mcn.sqlite"
 
     assert main(["--db-path", str(db_path), "init-db"]) == 0
@@ -174,14 +174,16 @@ def test_cli_collect_task_keyword_reaches_target_and_reports_draft_understanding
 
     assert payload["task"]["target_scope"] == "keyword"
     assert payload["saved_count"] == 3
-    assert payload["understanding_summary"]["draft_local_count"] == 3
-    assert payload["understanding_summary"]["pending_codex_understanding_count"] == 3
+    assert payload["understanding_summary"]["metadata_ready_count"] == 3
+    assert payload["understanding_summary"]["final_codex_count"] == 3
+    assert payload["understanding_summary"]["draft_local_count"] == 0
+    assert payload["understanding_summary"]["pending_material_understanding_count"] == 0
     assert payload["api_call_summary"]["total_calls"] >= 1
 
     assert main(["--db-path", str(db_path), "collect", "task", "report", "--task-id", task_id]) == 0
     report_text = capsys.readouterr().out
     assert "Collection Task Report" in report_text
-    assert "待 Codex 深度理解" in report_text
+    assert "metadata_ready_count: 3" in report_text
 
 
 def test_cli_author_videos_ranks_stored_viral_candidates(tmp_path: Path, capsys) -> None:
@@ -262,7 +264,7 @@ def test_cli_collect_task_author_preserves_existing_codex_understanding(tmp_path
             "core_claim": "先稳住能量。",
             "content_type": "方法清单",
             "understanding_provider": "codex-agent",
-            "understanding_model": "gpt-5-codex",
+            "understanding_model": "gpt-5.5",
             "status": "success",
         },
         raw={},
@@ -304,8 +306,9 @@ def test_cli_collect_task_author_preserves_existing_codex_understanding(tmp_path
     assert payload["saved_count"] == 1
     assert payload["existing_reused_count"] == 1
     assert payload["understanding_summary"]["final_codex_count"] == 1
+    assert payload["understanding_summary"]["metadata_ready_count"] == 1
     assert refreshed["understanding_provider"] == "codex-agent"
-    assert refreshed["understanding_model"] == "gpt-5-codex"
+    assert refreshed["understanding_model"] == "gpt-5.5"
     assert refreshed["summary_text"] == "Codex 深度摘要"
 
 
@@ -384,7 +387,7 @@ def test_cli_author_materialize_preserves_existing_understanding(tmp_path: Path,
             "core_claim": "先稳住能量。",
             "content_type": "方法清单",
             "understanding_provider": "codex-agent",
-            "understanding_model": "gpt-5-codex",
+            "understanding_model": "gpt-5.5",
             "status": "success",
         },
         raw={},
@@ -423,5 +426,5 @@ def test_cli_author_materialize_preserves_existing_understanding(tmp_path: Path,
     refreshed = Store(db_path).get_collected_material(material_id)
     assert payload["materialized"][0]["status"] == "existing_preserved"
     assert refreshed["understanding_provider"] == "codex-agent"
-    assert refreshed["understanding_model"] == "gpt-5-codex"
+    assert refreshed["understanding_model"] == "gpt-5.5"
     assert refreshed["summary_text"] == "Codex 深度摘要"

@@ -235,8 +235,8 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     author_identity_confidence TEXT,
     metrics_json TEXT NOT NULL DEFAULT '{}',
     material_understanding_json TEXT NOT NULL DEFAULT '{}',
-    understanding_provider TEXT NOT NULL DEFAULT 'local-rules',
-    understanding_model TEXT NOT NULL DEFAULT 'material-understanding-rules-v2',
+    understanding_provider TEXT NOT NULL DEFAULT 'codex-agent',
+    understanding_model TEXT NOT NULL DEFAULT 'gpt-5.5',
     sample_pool_clues_json TEXT NOT NULL DEFAULT '[]',
     understanding_status TEXT NOT NULL DEFAULT 'pending',
     source_package_json TEXT NOT NULL DEFAULT '{}',
@@ -1020,8 +1020,8 @@ class Store:
         material_id = new_id("mat")
         timestamp = now_iso()
         metrics = source_package.get("public_metrics") or {}
-        provider = str(material_understanding.get("understanding_provider") or "local-rules")
-        model = str(material_understanding.get("understanding_model") or "material-understanding-rules-v2")
+        provider = str(material_understanding.get("understanding_provider") or "codex-agent")
+        model = str(material_understanding.get("understanding_model") or "gpt-5.5")
         promoted = _material_promoted_values(source_package, material_understanding, raw)
         with self.connect() as conn:
             conn.execute(

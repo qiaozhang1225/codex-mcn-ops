@@ -17,7 +17,13 @@ from .collection.mxnzp_client import MxnzpConfig, MxnzpDouyinProClient
 from .collection.mxnzp_tools import build_mxnzp_douyin_registry
 from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
 from .collection.tools import parse_json_object
-from .collection.understanding import build_material_understanding, evaluate_role_match, validate_understanding
+from .collection.understanding import (
+    DEFAULT_UNDERSTANDING_MODEL,
+    DEFAULT_UNDERSTANDING_PROVIDER,
+    build_material_understanding,
+    evaluate_role_match,
+    validate_understanding,
+)
 from .collection.workflows import (
     CollectionPolicy,
     CollectionTaskOrchestrator,
@@ -108,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
     task_keyword.add_argument("--max-search-pages", type=int, default=3)
     task_keyword.add_argument("--page-size", type=int, default=10)
+    task_keyword.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    task_keyword.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_keyword.add_argument("--json", action="store_true")
 
     task_author = task_sub.add_parser("author", help="Collect viral materials from one source author")
@@ -122,6 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_author.add_argument("--skip-expand", action="store_true")
     task_author.add_argument("--login-cookie", action="store_true")
     task_author.add_argument("--refresh-existing-understanding", action="store_true")
+    task_author.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    task_author.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_author.add_argument("--no-cache", action="store_true")
     task_author.add_argument("--json", action="store_true")
 
@@ -138,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_discover.add_argument("--login-cookie", action="store_true")
     task_discover.add_argument("--no-cache", action="store_true")
     task_discover.add_argument("--dry-run", action="store_true")
+    task_discover.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    task_discover.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_discover.add_argument("--json", action="store_true")
 
     task_show = task_sub.add_parser("show", help="Show a collection task summary")
@@ -187,8 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
     author_materialize.add_argument("--like-floor", type=int, default=5000)
     author_materialize.add_argument("--min-duration-seconds", type=int, default=20)
     author_materialize.add_argument("--max-duration-seconds", type=int, default=300)
-    author_materialize.add_argument("--provider", default="local-rules")
-    author_materialize.add_argument("--model", default="material-understanding-rules-v2")
+    author_materialize.add_argument("--provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    author_materialize.add_argument("--model", default=DEFAULT_UNDERSTANDING_MODEL)
     author_materialize.add_argument("--duplicate-existing", action="store_true")
     author_materialize.add_argument("--refresh-existing-understanding", action="store_true")
     author_materialize.add_argument("--no-cache", action="store_true")
@@ -233,6 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_run.add_argument("--page-size", type=int, default=5)
     collect_run.add_argument("--role-id")
     collect_run.add_argument("--search-keyword", action="append", default=[])
+    collect_run.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    collect_run.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     collect_run.add_argument("--json", action="store_true")
 
     understand = collect_sub.add_parser("understand", help="Write Codex material understanding JSON")
@@ -240,8 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     understand.add_argument("--material-id")
     understand.add_argument("--role-id", action="append", default=[])
     understand.add_argument("--skip-role-match", action="store_true")
-    understand.add_argument("--provider", default="local-rules")
-    understand.add_argument("--model", default="material-understanding-rules-v2")
+    understand.add_argument("--provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
+    understand.add_argument("--model", default=DEFAULT_UNDERSTANDING_MODEL)
     understand.add_argument("--json", action="store_true")
 
     match = collect_sub.add_parser("match", help="Match materials against IP roles")
@@ -558,6 +572,8 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
                 role_id=args.role_id,
                 role_profile=role_profile,
                 search_keywords=args.search_keyword,
+                understanding_provider=args.understanding_provider,
+                understanding_model=args.understanding_model,
             )
         )
         if args.json:
@@ -650,6 +666,8 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             keywords=args.keyword,
             related_keywords=args.related_keyword,
             role_id=role_id,
+            understanding_provider=args.understanding_provider,
+            understanding_model=args.understanding_model,
         )
         if args.json:
             json_print(report)
@@ -670,6 +688,8 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             login_cookie=args.login_cookie,
             no_cache=args.no_cache,
             refresh_existing_understanding=args.refresh_existing_understanding,
+            understanding_provider=args.understanding_provider,
+            understanding_model=args.understanding_model,
         )
         if args.json:
             json_print(report)
@@ -689,6 +709,8 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             login_cookie=args.login_cookie,
             no_cache=args.no_cache,
             dry_run=args.dry_run,
+            understanding_provider=args.understanding_provider,
+            understanding_model=args.understanding_model,
             policy=_collection_policy_from_args(args),
         )
         if args.json:

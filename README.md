@@ -50,7 +50,7 @@ mcn collect task report --task-id ctask_xxxxxxxxxxxx
 mcn collect task resume --task-id ctask_xxxxxxxxxxxx
 ```
 
-The task layer creates `collection_tasks`, links all search/materialization runs through `collection_runs.task_id`, preserves existing materials by `work_id/source_url/title+author`, and reports draft local understanding separately from final Codex understanding.
+The task layer creates `collection_tasks`, links all search/materialization runs through `collection_runs.task_id`, preserves existing materials by `work_id/source_url/title+author`, and runs material understanding by default. Material understanding is treated as the searchable metadata layer for later IP matching and rewrite work.
 
 For real Douyin material collection, set `MXNZP_APP_ID` and `MXNZP_APP_SECRET` in `.env.local`, start with `--target-count 1`, and review the resulting material before expanding collection.
 
@@ -132,7 +132,7 @@ data/mcn_ops.sqlite
 
 - Real publishing is opt-in.
 - `stop_before_submit` is the default.
-- DeepSeek is intentionally not used. Automated CLI collection writes `local-rules/material-understanding-rules-v2` as a draft only; final deep understanding must be explicitly marked `codex-agent/gpt-5-codex/success`.
+- DeepSeek is intentionally not used. Collection defaults to `codex-agent/gpt-5.5/success` material understanding. `local-rules/material-understanding-rules-v2` is only an explicit fallback draft for exceptional cases.
 - ADB screenshots/UI dumps are stored for every major step.
 - Platform accounts are assumed to be logged in on the Android phone.
 - If UI XML is insufficient, hand off to Codex Computer Use for the visible phone/scrcpy session rather than using private platform APIs.
