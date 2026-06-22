@@ -190,3 +190,77 @@ def test_cli_author_videos_ranks_stored_viral_candidates(tmp_path: Path, capsys)
     assert payload["viral_count"] == 1
     assert payload["videos"][0]["work_id"] == "hot"
     assert payload["videos"][0]["score"] == 11000
+
+
+def test_cli_author_materialize_preserves_existing_understanding(tmp_path: Path, capsys, monkeypatch) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    store = Store(db_path)
+    store.init_db()
+    sec_uid = store.upsert_douyin_author({"sec_uid": "sec_1", "nickname": "娜说智慧"})
+    run_id = store.create_collection_run(
+        task_id=None,
+        role_id=None,
+        topic="原采集",
+        target_count=1,
+        like_floor=1,
+        super_like_threshold=100,
+        tool_provider="mxnzp",
+    )
+    material_id = store.insert_collected_material(
+        run_id=run_id,
+        source_package={
+            "source_link": "https://example.com/video",
+            "title": "八个旺自己的秘密",
+            "transcript_text": "旺自己要先稳住能量。",
+            "source_platform": "douyin",
+            "work_id": "756",
+            "author_name": "娜说智慧",
+            "author_sec_uid": sec_uid,
+        },
+        material_understanding={
+            "topic_summary": "Codex 深度摘要",
+            "hook": "八个旺自己的秘密",
+            "core_claim": "先稳住能量。",
+            "content_type": "方法清单",
+            "understanding_provider": "codex-agent",
+            "understanding_model": "gpt-5-codex",
+            "status": "success",
+        },
+        raw={},
+    )
+    store.upsert_douyin_author_video(
+        sec_uid,
+        {
+            "work_id": "756",
+            "title": "八个旺自己的秘密",
+            "source_url": "https://example.com/video",
+            "duration_ms": 60000,
+            "metrics": {"digg_count": 10000},
+        },
+    )
+    monkeypatch.delenv("MXNZP_APP_ID", raising=False)
+    monkeypatch.delenv("MXNZP_APP_SECRET", raising=False)
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "author",
+                "materialize",
+                "--name",
+                "娜说智慧",
+                "--top",
+                "1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = _read_json(capsys)
+    refreshed = Store(db_path).get_collected_material(material_id)
+    assert payload["materialized"][0]["status"] == "existing_preserved"
+    assert refreshed["understanding_provider"] == "codex-agent"
+    assert refreshed["understanding_model"] == "gpt-5-codex"
+    assert refreshed["summary_text"] == "Codex 深度摘要"

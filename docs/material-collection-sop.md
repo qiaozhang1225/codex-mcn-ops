@@ -122,7 +122,7 @@ mcn collect author materialize \
   --json
 ```
 
-Existing collected materials with the same `work_id` are not duplicated by default; their material understanding is refreshed instead. Use `--duplicate-existing` only when a deliberate duplicate sample is needed.
+Existing collected materials with the same `work_id` are protected by default. `materialize` records them as `existing_preserved` and does not overwrite `material_understanding_json`, promoted understanding columns, `understanding_provider`, or `understanding_model`. Use `--duplicate-existing` only when a deliberate duplicate sample is needed. Use `--refresh-existing-understanding` only when intentionally replacing the previous understanding with the current configured provider/model.
 
 For author-level爆款 expansion, rank `douyin_author_videos` with the same engagement score used in keyword search:
 

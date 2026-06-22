@@ -127,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     author_materialize.add_argument("--provider", default="local-rules")
     author_materialize.add_argument("--model", default="material-understanding-rules-v2")
     author_materialize.add_argument("--duplicate-existing", action="store_true")
+    author_materialize.add_argument("--refresh-existing-understanding", action="store_true")
     author_materialize.add_argument("--no-cache", action="store_true")
     author_materialize.add_argument("--json", action="store_true")
 
@@ -716,7 +717,7 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
             super_like_threshold=100000,
             tool_provider="mxnzp_author",
         )
-        client = MxnzpDouyinProClient(MxnzpConfig.from_env())
+        client: MxnzpDouyinProClient | None = None
         ranked_videos = _rank_author_videos(
             store.list_douyin_author_videos(author["sec_uid"]),
             like_floor=args.like_floor,
@@ -729,28 +730,31 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
             for video in ranked_videos:
                 existing = _find_collected_material_by_work_id(store, str(video.get("work_id") or ""))
                 if existing and not args.duplicate_existing:
-                    understanding = build_material_understanding(existing, provider=args.provider, model=args.model)
-                    validate_understanding(understanding)
-                    store.update_material_understanding(
-                        existing["id"],
-                        understanding=understanding,
-                        provider=args.provider,
-                        model=args.model,
-                    )
-                    store.log_material_understanding(
-                        run_id=existing.get("run_id") or run_id,
-                        material_id=existing["id"],
-                        provider=args.provider,
-                        model=args.model,
-                        status="ok",
-                        output=understanding,
-                    )
+                    status = "existing_preserved"
+                    if args.refresh_existing_understanding:
+                        understanding = build_material_understanding(existing, provider=args.provider, model=args.model)
+                        validate_understanding(understanding)
+                        store.update_material_understanding(
+                            existing["id"],
+                            understanding=understanding,
+                            provider=args.provider,
+                            model=args.model,
+                        )
+                        store.log_material_understanding(
+                            run_id=existing.get("run_id") or run_id,
+                            material_id=existing["id"],
+                            provider=args.provider,
+                            model=args.model,
+                            status="ok",
+                            output=understanding,
+                        )
+                        status = "existing_understanding_refreshed"
                     materialized.append(
                         {
                             "material_id": existing["id"],
                             "work_id": video.get("work_id"),
                             "title": video.get("title"),
-                            "status": "existing_understanding_refreshed",
+                            "status": status,
                         }
                     )
                     continue
@@ -758,6 +762,8 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
                 if not source_url:
                     skipped.append({"work_id": video.get("work_id"), "title": video.get("title"), "reason": "missing_source_url"})
                     continue
+                if client is None:
+                    client = MxnzpDouyinProClient(MxnzpConfig.from_env())
                 extract_result = client.call("video_to_text_v2", body={"url": source_url}, use_cache=not args.no_cache)
                 normalized = extract_result.get("normalized") if isinstance(extract_result.get("normalized"), dict) else {}
                 transcript_text = str(
