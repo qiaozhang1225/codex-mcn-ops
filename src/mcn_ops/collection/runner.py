@@ -29,6 +29,7 @@ class CollectionConfig:
     search_keywords: list[str] = field(default_factory=list)
     understanding_provider: str = "local-rules"
     understanding_model: str = "material-understanding-rules-v2"
+    reuse_existing: bool = True
 
 
 @dataclass
@@ -44,6 +45,7 @@ class CollectionResult:
     repeated_author_clues: list[dict[str, Any]] = field(default_factory=list)
     call_summary: dict[str, Any] = field(default_factory=dict)
     understanding_success_count: int = 0
+    existing_reused_material_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,8 @@ class CollectionResult:
             "repeated_author_clues": self.repeated_author_clues,
             "mxnzp_call_summary": self.call_summary,
             "understanding_success_count": self.understanding_success_count,
+            "existing_reused_count": len(self.existing_reused_material_ids),
+            "existing_reused_material_ids": self.existing_reused_material_ids,
         }
 
 
@@ -188,8 +192,25 @@ class TopicCollectionRunner:
                     )
 
             saved_material_ids: list[str] = []
+            existing_reused_material_ids: list[str] = []
             understanding_success_count = 0
             for candidate in selected:
+                existing = find_existing_material_for_candidate(self.store, candidate) if config.reuse_existing else None
+                if existing:
+                    material_id = str(existing["id"])
+                    saved_material_ids.append(material_id)
+                    existing_reused_material_ids.append(material_id)
+                    self.store.upsert_collection_candidate(
+                        run_id,
+                        candidate,
+                        status="existing_reused",
+                        selection_reason=_selection_reason(candidate, threshold_mode),
+                        skip_reason="existing_material",
+                        skip_detail="Matched an existing collected material by work_id, source_url, or title+author.",
+                        threshold_mode=threshold_mode,
+                        material_id=material_id,
+                    )
+                    continue
                 try:
                     transcript_text, extract_result = self._extract_text(executor, candidate)
                 except ToolExecutionError as exc:
@@ -272,6 +293,7 @@ class TopicCollectionRunner:
                 repeated_author_clues=repeated_author_clues,
                 call_summary=call_summary,
                 understanding_success_count=understanding_success_count,
+                existing_reused_material_ids=existing_reused_material_ids,
             )
             self.store.finish_collection_run(run_id, "completed", result.to_dict())
             return result
@@ -380,6 +402,26 @@ def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         unique.append(candidate)
     return unique
+
+
+def find_existing_material_for_candidate(store: Store, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    source_package = candidate.get("source_package") or {}
+    work_id = str(source_package.get("work_id") or "").strip()
+    source_url = str(source_package.get("source_link") or "").strip()
+    title = str(source_package.get("clean_title") or source_package.get("title") or "").strip()
+    author = str(source_package.get("author_sec_uid") or source_package.get("author_name") or "").strip()
+    title_author_key = (title, author) if title and author else None
+    for material in store.list_collected_materials():
+        if work_id and str(material.get("work_id") or "").strip() == work_id:
+            return material
+        if source_url and str(material.get("source_url") or "").strip() == source_url:
+            return material
+        if title_author_key:
+            existing_title = str(material.get("clean_title") or material.get("title") or "").strip()
+            existing_author = str(material.get("author_sec_uid") or material.get("author_name") or "").strip()
+            if (existing_title, existing_author) == title_author_key:
+                return material
+    return None
 
 
 def select_viral_candidates(

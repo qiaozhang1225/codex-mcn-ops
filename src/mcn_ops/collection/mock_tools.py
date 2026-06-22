@@ -17,7 +17,7 @@ def build_mock_source_registry() -> ToolRegistry:
                 "properties": {
                     "keyword": {"type": "string"},
                     "page": {"type": "integer", "minimum": 1},
-                    "page_size": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 10},
                 },
                 "required": ["keyword", "page", "page_size"],
             },
@@ -35,8 +35,8 @@ def collect_source_candidates(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ToolExecutionError("keyword is required.")
     if not isinstance(page, int) or page < 1:
         raise ToolExecutionError("page must be an integer >= 1.")
-    if not isinstance(page_size, int) or page_size < 1 or page_size > 5:
-        raise ToolExecutionError("page_size must be an integer between 1 and 5.")
+    if not isinstance(page_size, int) or page_size < 1 or page_size > 10:
+        raise ToolExecutionError("page_size must be an integer between 1 and 10.")
 
     ranked = _rank_candidates(keyword, MOCK_SOURCE_CANDIDATES)
     start = (page - 1) * page_size

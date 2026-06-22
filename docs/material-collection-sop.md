@@ -14,6 +14,52 @@ mcn collect match --run-id crun_xxxxxxxxxxxx
 mcn material promote --material-id mat_xxxxxxxxxxxx --platform douyin
 ```
 
+## High-Level Collection Tasks
+
+Use `mcn collect task ...` for reusable collection work. Low-level commands remain available for diagnostics and one-off operations.
+
+Keyword start:
+
+```bash
+mcn collect task keyword \
+  --topic 财运 \
+  --target-count 30 \
+  --tool-provider mxnzp
+```
+
+The keyword task is complete only when the task has enough saved or reused materials, not when a single search finishes. It can search the seed topic, related keywords, role keywords, and `next_collection_keywords` discovered from saved materials. Existing materials are reused by `work_id > source_url > title+author` and are not overwritten.
+
+Author start:
+
+```bash
+mcn collect task author \
+  --name "娜说智慧" \
+  --like-floor 10000
+```
+
+The default viral threshold is `10000` likes. Author tasks first expand the author with `user_post sortType=1`, then materialize every video that meets the viral threshold and duration window. Use `--materialize-top N` only when intentionally limiting the count. Use `--skip-expand` when the author videos are already in `douyin_author_videos`.
+
+Database-discovered author start:
+
+```bash
+mcn collect task discover-authors \
+  --min-appearances 2 \
+  --like-floor 10000 \
+  --top-authors 10
+```
+
+This reads `collected_materials`, `collection_candidates`, and `douyin_author_videos`, ranks source authors by appearances, max/average engagement, profile availability, and follower data, then reuses the author task flow for each top author. Use `--dry-run` to review the ranked author list without API calls.
+
+Task review:
+
+```bash
+mcn collect task show --task-id ctask_xxxxxxxxxxxx
+mcn collect task report --task-id ctask_xxxxxxxxxxxx
+mcn collect task resume --task-id ctask_xxxxxxxxxxxx
+```
+
+Reports include saved materials, skipped candidates, discovered source authors, understanding provider/model/status, next recommended keywords/authors, and API call/cache counts.
+
 ## Real MXNZP Collection
 
 Set credentials in `.env.local`:
@@ -174,7 +220,9 @@ Public metrics are ranked by a weighted engagement score. Likes matter, but save
 
 ## Boundaries
 
-- Codex/GPT-5.5 owns understanding and matching.
+- Automated CLI collection can create a `local-rules/material-understanding-rules-v2` draft to keep the workflow moving.
+- Final material understanding is only the result marked `codex-agent/gpt-5-codex/success`.
+- Task reports must distinguish final Codex understanding from local draft understanding.
 - SQLite owns audit and state.
 - MXNZP owns data acquisition only.
 - No DeepSeek client, no React/FastAPI center, no confirmation-card system.

@@ -38,6 +38,20 @@ mcn collect report --run-id crun_xxxxxxxxxxxx
 mcn material promote --material-id mat_xxxxxxxxxxxx --platform douyin
 ```
 
+Run the reusable high-level collection task entry:
+
+```bash
+mcn collect task keyword --topic 财运 --target-count 30 --tool-provider mxnzp
+mcn collect task author --name "娜说智慧" --like-floor 10000
+mcn collect task discover-authors --min-appearances 2 --like-floor 10000 --top-authors 10
+
+mcn collect task show --task-id ctask_xxxxxxxxxxxx
+mcn collect task report --task-id ctask_xxxxxxxxxxxx
+mcn collect task resume --task-id ctask_xxxxxxxxxxxx
+```
+
+The task layer creates `collection_tasks`, links all search/materialization runs through `collection_runs.task_id`, preserves existing materials by `work_id/source_url/title+author`, and reports draft local understanding separately from final Codex understanding.
+
 For real Douyin material collection, set `MXNZP_APP_ID` and `MXNZP_APP_SECRET` in `.env.local`, start with `--target-count 1`, and review the resulting material before expanding collection.
 
 Create a content package and a safe publish job:
@@ -96,6 +110,9 @@ Each adapter currently supplies package names, content validation, audit steps, 
 - Douyin logged-in cookie flow: `mcn collect douyin-login-cookie --write-env --json`; author `user_post` can also use `--login-cookie` when `DOUYIN_COOKIE` is missing.
 - Douyin author expansion: `mcn collect author expand --name "娜说智慧" --sort-type 1 --max-pages 0 --json`
 - Douyin author materialization: `mcn collect author materialize --name "娜说智慧" --top 5 --json`
+- High-level keyword collection: `mcn collect task keyword --topic 财运 --target-count 30 --tool-provider mxnzp`
+- High-level author collection: `mcn collect task author --name "娜说智慧" --like-floor 10000`
+- High-level database author discovery: `mcn collect task discover-authors --min-appearances 2 --top-authors 10 --like-floor 10000`
 
 ## Local Inspection
 
@@ -115,7 +132,7 @@ data/mcn_ops.sqlite
 
 - Real publishing is opt-in.
 - `stop_before_submit` is the default.
-- DeepSeek is intentionally not used; Codex/GPT-5.5 produces material understanding in the workflow layer.
+- DeepSeek is intentionally not used. Automated CLI collection writes `local-rules/material-understanding-rules-v2` as a draft only; final deep understanding must be explicitly marked `codex-agent/gpt-5-codex/success`.
 - ADB screenshots/UI dumps are stored for every major step.
 - Platform accounts are assumed to be logged in on the Android phone.
 - If UI XML is insufficient, hand off to Codex Computer Use for the visible phone/scrcpy session rather than using private platform APIs.

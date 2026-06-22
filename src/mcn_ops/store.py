@@ -831,6 +831,11 @@ class Store:
             "roles": [_task_role_row_to_dict(row) for row in rows],
         }
 
+    def get_collection_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
+        return _task_row_to_dict(row) if row else None
+
     def create_collection_run(
         self,
         *,
@@ -888,6 +893,17 @@ class Store:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM collection_runs WHERE id = ?", (run_id,)).fetchone()
         return _collection_run_row_to_dict(row) if row else None
+
+    def list_collection_runs(self, *, task_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM collection_runs"
+        params: tuple[Any, ...] = ()
+        if task_id is not None:
+            query += " WHERE task_id = ?"
+            params = (task_id,)
+        query += " ORDER BY started_at, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_collection_run_row_to_dict(row) for row in rows]
 
     def upsert_collection_candidate(
         self,
@@ -1004,8 +1020,8 @@ class Store:
         material_id = new_id("mat")
         timestamp = now_iso()
         metrics = source_package.get("public_metrics") or {}
-        provider = str(material_understanding.get("understanding_provider") or "codex")
-        model = str(material_understanding.get("understanding_model") or "gpt-5.5")
+        provider = str(material_understanding.get("understanding_provider") or "local-rules")
+        model = str(material_understanding.get("understanding_model") or "material-understanding-rules-v2")
         promoted = _material_promoted_values(source_package, material_understanding, raw)
         with self.connect() as conn:
             conn.execute(
@@ -1091,12 +1107,16 @@ class Store:
     def list_collected_materials(
         self,
         *,
+        task_id: str | None = None,
         run_id: str | None = None,
         role_id: str | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
         where: list[str] = []
         params: list[Any] = []
+        if task_id is not None:
+            where.append("task_id = ?")
+            params.append(task_id)
         if run_id is not None:
             where.append("run_id = ?")
             params.append(run_id)
@@ -1722,6 +1742,33 @@ class Store:
                 ORDER BY tool_name, status
                 """,
                 (run_id,),
+            ).fetchall()
+        return {
+            "total_calls": sum(int(row["count"]) for row in rows),
+            "cache_hits": sum(int(row["cache_hits"] or 0) for row in rows),
+            "by_tool": [
+                {
+                    "tool_name": row["tool_name"],
+                    "status": row["status"],
+                    "count": row["count"],
+                    "cache_hits": row["cache_hits"] or 0,
+                }
+                for row in rows
+            ],
+        }
+
+    def task_call_summary(self, task_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT l.tool_name, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
+                FROM mxnzp_call_logs l
+                JOIN collection_runs r ON r.id = l.run_id
+                WHERE r.task_id = ?
+                GROUP BY l.tool_name, l.status
+                ORDER BY l.tool_name, l.status
+                """,
+                (task_id,),
             ).fetchall()
         return {
             "total_calls": sum(int(row["count"]) for row in rows),

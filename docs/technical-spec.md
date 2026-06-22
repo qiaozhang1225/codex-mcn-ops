@@ -70,6 +70,7 @@ It is an operator/development tool, not a Python runtime dependency. Use it to r
 - `mcn collect catalog`
 - `mcn collect mxnzp-call`
 - `mcn collect role upsert/list/show/import/match-existing`
+- `mcn collect task keyword/author/discover-authors/show/report/resume`
 - `mcn collect run`
 - `mcn collect understand`
 - `mcn collect match`
@@ -109,6 +110,23 @@ V1 adapters are conservative. They validate and capture, then mark UI-specific a
 
 Collection is CLI-first and has no server process. MXNZP is used only for Douyin data acquisition. The CLI currently writes a local-rules material understanding draft; Codex/GPT can later overwrite or deepen that draft through the same promoted columns and JSON payload.
 
+The high-level task layer is `mcn collect task ...`:
+
+- `keyword`: collects enough materials for one topic. Completion is based on target material count, not one search run. It can continue through seed keywords, related keywords, role keywords, and saved-material `next_collection_keywords`.
+- `author`: collects viral works from one source author. The default viral threshold is `like_floor=10000`, `sortType=1`, duration window `20-300` seconds, and existing materials are preserved.
+- `discover-authors`: ranks source authors from `collected_materials`, `collection_candidates`, and `douyin_author_videos`, then reuses the author workflow.
+- `show/report/resume`: reads `collection_tasks` and linked `collection_runs` to summarize saved materials, skipped candidates, source authors, understanding status, next recommendations, API calls, and cache hits.
+
+Low-level `collect run`, `collect author expand`, and `collect author materialize` remain stable execution primitives. High-level tasks reuse them conceptually through a workflow module and link work with `collection_runs.task_id`.
+
+The global default collection policy is:
+
+- `viral_like_floor = 10000`
+- `min_duration_seconds = 20`
+- `max_duration_seconds = 300`
+- `engagement_score = likes + collects * 3 + comments * 2 + shares * 4`
+- existing materials are reused by `work_id`, then `source_url`, then `title+author`, and are not overwritten unless an explicit refresh flag is used
+
 Before transcript extraction, search results pass through a prefilter:
 
 - `min_duration_seconds`, default `20`
@@ -117,8 +135,8 @@ Before transcript extraction, search results pass through a prefilter:
 - weighted engagement ranking: likes + saves * 3 + comments * 2 + shares * 4
 - dynamic pagination stop when enough qualified candidates exist or the latest page has no promising candidate
 
-The CLI exposes duration overrides with `mcn collect run --min-duration-seconds` and `--max-duration-seconds`.
+The CLI exposes duration overrides with `mcn collect run --min-duration-seconds` and `--max-duration-seconds`, and the same policy is available on high-level task commands.
 
 The fixed material understanding JSON fields are `topic_summary`, `hook`, `core_claim`, `content_structure`, `key_points`, `content_type`, `oral_script_pattern`, `audience`, `emotion_trigger`, `risk_level`, `rewrite_angles`, `risk_notes`, `usable_quotes`, `recommended_platforms`, `role_fit_notes`, and `next_collection_keywords`.
 
-`mcn collect understand` writes the local-rules material understanding draft and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.
+`mcn collect understand` writes the local-rules material understanding draft and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. High-level task reports treat `local-rules/material-understanding-rules-v2` as draft understanding, not final Codex understanding. Final deep understanding should be stored as `codex-agent/gpt-5-codex/success`. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.

@@ -18,6 +18,12 @@ from .collection.mxnzp_tools import build_mxnzp_douyin_registry
 from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
 from .collection.tools import parse_json_object
 from .collection.understanding import build_material_understanding, evaluate_role_match, validate_understanding
+from .collection.workflows import (
+    CollectionPolicy,
+    CollectionTaskOrchestrator,
+    format_task_report_markdown,
+    format_task_show,
+)
 from .feishu import build_publish_job_payload, write_payload
 from .publisher import PublishRunner
 from .report import build_daily_report
@@ -86,6 +92,63 @@ def build_parser() -> argparse.ArgumentParser:
     douyin_login_cookie.add_argument("--show-cookie", action="store_true")
     douyin_login_cookie.add_argument("--close-browser", action="store_true")
     douyin_login_cookie.add_argument("--json", action="store_true")
+
+    task = collect_sub.add_parser("task", help="Run high-level material collection tasks")
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_keyword = task_sub.add_parser("keyword", help="Collect enough materials for one topic")
+    task_keyword.add_argument("--topic", required=True)
+    task_keyword.add_argument("--target-count", type=int, required=True)
+    task_keyword.add_argument("--keyword", action="append", default=[])
+    task_keyword.add_argument("--related-keyword", action="append", default=[])
+    task_keyword.add_argument("--role-id")
+    task_keyword.add_argument("--role-name")
+    task_keyword.add_argument("--tool-provider", choices=["mock", "mxnzp"], default="mock")
+    task_keyword.add_argument("--like-floor", type=int, default=10000)
+    task_keyword.add_argument("--min-duration-seconds", type=int, default=20)
+    task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
+    task_keyword.add_argument("--max-search-pages", type=int, default=3)
+    task_keyword.add_argument("--page-size", type=int, default=10)
+    task_keyword.add_argument("--json", action="store_true")
+
+    task_author = task_sub.add_parser("author", help="Collect viral materials from one source author")
+    task_author.add_argument("--sec-uid")
+    task_author.add_argument("--name")
+    task_author.add_argument("--like-floor", type=int, default=10000)
+    task_author.add_argument("--min-duration-seconds", type=int, default=20)
+    task_author.add_argument("--max-duration-seconds", type=int, default=300)
+    task_author.add_argument("--materialize-top", type=int, default=0, help="Use 0 to materialize every qualified viral video")
+    task_author.add_argument("--max-pages", type=int, default=0, help="Use 0 to continue until MXNZP reports no next page")
+    task_author.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
+    task_author.add_argument("--skip-expand", action="store_true")
+    task_author.add_argument("--login-cookie", action="store_true")
+    task_author.add_argument("--refresh-existing-understanding", action="store_true")
+    task_author.add_argument("--no-cache", action="store_true")
+    task_author.add_argument("--json", action="store_true")
+
+    task_discover = task_sub.add_parser("discover-authors", help="Discover source authors from the database and collect their viral works")
+    task_discover.add_argument("--min-appearances", type=int, default=2)
+    task_discover.add_argument("--top-authors", type=int, default=10)
+    task_discover.add_argument("--like-floor", type=int, default=10000)
+    task_discover.add_argument("--min-duration-seconds", type=int, default=20)
+    task_discover.add_argument("--max-duration-seconds", type=int, default=300)
+    task_discover.add_argument("--materialize-top", type=int, default=0, help="Use 0 to materialize every qualified viral video per author")
+    task_discover.add_argument("--max-pages", type=int, default=0)
+    task_discover.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
+    task_discover.add_argument("--skip-expand", action="store_true")
+    task_discover.add_argument("--login-cookie", action="store_true")
+    task_discover.add_argument("--no-cache", action="store_true")
+    task_discover.add_argument("--dry-run", action="store_true")
+    task_discover.add_argument("--json", action="store_true")
+
+    task_show = task_sub.add_parser("show", help="Show a collection task summary")
+    task_show.add_argument("--task-id", required=True)
+    task_show.add_argument("--json", action="store_true")
+    task_report = task_sub.add_parser("report", help="Write a collection task report")
+    task_report.add_argument("--task-id", required=True)
+    task_report.add_argument("--json", action="store_true")
+    task_resume = task_sub.add_parser("resume", help="Resume a collection task from stored task parameters")
+    task_resume.add_argument("--task-id", required=True)
+    task_resume.add_argument("--json", action="store_true")
 
     author = collect_sub.add_parser("author", help="Manage Douyin source authors")
     author_sub = author.add_subparsers(dest="author_command", required=True)
@@ -468,6 +531,9 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
                 print(json.dumps(payload, ensure_ascii=False))
         return 0 if result.cookie_valid else 1
 
+    if args.collect_command == "task":
+        return handle_collect_task(args, store)
+
     if args.collect_command == "author":
         return handle_collect_author(args, store)
 
@@ -565,6 +631,107 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
         return 0
 
     raise ValueError(args.collect_command)
+
+
+def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
+    orchestrator = CollectionTaskOrchestrator(store)
+    if args.task_command == "keyword":
+        role_id = args.role_id
+        if args.role_name:
+            role = store.get_ip_role(name=args.role_name)
+            if not role:
+                raise KeyError(f"role not found: {args.role_name}")
+            role_id = role["id"]
+        report = orchestrator.run_keyword_task(
+            topic=args.topic,
+            target_count=args.target_count,
+            policy=_collection_policy_from_args(args),
+            tool_provider=args.tool_provider,
+            keywords=args.keyword,
+            related_keywords=args.related_keyword,
+            role_id=role_id,
+        )
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "author":
+        report = orchestrator.run_author_task(
+            name=args.name,
+            sec_uid=args.sec_uid,
+            policy=_collection_policy_from_args(args),
+            like_floor=args.like_floor,
+            materialize_top=args.materialize_top,
+            max_pages=args.max_pages,
+            sort_type=args.sort_type,
+            skip_expand=args.skip_expand,
+            login_cookie=args.login_cookie,
+            no_cache=args.no_cache,
+            refresh_existing_understanding=args.refresh_existing_understanding,
+        )
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "discover-authors":
+        report = orchestrator.run_discovered_authors_task(
+            min_appearances=args.min_appearances,
+            top_authors=args.top_authors,
+            like_floor=args.like_floor,
+            materialize_top=args.materialize_top,
+            max_pages=args.max_pages,
+            sort_type=args.sort_type,
+            skip_expand=args.skip_expand,
+            login_cookie=args.login_cookie,
+            no_cache=args.no_cache,
+            dry_run=args.dry_run,
+            policy=_collection_policy_from_args(args),
+        )
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "show":
+        report = orchestrator.build_task_report(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "report":
+        report = orchestrator.build_task_report(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_report_markdown(report))
+        return 0
+
+    if args.task_command == "resume":
+        report = orchestrator.resume_task(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    raise ValueError(args.task_command)
+
+
+def _collection_policy_from_args(args: argparse.Namespace) -> CollectionPolicy:
+    return CollectionPolicy(
+        viral_like_floor=int(getattr(args, "like_floor", 10000)),
+        min_duration_seconds=int(getattr(args, "min_duration_seconds", 20)),
+        max_duration_seconds=int(getattr(args, "max_duration_seconds", 300)),
+        max_search_pages=int(getattr(args, "max_search_pages", 3)),
+        page_size=int(getattr(args, "page_size", 10)),
+    )
 
 
 def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
