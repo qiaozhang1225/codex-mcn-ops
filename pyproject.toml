@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-mcn-ops"
+version = "0.1.0"
+description = "Codex-first MCN operations with SQLite, Feishu handoff, and ADB phone publishing."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "OPC" }]
+dependencies = []
+
+[project.scripts]
+mcn = "mcn_ops.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
