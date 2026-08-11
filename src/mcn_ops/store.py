@@ -15,6 +15,13 @@ DEFAULT_DB_PATH = Path("data/mcn_ops.sqlite")
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    applied_at TEXT NOT NULL,
+    report_json TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS content_packages (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -158,6 +165,79 @@ CREATE TABLE IF NOT EXISTS collection_runs (
     FOREIGN KEY(role_id) REFERENCES ip_roles(id)
 );
 
+CREATE TABLE IF NOT EXISTS source_authors (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    platform_author_id TEXT NOT NULL,
+    platform_user_id TEXT,
+    handle TEXT,
+    display_name TEXT NOT NULL,
+    signature TEXT,
+    avatar_url TEXT,
+    profile_url TEXT,
+    profile_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, platform_author_id)
+);
+
+CREATE TABLE IF NOT EXISTS source_works (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    platform_work_id TEXT NOT NULL,
+    author_id TEXT,
+    canonical_url TEXT,
+    title TEXT,
+    caption_text TEXT,
+    hashtags_json TEXT NOT NULL DEFAULT '[]',
+    published_at TEXT,
+    duration_ms INTEGER,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, platform_work_id),
+    FOREIGN KEY(author_id) REFERENCES source_authors(id)
+);
+
+CREATE TABLE IF NOT EXISTS source_observations (
+    id TEXT PRIMARY KEY,
+    source_work_id TEXT NOT NULL,
+    run_id TEXT,
+    provider TEXT NOT NULL,
+    observation_kind TEXT NOT NULL,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    media_json TEXT NOT NULL DEFAULT '{}',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(source_work_id) REFERENCES source_works(id),
+    FOREIGN KEY(run_id) REFERENCES collection_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS material_transcriptions (
+    id TEXT PRIMARY KEY,
+    source_work_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    options_json TEXT NOT NULL DEFAULT '{}',
+    options_fingerprint TEXT NOT NULL,
+    audio_sha256 TEXT,
+    identity_key TEXT NOT NULL UNIQUE,
+    transcript_text TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    audio_seconds REAL,
+    estimated_cost REAL,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    provider_job_id TEXT,
+    raw_result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(source_work_id) REFERENCES source_works(id)
+);
+
 CREATE TABLE IF NOT EXISTS collection_candidates (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -251,51 +331,6 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     FOREIGN KEY(run_id) REFERENCES collection_runs(id),
     FOREIGN KEY(task_id) REFERENCES collection_tasks(id),
     FOREIGN KEY(role_id) REFERENCES ip_roles(id)
-);
-
-CREATE TABLE IF NOT EXISTS douyin_authors (
-    sec_uid TEXT PRIMARY KEY,
-    uid TEXT,
-    douyin_id TEXT,
-    nickname TEXT NOT NULL,
-    signature TEXT,
-    avatar_url TEXT,
-    profile_url TEXT,
-    ip_location TEXT,
-    follower_count INTEGER,
-    following_count INTEGER,
-    aweme_count INTEGER,
-    total_favorited INTEGER,
-    source_material_id TEXT,
-    source_work_id TEXT,
-    fetched_at TEXT NOT NULL,
-    raw_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(source_material_id) REFERENCES collected_materials(id)
-);
-
-CREATE TABLE IF NOT EXISTS douyin_author_videos (
-    id TEXT PRIMARY KEY,
-    author_sec_uid TEXT NOT NULL,
-    work_id TEXT NOT NULL,
-    source_material_id TEXT,
-    source_url TEXT,
-    title TEXT,
-    platform_caption TEXT,
-    caption_text TEXT,
-    hashtags_json TEXT NOT NULL DEFAULT '[]',
-    post_time TEXT,
-    duration_ms INTEGER,
-    cover_url TEXT,
-    metrics_json TEXT NOT NULL DEFAULT '{}',
-    source_package_json TEXT NOT NULL DEFAULT '{}',
-    raw_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(author_sec_uid, work_id),
-    FOREIGN KEY(author_sec_uid) REFERENCES douyin_authors(sec_uid),
-    FOREIGN KEY(source_material_id) REFERENCES collected_materials(id)
 );
 
 CREATE TABLE IF NOT EXISTS material_role_matches (
@@ -466,7 +501,7 @@ CREATE TABLE IF NOT EXISTS creation_learning_updates (
     FOREIGN KEY(role_id) REFERENCES ip_roles(id)
 );
 
-CREATE TABLE IF NOT EXISTS mxnzp_call_logs (
+CREATE TABLE IF NOT EXISTS provider_call_logs (
     id TEXT PRIMARY KEY,
     run_id TEXT,
     provider TEXT NOT NULL DEFAULT 'mxnzp',
@@ -480,14 +515,15 @@ CREATE TABLE IF NOT EXISTS mxnzp_call_logs (
     FOREIGN KEY(run_id) REFERENCES collection_runs(id)
 );
 
-CREATE TABLE IF NOT EXISTS mxnzp_call_cache (
-    request_fingerprint TEXT PRIMARY KEY,
-    provider TEXT NOT NULL DEFAULT 'mxnzp',
+CREATE TABLE IF NOT EXISTS provider_call_cache (
+    provider TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
     tool_name TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    hit_count INTEGER NOT NULL DEFAULT 0
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(provider, request_fingerprint)
 );
 
 CREATE TABLE IF NOT EXISTS material_understanding_logs (
@@ -509,9 +545,11 @@ CREATE INDEX IF NOT EXISTS idx_collection_candidates_status ON collection_candid
 CREATE INDEX IF NOT EXISTS idx_collected_materials_run_id ON collected_materials(run_id);
 CREATE INDEX IF NOT EXISTS idx_collected_materials_role_id ON collected_materials(role_id);
 CREATE INDEX IF NOT EXISTS idx_collected_materials_work_id ON collected_materials(work_id);
-CREATE INDEX IF NOT EXISTS idx_douyin_authors_nickname ON douyin_authors(nickname);
-CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_author ON douyin_author_videos(author_sec_uid);
-CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_work_id ON douyin_author_videos(work_id);
+CREATE INDEX IF NOT EXISTS idx_source_authors_display_name ON source_authors(platform, display_name);
+CREATE INDEX IF NOT EXISTS idx_source_works_author ON source_works(author_id);
+CREATE INDEX IF NOT EXISTS idx_source_observations_work ON source_observations(source_work_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_material_transcriptions_work ON material_transcriptions(source_work_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_provider_call_logs_run ON provider_call_logs(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_material_role_matches_material_id ON material_role_matches(material_id);
 CREATE INDEX IF NOT EXISTS idx_material_role_matches_role_id ON material_role_matches(role_id);
 CREATE INDEX IF NOT EXISTS idx_material_creations_material_id ON material_creations(material_id);
@@ -655,16 +693,22 @@ class Store:
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
     def init_db(self) -> Path:
         with self.connect() as conn:
+            if _has_legacy_collection_schema(conn):
+                raise RuntimeError(
+                    "Legacy collection schema detected. Run the explicit collection schema v3 migration first."
+                )
             conn.executescript(SCHEMA)
             _migrate_ip_role_v2(conn)
             _migrate_schema_v2(conn)
             _migrate_creation_schema(conn)
-            _migrate_collection_provider_schema(conn)
             _backfill_material_v2_columns(conn)
         return self.db_path
 
@@ -1697,6 +1741,291 @@ class Store:
                 ),
             )
 
+    def upsert_source_author(
+        self,
+        *,
+        platform: str,
+        platform_author_id: str,
+        display_name: str,
+        platform_user_id: str | None = None,
+        handle: str | None = None,
+        signature: str | None = None,
+        avatar_url: str | None = None,
+        profile_url: str | None = None,
+        profile: dict[str, Any] | None = None,
+    ) -> str:
+        platform = platform.strip().lower()
+        platform_author_id = platform_author_id.strip()
+        display_name = display_name.strip()
+        if not platform or not platform_author_id or not display_name:
+            raise ValueError("platform, platform_author_id and display_name are required")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM source_authors WHERE platform = ? AND platform_author_id = ?",
+                (platform, platform_author_id),
+            ).fetchone()
+            author_id = existing["id"] if existing else new_id("author")
+            conn.execute(
+                """
+                INSERT INTO source_authors(
+                    id, platform, platform_author_id, platform_user_id, handle,
+                    display_name, signature, avatar_url, profile_url, profile_json,
+                    first_seen_at, last_seen_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, platform_author_id) DO UPDATE SET
+                    platform_user_id = COALESCE(excluded.platform_user_id, source_authors.platform_user_id),
+                    handle = COALESCE(excluded.handle, source_authors.handle),
+                    display_name = excluded.display_name,
+                    signature = COALESCE(excluded.signature, source_authors.signature),
+                    avatar_url = COALESCE(excluded.avatar_url, source_authors.avatar_url),
+                    profile_url = COALESCE(excluded.profile_url, source_authors.profile_url),
+                    profile_json = excluded.profile_json,
+                    last_seen_at = excluded.last_seen_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    author_id,
+                    platform,
+                    platform_author_id,
+                    platform_user_id,
+                    handle,
+                    display_name,
+                    signature,
+                    avatar_url,
+                    profile_url,
+                    dumps(scrub_for_storage(profile or {})),
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return author_id
+
+    def get_source_author(self, author_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM source_authors WHERE id = ?", (author_id,)).fetchone()
+        return _source_author_row_to_dict(row) if row else None
+
+    def get_source_author_by_platform_id(
+        self,
+        platform: str,
+        platform_author_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM source_authors WHERE platform = ? AND platform_author_id = ?",
+                (platform.strip().lower(), platform_author_id.strip()),
+            ).fetchone()
+        return _source_author_row_to_dict(row) if row else None
+
+    def list_source_authors(self, *, platform: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM source_authors"
+        params: tuple[Any, ...] = ()
+        if platform:
+            query += " WHERE platform = ?"
+            params = (platform.strip().lower(),)
+        query += " ORDER BY updated_at DESC, display_name"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_source_author_row_to_dict(row) for row in rows]
+
+    def upsert_source_work(
+        self,
+        *,
+        platform: str,
+        platform_work_id: str,
+        author_id: str | None = None,
+        canonical_url: str | None = None,
+        title: str | None = None,
+        caption_text: str | None = None,
+        hashtags: list[str] | None = None,
+        published_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> str:
+        platform = platform.strip().lower()
+        platform_work_id = platform_work_id.strip()
+        if not platform or not platform_work_id:
+            raise ValueError("platform and platform_work_id are required")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM source_works WHERE platform = ? AND platform_work_id = ?",
+                (platform, platform_work_id),
+            ).fetchone()
+            work_id = existing["id"] if existing else new_id("work")
+            conn.execute(
+                """
+                INSERT INTO source_works(
+                    id, platform, platform_work_id, author_id, canonical_url, title,
+                    caption_text, hashtags_json, published_at, duration_ms,
+                    first_seen_at, last_seen_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, platform_work_id) DO UPDATE SET
+                    author_id = COALESCE(excluded.author_id, source_works.author_id),
+                    canonical_url = COALESCE(excluded.canonical_url, source_works.canonical_url),
+                    title = COALESCE(excluded.title, source_works.title),
+                    caption_text = COALESCE(excluded.caption_text, source_works.caption_text),
+                    hashtags_json = excluded.hashtags_json,
+                    published_at = COALESCE(excluded.published_at, source_works.published_at),
+                    duration_ms = COALESCE(excluded.duration_ms, source_works.duration_ms),
+                    last_seen_at = excluded.last_seen_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    work_id,
+                    platform,
+                    platform_work_id,
+                    author_id,
+                    canonical_url,
+                    title,
+                    caption_text,
+                    dumps(_clean_list(hashtags)),
+                    published_at,
+                    duration_ms,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return work_id
+
+    def get_source_work_by_platform_id(self, platform: str, platform_work_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM source_works WHERE platform = ? AND platform_work_id = ?",
+                (platform.strip().lower(), platform_work_id.strip()),
+            ).fetchone()
+        return _source_work_row_to_dict(row) if row else None
+
+    def list_source_works(self, *, author_id: str | None = None, platform: str | None = None) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if author_id:
+            where.append("author_id = ?")
+            params.append(author_id)
+        if platform:
+            where.append("platform = ?")
+            params.append(platform.strip().lower())
+        query = "SELECT * FROM source_works"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY published_at DESC, created_at DESC, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_source_work_row_to_dict(row) for row in rows]
+
+    def insert_source_observation(
+        self,
+        *,
+        source_work_id: str,
+        provider: str,
+        observation_kind: str,
+        run_id: str | None = None,
+        metrics: dict[str, Any] | None = None,
+        media: dict[str, Any] | None = None,
+        raw: dict[str, Any] | None = None,
+        observed_at: str | None = None,
+    ) -> str:
+        observation_id = new_id("obs")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_observations(
+                    id, source_work_id, run_id, provider, observation_kind,
+                    metrics_json, media_json, raw_json, observed_at, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation_id,
+                    source_work_id,
+                    run_id,
+                    provider,
+                    observation_kind,
+                    dumps(scrub_for_storage(metrics or {})),
+                    dumps(scrub_for_storage(media or {})),
+                    dumps(scrub_for_storage(raw or {})),
+                    observed_at or timestamp,
+                    timestamp,
+                ),
+            )
+        return observation_id
+
+    def insert_material_transcription(
+        self,
+        *,
+        source_work_id: str,
+        provider: str,
+        model: str,
+        options_fingerprint: str,
+        identity_key: str,
+        transcript_text: str,
+        status: str = "success",
+        options: dict[str, Any] | None = None,
+        audio_sha256: str | None = None,
+        audio_seconds: float | None = None,
+        estimated_cost: float | None = None,
+        cache_hit: bool = False,
+        provider_job_id: str | None = None,
+        raw_result: dict[str, Any] | None = None,
+    ) -> str:
+        transcription_id = new_id("transcription")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM material_transcriptions WHERE identity_key = ?",
+                (identity_key,),
+            ).fetchone()
+            if existing:
+                transcription_id = existing["id"]
+            conn.execute(
+                """
+                INSERT INTO material_transcriptions(
+                    id, source_work_id, provider, model, options_json,
+                    options_fingerprint, audio_sha256, identity_key, transcript_text,
+                    status, audio_seconds, estimated_cost, cache_hit, provider_job_id,
+                    raw_result_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(identity_key) DO UPDATE SET
+                    transcript_text = excluded.transcript_text,
+                    status = excluded.status,
+                    audio_seconds = COALESCE(excluded.audio_seconds, material_transcriptions.audio_seconds),
+                    estimated_cost = COALESCE(excluded.estimated_cost, material_transcriptions.estimated_cost),
+                    cache_hit = excluded.cache_hit,
+                    provider_job_id = COALESCE(excluded.provider_job_id, material_transcriptions.provider_job_id),
+                    raw_result_json = excluded.raw_result_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    transcription_id,
+                    source_work_id,
+                    provider,
+                    model,
+                    dumps(scrub_for_storage(options or {})),
+                    options_fingerprint,
+                    audio_sha256,
+                    identity_key,
+                    transcript_text,
+                    status,
+                    audio_seconds,
+                    estimated_cost,
+                    int(cache_hit),
+                    provider_job_id,
+                    dumps(scrub_for_storage(raw_result or {})),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return transcription_id
+
+    # Transitional adapters for callers that are converted in the workflow/CLI waves.
     def upsert_douyin_author(
         self,
         profile: dict[str, Any],
@@ -1705,86 +2034,36 @@ class Store:
         source_work_id: str | None = None,
         raw: dict[str, Any] | None = None,
     ) -> str:
+        del source_material_id, source_work_id
         raw_profile = raw or profile.get("raw") or {}
         if not isinstance(raw_profile, dict):
             raw_profile = {}
         sec_uid = str(profile.get("sec_uid") or raw_profile.get("sec_uid") or "").strip()
-        if not sec_uid:
-            raise ValueError("douyin author sec_uid is required")
         nickname = str(profile.get("nickname") or raw_profile.get("nickname") or "").strip()
-        if not nickname:
-            raise ValueError("douyin author nickname is required")
-        timestamp = now_iso()
         avatar_url = profile.get("avatar_url") or _first_url(
-            raw_profile.get("avatar_thumb"),
-            raw_profile.get("avatar_medium"),
-            raw_profile.get("avatar_168x168"),
-            raw_profile.get("avatar_larger"),
+            raw_profile.get("avatar_thumb"), raw_profile.get("avatar_medium"), raw_profile.get("avatar_larger")
         )
         share_info = raw_profile.get("share_info") if isinstance(raw_profile.get("share_info"), dict) else {}
         profile_url = profile.get("profile_url") or profile.get("share_url") or share_info.get("share_url")
-        if profile_url and str(profile_url).startswith("www."):
-            profile_url = "https://" + str(profile_url)
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO douyin_authors(
-                    sec_uid, uid, douyin_id, nickname, signature, avatar_url,
-                    profile_url, ip_location, follower_count, following_count,
-                    aweme_count, total_favorited, source_material_id, source_work_id,
-                    fetched_at, raw_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(sec_uid) DO UPDATE SET
-                    uid = COALESCE(excluded.uid, douyin_authors.uid),
-                    douyin_id = COALESCE(excluded.douyin_id, douyin_authors.douyin_id),
-                    nickname = excluded.nickname,
-                    signature = COALESCE(excluded.signature, douyin_authors.signature),
-                    avatar_url = COALESCE(excluded.avatar_url, douyin_authors.avatar_url),
-                    profile_url = COALESCE(excluded.profile_url, douyin_authors.profile_url),
-                    ip_location = COALESCE(excluded.ip_location, douyin_authors.ip_location),
-                    follower_count = COALESCE(excluded.follower_count, douyin_authors.follower_count),
-                    following_count = COALESCE(excluded.following_count, douyin_authors.following_count),
-                    aweme_count = COALESCE(excluded.aweme_count, douyin_authors.aweme_count),
-                    total_favorited = COALESCE(excluded.total_favorited, douyin_authors.total_favorited),
-                    source_material_id = COALESCE(excluded.source_material_id, douyin_authors.source_material_id),
-                    source_work_id = COALESCE(excluded.source_work_id, douyin_authors.source_work_id),
-                    fetched_at = excluded.fetched_at,
-                    raw_json = excluded.raw_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    sec_uid,
-                    profile.get("uid") or raw_profile.get("uid"),
-                    profile.get("douyin_id") or raw_profile.get("unique_id") or raw_profile.get("short_id"),
-                    nickname,
-                    profile.get("signature") or raw_profile.get("signature"),
-                    avatar_url,
-                    profile_url,
-                    profile.get("ip_location") or raw_profile.get("ip_location"),
-                    _optional_int(profile.get("follower_count") or raw_profile.get("follower_count")),
-                    _optional_int(profile.get("following_count") or raw_profile.get("following_count")),
-                    _optional_int(profile.get("aweme_count") or raw_profile.get("aweme_count")),
-                    _optional_int(profile.get("total_favorited") or raw_profile.get("total_favorited")),
-                    source_material_id,
-                    source_work_id,
-                    timestamp,
-                    dumps(scrub_for_storage(raw_profile)),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+        self.upsert_source_author(
+            platform="douyin",
+            platform_author_id=sec_uid,
+            platform_user_id=profile.get("uid") or raw_profile.get("uid"),
+            handle=profile.get("douyin_id") or raw_profile.get("unique_id") or raw_profile.get("short_id"),
+            display_name=nickname,
+            signature=profile.get("signature") or raw_profile.get("signature"),
+            avatar_url=avatar_url,
+            profile_url=profile_url,
+            profile={**raw_profile, **{key: value for key, value in profile.items() if key != "raw"}},
+        )
         return sec_uid
 
     def get_douyin_author(self, sec_uid: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute("SELECT * FROM douyin_authors WHERE sec_uid = ?", (sec_uid,)).fetchone()
-        return _douyin_author_row_to_dict(row) if row else None
+        author = self.get_source_author_by_platform_id("douyin", sec_uid)
+        return _source_author_to_douyin_compat(author) if author else None
 
     def list_douyin_authors(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM douyin_authors ORDER BY updated_at DESC, nickname").fetchall()
-        return [_douyin_author_row_to_dict(row) for row in rows]
+        return [_source_author_to_douyin_compat(author) for author in self.list_source_authors(platform="douyin")]
 
     def upsert_douyin_author_video(
         self,
@@ -1794,90 +2073,50 @@ class Store:
         source_material_id: str | None = None,
         raw: dict[str, Any] | None = None,
     ) -> str:
+        del source_material_id
+        author = self.get_source_author_by_platform_id("douyin", author_sec_uid)
+        if not author:
+            raise KeyError(f"source author not found: douyin/{author_sec_uid}")
         raw_video = raw or video.get("raw") or {}
         if not isinstance(raw_video, dict):
             raw_video = {}
-        work_id = str(
-            video.get("work_id")
-            or video.get("id")
-            or raw_video.get("aweme_id")
-            or raw_video.get("id")
-            or ""
+        platform_work_id = str(
+            video.get("work_id") or video.get("id") or raw_video.get("aweme_id") or raw_video.get("id") or ""
         ).strip()
-        if not work_id:
-            raise ValueError("douyin author video work_id is required")
-        caption = str(video.get("platform_caption") or video.get("caption") or raw_video.get("desc") or raw_video.get("caption") or "").strip()
+        caption = str(
+            video.get("platform_caption") or video.get("caption") or raw_video.get("desc") or raw_video.get("caption") or ""
+        ).strip()
         title = str(video.get("title") or raw_video.get("title") or caption).strip()
         parsed = parse_caption(title=title, caption=caption)
-        metrics = video.get("metrics") or video.get("public_metrics") or {
-            "digg_count": raw_video.get("digg_count") or raw_video.get("diggCount"),
-            "collect_count": raw_video.get("collect_count") or raw_video.get("collectCount"),
-            "comment_count": raw_video.get("comment_count") or raw_video.get("commentCount"),
-            "share_count": raw_video.get("share_count") or raw_video.get("shareCount"),
-            "play_count": raw_video.get("play_count") or raw_video.get("playCount"),
-        }
-        timestamp = now_iso()
-        row_id = new_id("avideo")
-        with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM douyin_author_videos WHERE author_sec_uid = ? AND work_id = ?",
-                (author_sec_uid, work_id),
-            ).fetchone()
-            if existing:
-                row_id = existing["id"]
-            conn.execute(
-                """
-                INSERT INTO douyin_author_videos(
-                    id, author_sec_uid, work_id, source_material_id, source_url,
-                    title, platform_caption, caption_text, hashtags_json, post_time,
-                    duration_ms, cover_url, metrics_json, source_package_json,
-                    raw_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(author_sec_uid, work_id) DO UPDATE SET
-                    source_material_id = COALESCE(excluded.source_material_id, douyin_author_videos.source_material_id),
-                    source_url = COALESCE(excluded.source_url, douyin_author_videos.source_url),
-                    title = COALESCE(excluded.title, douyin_author_videos.title),
-                    platform_caption = COALESCE(excluded.platform_caption, douyin_author_videos.platform_caption),
-                    caption_text = COALESCE(excluded.caption_text, douyin_author_videos.caption_text),
-                    hashtags_json = excluded.hashtags_json,
-                    post_time = COALESCE(excluded.post_time, douyin_author_videos.post_time),
-                    duration_ms = COALESCE(excluded.duration_ms, douyin_author_videos.duration_ms),
-                    cover_url = COALESCE(excluded.cover_url, douyin_author_videos.cover_url),
-                    metrics_json = excluded.metrics_json,
-                    source_package_json = excluded.source_package_json,
-                    raw_json = excluded.raw_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    row_id,
-                    author_sec_uid,
-                    work_id,
-                    source_material_id,
-                    video.get("source_url") or video.get("source_link") or video.get("share_url") or raw_video.get("share_url") or raw_video.get("shareUrl"),
-                    title or None,
-                    caption or None,
-                    parsed["caption_text"],
-                    dumps(parsed["hashtags"]),
-                    video.get("post_time") or raw_video.get("post_time") or raw_video.get("create_time"),
-                    _optional_int(video.get("duration_ms") or video.get("duration") or raw_video.get("duration")),
-                    video.get("cover_url") or raw_video.get("cover"),
-                    dumps(scrub_for_storage(metrics or {})),
-                    dumps(scrub_for_storage(video)),
-                    dumps(scrub_for_storage(raw_video)),
-                    timestamp,
-                    timestamp,
-                ),
-            )
-        return row_id
+        work_id = self.upsert_source_work(
+            platform="douyin",
+            platform_work_id=platform_work_id,
+            author_id=author["id"],
+            canonical_url=video.get("source_url") or video.get("source_link") or video.get("share_url"),
+            title=title or None,
+            caption_text=parsed["caption_text"],
+            hashtags=parsed["hashtags"],
+            published_at=video.get("post_time") or raw_video.get("post_time") or raw_video.get("create_time"),
+            duration_ms=_optional_int(video.get("duration_ms") or video.get("duration") or raw_video.get("duration")),
+        )
+        self.insert_source_observation(
+            source_work_id=work_id,
+            provider=str(video.get("provider") or "legacy"),
+            observation_kind="author_post",
+            metrics=video.get("metrics") or video.get("public_metrics") or {},
+            media={"cover_url": video.get("cover_url") or raw_video.get("cover")},
+            raw=raw_video,
+        )
+        return work_id
 
     def list_douyin_author_videos(self, author_sec_uid: str) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM douyin_author_videos WHERE author_sec_uid = ? ORDER BY created_at DESC, id",
-                (author_sec_uid,),
-            ).fetchall()
-        return [_douyin_author_video_row_to_dict(row) for row in rows]
+        author = self.get_source_author_by_platform_id("douyin", author_sec_uid)
+        if not author:
+            return []
+        return [
+            _source_work_to_douyin_compat(work, author_sec_uid)
+            for work in self.list_source_works(author_id=author["id"], platform="douyin")
+        ]
 
     def insert_material_role_match(
         self,
@@ -2661,7 +2900,7 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO mxnzp_call_logs(
+                INSERT INTO provider_call_logs(
                     id, run_id, provider, tool_name, request_fingerprint, status,
                     error, duration_ms, cache_hit, created_at
                 )
@@ -2682,42 +2921,29 @@ class Store:
             )
         return log_id
 
-    def log_mxnzp_call(
+    def get_cached_collection_call(
         self,
-        *,
-        run_id: str | None,
-        tool_name: str,
         request_fingerprint: str,
-        status: str,
-        duration_ms: int,
-        cache_hit: bool,
-        error: str | None = None,
-    ) -> str:
-        return self.log_collection_call(
-            run_id=run_id,
-            provider="mxnzp",
-            tool_name=tool_name,
-            request_fingerprint=request_fingerprint,
-            status=status,
-            duration_ms=duration_ms,
-            cache_hit=cache_hit,
-            error=error,
-        )
-
-    def get_cached_collection_call(self, request_fingerprint: str) -> dict[str, Any] | None:
+        *,
+        provider: str = "legacy",
+    ) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT response_json FROM mxnzp_call_cache WHERE request_fingerprint = ?",
-                (request_fingerprint,),
+                """
+                SELECT response_json
+                FROM provider_call_cache
+                WHERE provider = ? AND request_fingerprint = ?
+                """,
+                (provider, request_fingerprint),
             ).fetchone()
             if row:
                 conn.execute(
                     """
-                    UPDATE mxnzp_call_cache
+                    UPDATE provider_call_cache
                     SET hit_count = hit_count + 1, updated_at = ?
-                    WHERE request_fingerprint = ?
+                    WHERE provider = ? AND request_fingerprint = ?
                     """,
-                    (now_iso(), request_fingerprint),
+                    (now_iso(), provider, request_fingerprint),
                 )
         return loads(row["response_json"], {}) if row else None
 
@@ -2733,19 +2959,18 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO mxnzp_call_cache(
-                    request_fingerprint, provider, tool_name, response_json, created_at, updated_at, hit_count
+                INSERT INTO provider_call_cache(
+                    provider, request_fingerprint, tool_name, response_json, created_at, updated_at, hit_count
                 )
                 VALUES (?, ?, ?, ?, ?, ?, 0)
-                ON CONFLICT(request_fingerprint) DO UPDATE SET
-                    provider = excluded.provider,
+                ON CONFLICT(provider, request_fingerprint) DO UPDATE SET
                     tool_name = excluded.tool_name,
                     response_json = excluded.response_json,
                     updated_at = excluded.updated_at
                 """,
                 (
-                    request_fingerprint,
                     provider,
+                    request_fingerprint,
                     tool_name,
                     dumps(scrub_for_storage(response)),
                     timestamp,
@@ -2758,7 +2983,7 @@ class Store:
             rows = conn.execute(
                 """
                 SELECT provider, tool_name, status, COUNT(*) AS count, SUM(cache_hit) AS cache_hits
-                FROM mxnzp_call_logs
+                FROM provider_call_logs
                 WHERE run_id = ?
                 GROUP BY provider, tool_name, status
                 ORDER BY provider, tool_name, status
@@ -2785,7 +3010,7 @@ class Store:
             rows = conn.execute(
                 """
                 SELECT l.provider, l.tool_name, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
-                FROM mxnzp_call_logs l
+                FROM provider_call_logs l
                 JOIN collection_runs r ON r.id = l.run_id
                 WHERE r.task_id = ?
                 GROUP BY l.provider, l.tool_name, l.status
@@ -3046,71 +3271,6 @@ def _migrate_schema_v2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_material_role_matches_role_id ON material_role_matches(role_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_material_creations_material_id ON material_creations(material_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_material_creations_role_id ON material_creations(role_id)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS douyin_authors (
-            sec_uid TEXT PRIMARY KEY,
-            uid TEXT,
-            douyin_id TEXT,
-            nickname TEXT NOT NULL,
-            signature TEXT,
-            avatar_url TEXT,
-            profile_url TEXT,
-            ip_location TEXT,
-            follower_count INTEGER,
-            following_count INTEGER,
-            aweme_count INTEGER,
-            total_favorited INTEGER,
-            source_material_id TEXT,
-            source_work_id TEXT,
-            fetched_at TEXT NOT NULL,
-            raw_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(source_material_id) REFERENCES collected_materials(id)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS douyin_author_videos (
-            id TEXT PRIMARY KEY,
-            author_sec_uid TEXT NOT NULL,
-            work_id TEXT NOT NULL,
-            source_material_id TEXT,
-            source_url TEXT,
-            title TEXT,
-            platform_caption TEXT,
-            caption_text TEXT,
-            hashtags_json TEXT NOT NULL DEFAULT '[]',
-            post_time TEXT,
-            duration_ms INTEGER,
-            cover_url TEXT,
-            metrics_json TEXT NOT NULL DEFAULT '{}',
-            source_package_json TEXT NOT NULL DEFAULT '{}',
-            raw_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(author_sec_uid, work_id),
-            FOREIGN KEY(author_sec_uid) REFERENCES douyin_authors(sec_uid),
-            FOREIGN KEY(source_material_id) REFERENCES collected_materials(id)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_authors_nickname ON douyin_authors(nickname)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_author ON douyin_author_videos(author_sec_uid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_work_id ON douyin_author_videos(work_id)")
-
-
-def _migrate_collection_provider_schema(conn: sqlite3.Connection) -> None:
-    for table in ("mxnzp_call_logs", "mxnzp_call_cache"):
-        if not _table_exists(conn, table):
-            continue
-        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if "provider" not in columns:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN provider TEXT NOT NULL DEFAULT 'mxnzp'")
-
-
 def _migrate_creation_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -3269,6 +3429,18 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _has_legacy_collection_schema(conn: sqlite3.Connection) -> bool:
+    return any(
+        _table_exists(conn, table_name)
+        for table_name in (
+            "douyin_authors",
+            "douyin_author_videos",
+            "mxnzp_call_logs",
+            "mxnzp_call_cache",
+        )
+    )
 
 
 def _backfill_material_v2_columns(conn: sqlite3.Connection) -> None:
@@ -3675,6 +3847,90 @@ def _material_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _source_author_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "platform_author_id": row["platform_author_id"],
+        "platform_user_id": row["platform_user_id"],
+        "handle": row["handle"],
+        "display_name": row["display_name"],
+        "signature": row["signature"],
+        "avatar_url": row["avatar_url"],
+        "profile_url": row["profile_url"],
+        "profile": _row_json(row, "profile_json", {}),
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _source_work_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "platform_work_id": row["platform_work_id"],
+        "author_id": row["author_id"],
+        "canonical_url": row["canonical_url"],
+        "title": row["title"],
+        "caption_text": row["caption_text"],
+        "hashtags": _row_json(row, "hashtags_json", []),
+        "published_at": row["published_at"],
+        "duration_ms": row["duration_ms"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _source_author_to_douyin_compat(author: dict[str, Any]) -> dict[str, Any]:
+    profile = author.get("profile") or {}
+    return {
+        "sec_uid": author["platform_author_id"],
+        "uid": author.get("platform_user_id"),
+        "douyin_id": author.get("handle"),
+        "nickname": author.get("display_name"),
+        "signature": author.get("signature"),
+        "avatar_url": author.get("avatar_url"),
+        "profile_url": author.get("profile_url"),
+        "ip_location": profile.get("ip_location"),
+        "follower_count": _optional_int(profile.get("follower_count")),
+        "following_count": _optional_int(profile.get("following_count")),
+        "aweme_count": _optional_int(profile.get("aweme_count")),
+        "total_favorited": _optional_int(profile.get("total_favorited")),
+        "source_material_id": None,
+        "source_work_id": None,
+        "fetched_at": author.get("last_seen_at"),
+        "raw": profile,
+        "created_at": author.get("created_at"),
+        "updated_at": author.get("updated_at"),
+    }
+
+
+def _source_work_to_douyin_compat(work: dict[str, Any], author_sec_uid: str) -> dict[str, Any]:
+    return {
+        "id": work["id"],
+        "author_sec_uid": author_sec_uid,
+        "work_id": work["platform_work_id"],
+        "source_material_id": None,
+        "source_url": work.get("canonical_url"),
+        "title": work.get("title"),
+        "platform_caption": work.get("caption_text"),
+        "caption_text": work.get("caption_text"),
+        "hashtags": work.get("hashtags") or [],
+        "post_time": work.get("published_at"),
+        "duration_ms": work.get("duration_ms"),
+        "cover_url": None,
+        "metrics": {},
+        "source_package": {},
+        "raw": {},
+        "created_at": work.get("created_at"),
+        "updated_at": work.get("updated_at"),
     }
 
 

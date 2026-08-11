@@ -21,8 +21,10 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
         "collection_runs",
         "collection_candidates",
         "collected_materials",
-        "douyin_authors",
-        "douyin_author_videos",
+        "source_authors",
+        "source_works",
+        "source_observations",
+        "material_transcriptions",
         "material_role_matches",
         "material_creations",
         "creation_tasks",
@@ -35,10 +37,17 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
         "risk_term_observations",
         "creation_learning_updates",
         "ip_role_versions",
-        "mxnzp_call_logs",
-        "mxnzp_call_cache",
+        "provider_call_logs",
+        "provider_call_cache",
+        "schema_migrations",
         "material_understanding_logs",
     }.issubset(set(store.list_tables()))
+    assert {
+        "douyin_authors",
+        "douyin_author_videos",
+        "mxnzp_call_logs",
+        "mxnzp_call_cache",
+    }.isdisjoint(set(store.list_tables()))
     with store.connect() as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(collected_materials)").fetchall()}
         role_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_roles)").fetchall()}
@@ -465,3 +474,17 @@ def test_douyin_author_profile_and_video_storage(tmp_path: Path) -> None:
     assert material["author_sec_uid"] == sec_uid
     assert videos[0]["id"] == video_id
     assert videos[0]["hashtags"] == ["女性成长"]
+    assert store.get_source_author_by_platform_id("douyin", sec_uid)["id"].startswith("author_")
+    assert store.get_source_work_by_platform_id("douyin", "756")["id"] == video_id
+
+
+def test_provider_call_cache_isolated_by_provider(tmp_path: Path) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+
+    store.put_cached_collection_call("search", "same", {"value": "direct"}, provider="direct")
+    store.put_cached_collection_call("search", "same", {"value": "other"}, provider="other")
+
+    assert store.get_cached_collection_call("same", provider="direct") == {"value": "direct"}
+    assert store.get_cached_collection_call("same", provider="other") == {"value": "other"}
+    assert store.get_cached_collection_call("same", provider="missing") is None
