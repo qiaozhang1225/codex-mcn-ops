@@ -2113,10 +2113,41 @@ class Store:
         author = self.get_source_author_by_platform_id("douyin", author_sec_uid)
         if not author:
             return []
-        return [
-            _source_work_to_douyin_compat(work, author_sec_uid)
-            for work in self.list_source_works(author_id=author["id"], platform="douyin")
-        ]
+        works = self.list_source_works(author_id=author["id"], platform="douyin")
+        result: list[dict[str, Any]] = []
+        with self.connect() as conn:
+            for work in works:
+                observation = conn.execute(
+                    """
+                    SELECT * FROM source_observations
+                    WHERE source_work_id = ?
+                    ORDER BY observed_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (work["id"],),
+                ).fetchone()
+                item = _source_work_to_douyin_compat(work, author_sec_uid)
+                if observation:
+                    item["metrics"] = _row_json(observation, "metrics_json", {})
+                    media = _row_json(observation, "media_json", {})
+                    item["cover_url"] = media.get("cover_url")
+                    item["raw"] = _row_json(observation, "raw_json", {})
+                item["source_package"] = {
+                    "work_id": work["platform_work_id"],
+                    "source_link": work.get("canonical_url"),
+                    "title": work.get("title"),
+                    "platform_caption": work.get("caption_text"),
+                    "caption_text": work.get("caption_text"),
+                    "hashtags": work.get("hashtags") or [],
+                    "post_time": work.get("published_at"),
+                    "duration_ms": work.get("duration_ms"),
+                    "public_metrics": item["metrics"],
+                    "author_name": author.get("display_name"),
+                    "author_sec_uid": author_sec_uid,
+                    "source_platform": "douyin",
+                }
+                result.append(item)
+        return result
 
     def insert_material_role_match(
         self,
