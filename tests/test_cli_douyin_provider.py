@@ -82,6 +82,21 @@ def test_douyin_transcribe_rejects_removed_paid_fallback(capsys) -> None:
     assert "unrecognized arguments: --allow-paid-fallback" in capsys.readouterr().err
 
 
+def test_douyin_transcribe_rejects_legacy_provider_asr(capsys) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "collect",
+                "douyin",
+                "transcribe",
+                "https://www.douyin.com/video/1234567890123456789",
+                "--transcription-provider",
+                "provider",
+            ]
+        )
+    assert "invalid choice: 'provider'" in capsys.readouterr().err
+
+
 def test_douyin_search_video_passes_bounded_browser_traversal(monkeypatch, capsys) -> None:
     provider = FakeProvider()
     monkeypatch.setattr(cli, "build_data_provider", lambda *args, **kwargs: provider)

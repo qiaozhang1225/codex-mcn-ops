@@ -64,7 +64,7 @@ def _add_douyin_provider_args(parser: argparse.ArgumentParser, *, include_transc
     parser.add_argument("--provider", choices=["direct"], default="direct")
     parser.set_defaults(allow_paid_fallback=False)
     if include_transcription:
-        parser.add_argument("--transcription-provider", choices=["provider", "aliyun", "none"], default="aliyun")
+        parser.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
 
 
 def build_parser() -> argparse.ArgumentParser:
