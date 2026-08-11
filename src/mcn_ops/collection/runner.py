@@ -47,6 +47,7 @@ class CollectionResult:
     call_summary: dict[str, Any] = field(default_factory=dict)
     understanding_success_count: int = 0
     existing_reused_material_ids: list[str] = field(default_factory=list)
+    traversal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -60,8 +61,8 @@ class CollectionResult:
             "selected_count": self.selected_count,
             "threshold_mode": self.threshold_mode,
             "repeated_author_clues": self.repeated_author_clues,
-            "mxnzp_call_summary": self.call_summary,
             "collection_call_summary": self.call_summary,
+            "traversal": self.traversal,
             "understanding_success_count": self.understanding_success_count,
             "existing_reused_count": len(self.existing_reused_material_ids),
             "existing_reused_material_ids": self.existing_reused_material_ids,
@@ -148,7 +149,8 @@ class TopicCollectionRunner:
         )
         executor = LoggedToolExecutor(self.tools, self.store, run_id, provider=config.tool_provider)
         try:
-            discovered = dedupe_candidates(self._search_candidates(executor, config))
+            discovered_items, traversal = self._search_candidates(executor, config)
+            discovered = dedupe_candidates(discovered_items)
             for candidate in discovered:
                 candidate = self._candidate_with_context(candidate, config)
                 self.store.upsert_collection_candidate(run_id, candidate, status="discovered")
@@ -172,20 +174,20 @@ class TopicCollectionRunner:
                     )
 
             repeated_author_clues = repeated_authors(candidates)
-            selected, threshold_mode = select_viral_candidates(
+            shortlisted, threshold_mode = shortlist_viral_candidates(
                 candidates,
                 target_count=config.target_count,
                 like_floor=config.like_floor,
                 super_like_threshold=config.super_like_threshold,
             )
-            selected_keys = {_candidate_key(candidate) for candidate in selected}
+            shortlisted_keys = {_candidate_key(candidate) for candidate in shortlisted}
             skipped: list[dict[str, Any]] = duration_skipped + role_skipped + relevance_skipped
             for candidate in candidates:
-                if _candidate_key(candidate) in selected_keys:
+                if _candidate_key(candidate) in shortlisted_keys:
                     self.store.upsert_collection_candidate(
                         run_id,
                         candidate,
-                        status="selected",
+                        status="shortlisted",
                         selection_reason=_selection_reason(candidate, threshold_mode),
                         threshold_mode=threshold_mode,
                     )
@@ -202,7 +204,43 @@ class TopicCollectionRunner:
             saved_material_ids: list[str] = []
             existing_reused_material_ids: list[str] = []
             understanding_success_count = 0
-            for candidate in selected:
+            attempted_count = 0
+            for candidate in shortlisted:
+                if len(saved_material_ids) >= config.target_count:
+                    break
+                attempted_count += 1
+                candidate_threshold_mode = (
+                    "super"
+                    if metric_value(candidate_metrics(candidate), "digg_count", "likes") >= config.super_like_threshold
+                    else "floor"
+                )
+                self.store.upsert_collection_candidate(
+                    run_id,
+                    candidate,
+                    status="selected",
+                    selection_reason=_selection_reason(candidate, candidate_threshold_mode),
+                    threshold_mode=candidate_threshold_mode,
+                )
+                try:
+                    candidate = self._verify_candidate_detail(executor, candidate, config)
+                except ToolExecutionError as exc:
+                    skipped.append(_skip(candidate, "detail_verification_failed", str(exc)))
+                    self.store.upsert_collection_candidate(
+                        run_id,
+                        candidate,
+                        status="rejected",
+                        skip_reason="detail_verification_failed",
+                        skip_detail=str(exc),
+                        threshold_mode=candidate_threshold_mode,
+                    )
+                    continue
+                self.store.upsert_collection_candidate(
+                    run_id,
+                    candidate,
+                    status="detail_verified",
+                    selection_reason=_selection_reason(candidate, candidate_threshold_mode),
+                    threshold_mode=candidate_threshold_mode,
+                )
                 existing = find_existing_material_for_candidate(self.store, candidate) if config.reuse_existing else None
                 if existing:
                     if existing.get("status") != "collected":
@@ -211,10 +249,10 @@ class TopicCollectionRunner:
                             run_id,
                             candidate,
                             status="skipped",
-                            selection_reason=_selection_reason(candidate, threshold_mode),
+                            selection_reason=_selection_reason(candidate, candidate_threshold_mode),
                             skip_reason="existing_unusable_material",
                             skip_detail="Matched an existing material that has been rejected or downgraded.",
-                            threshold_mode=threshold_mode,
+                            threshold_mode=candidate_threshold_mode,
                             material_id=str(existing["id"]),
                         )
                         continue
@@ -225,10 +263,10 @@ class TopicCollectionRunner:
                         run_id,
                         candidate,
                         status="existing_reused",
-                        selection_reason=_selection_reason(candidate, threshold_mode),
+                        selection_reason=_selection_reason(candidate, candidate_threshold_mode),
                         skip_reason="existing_material",
                         skip_detail="Matched an existing collected material by work_id, source_url, or title+author.",
-                        threshold_mode=threshold_mode,
+                        threshold_mode=candidate_threshold_mode,
                         material_id=material_id,
                     )
                     continue
@@ -242,7 +280,7 @@ class TopicCollectionRunner:
                         status="skipped",
                         skip_reason="video_to_text_failed",
                         skip_detail=str(exc),
-                        threshold_mode=threshold_mode,
+                        threshold_mode=candidate_threshold_mode,
                     )
                     continue
                 if not transcript_text.strip():
@@ -253,7 +291,7 @@ class TopicCollectionRunner:
                         status="skipped",
                         skip_reason="video_to_text_empty",
                         skip_detail="Extracted text is empty.",
-                        threshold_mode=threshold_mode,
+                        threshold_mode=candidate_threshold_mode,
                     )
                     continue
 
@@ -276,10 +314,10 @@ class TopicCollectionRunner:
                         run_id,
                         candidate,
                         status="eligibility_rejected",
-                        selection_reason=_selection_reason(candidate, threshold_mode),
+                        selection_reason=_selection_reason(candidate, candidate_threshold_mode),
                         skip_reason=str(eligibility.get("reject_reason") or "eligibility_rejected"),
                         skip_detail="; ".join(eligibility.get("reasons") or []),
-                        threshold_mode=threshold_mode,
+                        threshold_mode=candidate_threshold_mode,
                     )
                     continue
                 material_understanding = build_material_understanding(
@@ -311,30 +349,43 @@ class TopicCollectionRunner:
                     run_id,
                     candidate,
                     status="saved",
-                    selection_reason=_selection_reason(candidate, threshold_mode),
-                    threshold_mode=threshold_mode,
+                    selection_reason=_selection_reason(candidate, candidate_threshold_mode),
+                    threshold_mode=candidate_threshold_mode,
                     material_id=material_id,
                 )
 
             call_summary = self.store.collection_call_summary(run_id)
+            run_status = _goal_status(len(saved_material_ids), config.target_count)
+            traversal = {
+                **traversal,
+                "goal_satisfied": len(saved_material_ids) >= config.target_count,
+                "saved_count": len(saved_material_ids),
+                "target_count": config.target_count,
+            }
             result = CollectionResult(
                 run_id=run_id,
                 topic=topic,
-                status="completed",
+                status=run_status,
                 saved_material_ids=saved_material_ids,
                 skipped=skipped,
                 candidate_count=len(discovered),
-                selected_count=len(selected),
+                selected_count=attempted_count,
                 threshold_mode=threshold_mode,
                 repeated_author_clues=repeated_author_clues,
                 call_summary=call_summary,
                 understanding_success_count=understanding_success_count,
                 existing_reused_material_ids=existing_reused_material_ids,
+                traversal=traversal,
             )
-            self.store.finish_collection_run(run_id, "completed", result.to_dict())
+            self.store.finish_collection_run(run_id, run_status, result.to_dict())
             return result
         except Exception as exc:
-            summary = {"run_id": run_id, "topic": topic, "error": str(exc), "call_summary": self.store.collection_call_summary(run_id)}
+            summary = {
+                "run_id": run_id,
+                "topic": topic,
+                "error": str(exc),
+                "collection_call_summary": self.store.collection_call_summary(run_id),
+            }
             self.store.finish_collection_run(run_id, "failed", summary, error=str(exc))
             raise
 
@@ -344,13 +395,20 @@ class TopicCollectionRunner:
         source_package["role_id"] = config.role_id
         return candidate
 
-    def _search_candidates(self, executor: LoggedToolExecutor, config: CollectionConfig) -> list[dict[str, Any]]:
+    def _search_candidates(
+        self, executor: LoggedToolExecutor, config: CollectionConfig
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if self.tools.has("douyin_search_videos"):
-            return self._search_mxnzp_candidates(executor, config)
+            return self._search_provider_candidates(executor, config)
         return self._search_mock_candidates(executor, config)
 
-    def _search_mxnzp_candidates(self, executor: LoggedToolExecutor, config: CollectionConfig) -> list[dict[str, Any]]:
+    def _search_provider_candidates(
+        self, executor: LoggedToolExecutor, config: CollectionConfig
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
+        captured_pages = 0
+        has_next = False
+        stop_reason = "source_exhausted"
         keywords = _unique_strings(config.search_keywords or [config.topic])
         for keyword in keywords:
             offset = "0"
@@ -367,36 +425,106 @@ class TopicCollectionRunner:
                     },
                 )
                 page_candidates: list[dict[str, Any]] = []
-                for candidate in candidates_from_mxnzp_result(result):
+                for candidate in candidates_from_provider_result(result):
                     notes = list(candidate.setdefault("source_package", {}).get("collection_notes") or [])
                     notes.append({"type": "search_keyword", "value": keyword})
                     candidate["source_package"]["collection_notes"] = notes
                     page_candidates.append(candidate)
                 candidates.extend(page_candidates)
                 paging = result.get("paging") or {}
-                if bool((paging.get("raw") or {}).get("browser_aggregated")):
+                paging_raw = paging.get("raw") or {}
+                browser_aggregated = bool(paging_raw.get("browser_aggregated"))
+                captured_pages += int(paging_raw.get("pages_captured") or 1)
+                has_next = bool(paging.get("has_next"))
+                if browser_aggregated:
+                    stop_reason = str(paging_raw.get("stop_reason") or ("source_exhausted" if not has_next else "provider_stopped"))
                     break
-                if not paging.get("has_next"):
+                if not has_next:
+                    stop_reason = "source_exhausted"
                     break
                 if not should_continue_search_pages(candidates, page_candidates, config):
+                    stop_reason = "candidate_buffer_satisfied"
                     break
                 offset = str(paging.get("offset") or paging.get("cursor") or offset)
                 search_id = str(paging.get("search_id") or search_id)
                 if not offset and not search_id:
+                    stop_reason = "cursor_missing"
                     break
-        return candidates
+            else:
+                stop_reason = "max_pages"
+        source_exhausted = not has_next
+        return candidates, _traversal_contract(
+            captured_pages=captured_pages,
+            captured_items=len(candidates),
+            has_next=has_next,
+            requested_pages=max(1, config.max_search_pages),
+            stop_reason=stop_reason,
+            source_exhausted=source_exhausted,
+        )
 
-    def _search_mock_candidates(self, executor: LoggedToolExecutor, config: CollectionConfig) -> list[dict[str, Any]]:
+    def _search_mock_candidates(
+        self, executor: LoggedToolExecutor, config: CollectionConfig
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
+        captured_pages = 0
+        has_next = False
         for page in range(1, config.max_search_pages + 1):
             result = executor.run(
                 "collect_source_candidates",
                 {"keyword": config.topic, "page": page, "page_size": config.page_size},
             )
+            captured_pages += 1
             candidates.extend(candidates_from_mock_result(result))
-            if not result.get("has_next"):
+            has_next = bool(result.get("has_next"))
+            if not has_next:
                 break
-        return candidates
+        return candidates, _traversal_contract(
+            captured_pages=captured_pages,
+            captured_items=len(candidates),
+            has_next=has_next,
+            requested_pages=config.max_search_pages,
+            stop_reason="max_pages" if has_next else "source_exhausted",
+            source_exhausted=not has_next,
+        )
+
+    def _verify_candidate_detail(
+        self,
+        executor: LoggedToolExecutor,
+        candidate: dict[str, Any],
+        config: CollectionConfig,
+    ) -> dict[str, Any]:
+        if not self.tools.has("douyin_fetch_video_detail"):
+            return candidate
+        source_package = dict(candidate.get("source_package") or {})
+        source_link = str(source_package.get("source_link") or "").strip()
+        if not source_link:
+            raise ToolExecutionError("Candidate has no source link for detail verification.")
+        detail_result = executor.run("douyin_fetch_video_detail", {"url": source_link})
+        if not detail_result.get("ok", True):
+            raise ToolExecutionError(str(detail_result.get("error") or "Detail provider rejected the candidate."))
+        normalized = detail_result.get("normalized") if isinstance(detail_result.get("normalized"), dict) else {}
+        detail_package = normalized.get("source_package") if isinstance(normalized.get("source_package"), dict) else {}
+        if not detail_package:
+            raise ToolExecutionError("Detail provider returned no authoritative source package.")
+        verified = dict(candidate)
+        verified_package = dict(source_package)
+        _merge_authoritative_package(verified_package, detail_package)
+        verified["source_package"] = verified_package
+        verified["detail_result"] = detail_result
+        duration_ok, duration_skipped = filter_candidates_for_duration(
+            [verified],
+            min_seconds=config.min_duration_seconds,
+            max_seconds=config.max_duration_seconds,
+        )
+        role_ok, role_skipped = filter_candidates_for_role(duration_ok, config.role_profile)
+        relevance_ok, relevance_skipped = filter_candidates_for_relevance(role_ok, config.role_profile, config.topic)
+        rejected = duration_skipped + role_skipped + relevance_skipped
+        if rejected:
+            raise ToolExecutionError(str(rejected[0].get("detail") or rejected[0].get("reason") or "Detail verification rejected candidate."))
+        threshold = config.like_floor
+        if not relevance_ok or metric_value(candidate_metrics(verified), "digg_count", "likes") < threshold:
+            raise ToolExecutionError(f"Authoritative detail is below the floor like threshold {threshold}.")
+        return verified
 
     def _extract_text(self, executor: LoggedToolExecutor, candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         source_package = candidate["source_package"]
@@ -499,6 +627,27 @@ def select_viral_candidates(
         candidate for candidate in ranked if metric_value(candidate_metrics(candidate), "digg_count", "likes") >= like_floor
     ]
     return floor_candidates[:target_count], "floor"
+
+
+def shortlist_viral_candidates(
+    candidates: list[dict[str, Any]],
+    target_count: int,
+    like_floor: int,
+    super_like_threshold: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Rank every viable fallback so failed detail checks do not consume the goal."""
+    ranked = sorted(candidates, key=viral_sort_key, reverse=True)
+    super_candidates = [
+        candidate
+        for candidate in ranked
+        if metric_value(candidate_metrics(candidate), "digg_count", "likes") >= super_like_threshold
+    ]
+    floor_candidates = [
+        candidate
+        for candidate in ranked
+        if metric_value(candidate_metrics(candidate), "digg_count", "likes") >= like_floor
+    ]
+    return floor_candidates, "super" if len(super_candidates) >= target_count else "floor"
 
 
 def should_continue_search_pages(
@@ -745,7 +894,7 @@ def candidates_from_mock_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
-def candidates_from_mxnzp_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+def candidates_from_provider_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     normalized = result.get("normalized") or {}
     packages = normalized.get("source_packages") or []
     candidates: list[dict[str, Any]] = []
@@ -768,6 +917,41 @@ def candidates_from_mxnzp_result(result: dict[str, Any]) -> list[dict[str, Any]]
         source_package.setdefault("collection_notes", [])
         candidates.append({"source_package": source_package, "raw": package})
     return candidates
+
+
+def _merge_authoritative_package(target: dict[str, Any], authoritative: dict[str, Any]) -> None:
+    for key, value in authoritative.items():
+        if value in (None, "", [], {}):
+            continue
+        target[key] = value
+
+
+def _traversal_contract(
+    *,
+    captured_pages: int,
+    captured_items: int,
+    has_next: bool,
+    requested_pages: int,
+    stop_reason: str,
+    source_exhausted: bool,
+) -> dict[str, Any]:
+    request_satisfied = source_exhausted or (requested_pages > 0 and captured_pages >= requested_pages)
+    return {
+        "captured_pages": captured_pages,
+        "captured_items": captured_items,
+        "has_next": has_next,
+        "request_satisfied": request_satisfied,
+        "source_exhausted": source_exhausted,
+        "stop_reason": stop_reason,
+    }
+
+
+def _goal_status(saved_count: int, target_count: int) -> str:
+    if saved_count >= target_count:
+        return "completed"
+    if saved_count > 0:
+        return "partial"
+    return "empty"
 
 
 def enrich_source_package(

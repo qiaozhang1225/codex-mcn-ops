@@ -13,8 +13,6 @@ from .mock_tools import build_mock_source_registry
 from .douyin.contracts import DouyinProvider
 from .douyin.factory import build_collection_provider, load_local_env
 from .douyin.registry import build_douyin_registry
-from .mxnzp_client import MxnzpConfig, MxnzpConfigError, MxnzpDouyinProClient
-from .mxnzp_tools import build_mxnzp_douyin_registry
 from .runner import (
     CollectionConfig,
     TopicCollectionRunner,
@@ -60,7 +58,7 @@ class CollectionTaskOrchestrator:
         target_count: int,
         policy: CollectionPolicy | None = None,
         tool_provider: str = "mock",
-        transcription_provider: str = "provider",
+        transcription_provider: str = "aliyun",
         allow_paid_fallback: bool = False,
         keywords: list[str] | None = None,
         related_keywords: list[str] | None = None,
@@ -165,7 +163,9 @@ class CollectionTaskOrchestrator:
                 )
             report = self.build_task_report(task_id)
             saved_count = _task_saved_count(report)
-            status = "completed" if saved_count >= target_count else "partial"
+            status = _workflow_goal_status(saved_count, target_count)
+            if not run_summaries and keyword_errors:
+                status = "failed"
             summary = {
                 "entrypoint": "keyword",
                 "target_count": target_count,
@@ -174,6 +174,7 @@ class CollectionTaskOrchestrator:
                 "exhausted_keywords": exhausted_keywords,
                 "keyword_errors": keyword_errors,
                 "runs": run_summaries,
+                "goal_satisfied": saved_count >= target_count,
                 "understanding": report["understanding_summary"],
             }
             self.store.finish_collection_task(task_id, status, summary)
@@ -207,7 +208,7 @@ class CollectionTaskOrchestrator:
         task_id: str | None = None,
         finish_task: bool = True,
         data_provider: str = "direct",
-        transcription_provider: str = "provider",
+        transcription_provider: str = "aliyun",
         allow_paid_fallback: bool = False,
     ) -> dict[str, Any]:
         policy = policy or CollectionPolicy()
@@ -263,15 +264,9 @@ class CollectionTaskOrchestrator:
             if author is None and skip_expand:
                 raise KeyError(f"douyin author not found: {label}")
             if author is None:
-                client = self._build_collection_provider(
-                    data_provider=data_provider,
-                    transcription_provider=transcription_provider,
-                    allow_paid_fallback=allow_paid_fallback,
-                    login_cookie=login_cookie,
+                raise KeyError(
+                    f"douyin author not found locally: {label}; resolve a verified sec_uid from video detail first"
                 )
-                author = self._search_and_store_author(client, run_id=run_id, name=name or label, use_cache=not no_cache)
-            if author is None:
-                raise KeyError(f"douyin author not found: {label}")
             if not skip_expand:
                 client = client or self._build_collection_provider(
                     data_provider=data_provider,
@@ -308,7 +303,7 @@ class CollectionTaskOrchestrator:
                 understanding_provider=understanding_provider,
                 understanding_model=understanding_model,
             )
-            run_status = "completed" if materialized else "empty"
+            run_status = _workflow_goal_status(len(materialized), materialize_top)
             self.store.finish_collection_run(
                 run_id,
                 run_status,
@@ -318,18 +313,20 @@ class CollectionTaskOrchestrator:
                     "expand": expand_summary,
                     "materialized": materialized,
                     "skipped": skipped,
+                    "goal_satisfied": materialize_top <= 0 or len(materialized) >= materialize_top,
                 },
             )
             if finish_task:
                 report = self.build_task_report(task_id)
                 self.store.finish_collection_task(
                     task_id,
-                    "completed" if materialized else "empty",
+                    run_status,
                     {
                         "entrypoint": "author",
                         "author": _author_summary(author),
                         "materialized_count": len(materialized),
                         "skipped_count": len(skipped),
+                        "goal_satisfied": materialize_top <= 0 or len(materialized) >= materialize_top,
                         "understanding": report["understanding_summary"],
                     },
                 )
@@ -368,7 +365,7 @@ class CollectionTaskOrchestrator:
         policy: CollectionPolicy | None = None,
         task_id: str | None = None,
         data_provider: str = "direct",
-        transcription_provider: str = "provider",
+        transcription_provider: str = "aliyun",
         allow_paid_fallback: bool = False,
     ) -> dict[str, Any]:
         policy = policy or CollectionPolicy()
@@ -436,13 +433,20 @@ class CollectionTaskOrchestrator:
                     }
                 )
             report = self.build_task_report(task_id)
+            expected_count = materialize_top * len(discovered) if materialize_top > 0 else 0
+            task_status = _workflow_goal_status(_task_saved_count(report), expected_count)
+            if not discovered:
+                task_status = "empty"
             self.store.finish_collection_task(
                 task_id,
-                "completed",
+                task_status,
                 {
                     "entrypoint": "discovered_authors",
                     "authors": discovered,
                     "author_results": author_results,
+                    "goal_satisfied": bool(discovered) and (
+                        expected_count <= 0 or _task_saved_count(report) >= expected_count
+                    ),
                     "understanding": report["understanding_summary"],
                 },
             )
@@ -468,15 +472,15 @@ class CollectionTaskOrchestrator:
                 topic=str(parsed.get("topic") or task.get("topic") or ""),
                 target_count=int(parsed.get("target_count") or task.get("target_count_per_role") or 1),
                 policy=policy,
-                tool_provider=str(parsed.get("tool_provider") or "mock"),
+                tool_provider=_resume_data_provider(parsed.get("tool_provider"), default="mock"),
                 keywords=list(parsed.get("keywords") or []),
                 related_keywords=list(parsed.get("related_keywords") or []),
                 role_id=parsed.get("role_id"),
                 understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
-                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
-                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
+                transcription_provider=_resume_transcription_provider(parsed.get("transcription_provider")),
+                allow_paid_fallback=False,
             )
         if entrypoint == "author":
             return self.run_author_task(
@@ -491,9 +495,9 @@ class CollectionTaskOrchestrator:
                 understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
-                data_provider=str(parsed.get("data_provider") or "direct"),
-                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
-                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
+                data_provider=_resume_data_provider(parsed.get("data_provider"), default="direct"),
+                transcription_provider=_resume_transcription_provider(parsed.get("transcription_provider")),
+                allow_paid_fallback=False,
             )
         if entrypoint == "discovered_authors":
             return self.run_discovered_authors_task(
@@ -509,9 +513,9 @@ class CollectionTaskOrchestrator:
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 policy=policy,
                 task_id=task_id,
-                data_provider=str(parsed.get("data_provider") or "direct"),
-                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
-                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
+                data_provider=_resume_data_provider(parsed.get("data_provider"), default="direct"),
+                transcription_provider=_resume_transcription_provider(parsed.get("transcription_provider")),
+                allow_paid_fallback=False,
             )
         raise ValueError(f"unsupported task entrypoint: {entrypoint}")
 
@@ -566,22 +570,8 @@ class CollectionTaskOrchestrator:
             "understanding_summary": _understanding_summary(saved_materials),
             "next_recommended_keywords": _next_keywords_from_materials(saved_materials),
             "next_recommended_authors": _next_authors_from_materials(saved_materials),
-            "api_call_summary": self.store.task_call_summary(task_id),
+            "collection_call_summary": self.store.task_call_summary(task_id),
         }
-
-    def _build_mxnzp_client(self, *, login_cookie: bool) -> MxnzpDouyinProClient:
-        try:
-            config = MxnzpConfig.from_env()
-        except MxnzpConfigError as exc:
-            raise MxnzpConfigError(
-                f"{exc} Run `mcn collect douyin-login-cookie --write-env` when a logged-in Douyin cookie is required."
-            ) from exc
-        if login_cookie and not config.douyin_cookie:
-            login_result = login_and_fetch_douyin_cookie()
-            if not login_result.cookie_valid:
-                raise MxnzpConfigError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
-            config.douyin_cookie = login_result.cookie
-        return MxnzpDouyinProClient(config)
 
     def _build_collection_provider(
         self,
@@ -595,7 +585,7 @@ class CollectionTaskOrchestrator:
         if login_cookie and not os.environ.get("DOUYIN_COOKIE", "").strip():
             login_result = login_and_fetch_douyin_cookie()
             if not login_result.cookie_valid:
-                raise MxnzpConfigError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
+                raise RuntimeError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
             os.environ["DOUYIN_COOKIE"] = login_result.cookie
         return build_collection_provider(
             data_provider,
@@ -603,7 +593,7 @@ class CollectionTaskOrchestrator:
             allow_paid_fallback=allow_paid_fallback,
         )
 
-    def _call_mxnzp(
+    def _call_provider(
         self,
         client: DouyinProvider,
         *,
@@ -675,25 +665,6 @@ class CollectionTaskOrchestrator:
             raise ValueError(f"multiple douyin authors matched {name!r}: {names}; use --sec-uid")
         return matches[0] if matches else None
 
-    def _search_and_store_author(
-        self,
-        client: DouyinProvider,
-        *,
-        run_id: str,
-        name: str,
-        use_cache: bool,
-    ) -> dict[str, Any] | None:
-        result = self._call_mxnzp(client, run_id=run_id, method_key="user_search", params={"keyword": name}, use_cache=use_cache)
-        normalized = result.get("normalized") if isinstance(result.get("normalized"), dict) else {}
-        items = normalized.get("items") if isinstance(normalized.get("items"), list) else []
-        candidates = [item for item in items if isinstance(item, dict)]
-        exact = [item for item in candidates if item.get("nickname") == name]
-        picked = (exact or candidates)[0] if candidates else None
-        if not picked:
-            return None
-        sec_uid = self.store.upsert_douyin_author(picked, raw=picked.get("raw") if isinstance(picked.get("raw"), dict) else picked)
-        return self.store.get_douyin_author(sec_uid)
-
     def _expand_author_videos(
         self,
         client: DouyinProvider,
@@ -709,14 +680,16 @@ class CollectionTaskOrchestrator:
         use_cache: bool,
     ) -> dict[str, Any]:
         cursor = ""
-        page_limit = max_pages if max_pages > 0 else 1000
+        page_limit = max_pages if max_pages > 0 else 100
         pages: list[dict[str, Any]] = []
         saved_video_ids: list[str] = []
         seen_cursors: set[str] = set()
         nonviral_page_streak = 0
         stop_reason = "max_pages"
+        captured_pages = 0
+        has_next = False
         for page_number in range(1, page_limit + 1):
-            result = self._call_mxnzp(
+            result = self._call_provider(
                 client,
                 run_id=run_id,
                 method_key="user_post",
@@ -746,6 +719,10 @@ class CollectionTaskOrchestrator:
                     )
                 )
             paging = result.get("paging") if isinstance(result.get("paging"), dict) else {}
+            paging_raw = paging.get("raw") if isinstance(paging.get("raw"), dict) else {}
+            browser_aggregated = bool(paging_raw.get("browser_aggregated"))
+            result_pages = int(paging_raw.get("pages_captured") or 1)
+            captured_pages += result_pages
             next_cursor = str(paging.get("cursor") or "")
             has_next = bool(paging.get("has_next"))
             page_viral_count = len(
@@ -760,6 +737,7 @@ class CollectionTaskOrchestrator:
             pages.append(
                 {
                     "page": page_number,
+                    "captured_pages": result_pages,
                     "fetched_count": len(items),
                     "saved_count": len(page_videos),
                     "viral_count": page_viral_count,
@@ -771,8 +749,8 @@ class CollectionTaskOrchestrator:
             if not has_next:
                 stop_reason = "no_next_page"
                 break
-            if bool((paging.get("raw") or {}).get("browser_aggregated")):
-                stop_reason = str((paging.get("raw") or {}).get("stop_reason") or "browser_aggregated")
+            if browser_aggregated:
+                stop_reason = str(paging_raw.get("stop_reason") or ("source_exhausted" if not has_next else "provider_stopped"))
                 break
             if not next_cursor or next_cursor in seen_cursors:
                 stop_reason = "cursor_exhausted"
@@ -782,11 +760,21 @@ class CollectionTaskOrchestrator:
                 break
             seen_cursors.add(next_cursor)
             cursor = next_cursor
+        source_exhausted = not has_next
+        traversal = _traversal_contract(
+            captured_pages=captured_pages,
+            captured_items=len(set(saved_video_ids)),
+            has_next=has_next,
+            requested_pages=max_pages,
+            stop_reason=stop_reason,
+            source_exhausted=source_exhausted,
+        )
         return {
             "pages": pages,
             "saved_count": len(set(saved_video_ids)),
             "total_stored_count": len(self.store.list_douyin_author_videos(author["sec_uid"])),
             "stop_reason": stop_reason,
+            **traversal,
         }
 
     def _materialize_author_videos(
@@ -814,10 +802,11 @@ class CollectionTaskOrchestrator:
             min_duration_seconds=min_duration_seconds,
             max_duration_seconds=max_duration_seconds,
         )
-        selected = ranked[:materialize_top] if materialize_top > 0 else ranked
         materialized: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        for video in selected:
+        for video in ranked:
+            if materialize_top > 0 and len(materialized) >= materialize_top:
+                break
             existing = _find_collected_material_by_work_id(self.store, str(video.get("work_id") or ""))
             if existing:
                 if existing.get("status") != "collected":
@@ -872,13 +861,54 @@ class CollectionTaskOrchestrator:
                 allow_paid_fallback=allow_paid_fallback,
                 login_cookie=False,
             )
-            extract_result = self._call_mxnzp(
-                client,
-                run_id=run_id,
-                method_key="video_to_text_v2",
-                body={"url": source_url},
-                use_cache=use_cache,
-            )
+            try:
+                detail_result = self._call_provider(
+                    client,
+                    run_id=run_id,
+                    method_key="detail_v4",
+                    body={"url": source_url},
+                    use_cache=use_cache,
+                )
+                detail_normalized = detail_result.get("normalized") if isinstance(detail_result.get("normalized"), dict) else {}
+                detail_package = detail_normalized.get("source_package") if isinstance(detail_normalized.get("source_package"), dict) else {}
+                detail_rejection = _author_detail_rejection(
+                    detail_package,
+                    like_floor=like_floor,
+                    min_duration_seconds=min_duration_seconds,
+                    max_duration_seconds=max_duration_seconds,
+                )
+                if detail_rejection:
+                    raise ValueError(detail_rejection)
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "work_id": video.get("work_id"),
+                        "title": video.get("title"),
+                        "reason": "detail_verification_failed",
+                        "detail": str(exc),
+                    }
+                )
+                continue
+            verified_video = _author_video_from_normalized_item({}, detail_package)
+            video = {**video, **{key: value for key, value in verified_video.items() if value not in (None, "", [], {})}}
+            try:
+                extract_result = self._call_provider(
+                    client,
+                    run_id=run_id,
+                    method_key="video_to_text_v2",
+                    body={"url": source_url},
+                    use_cache=use_cache,
+                )
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "work_id": video.get("work_id"),
+                        "title": video.get("title"),
+                        "reason": "video_to_text_failed",
+                        "detail": str(exc),
+                    }
+                )
+                continue
             normalized = extract_result.get("normalized") if isinstance(extract_result.get("normalized"), dict) else {}
             transcript_text = str(normalized.get("text") or (normalized.get("source_package") or {}).get("transcript_text") or "").strip()
             if not transcript_text:
@@ -886,6 +916,7 @@ class CollectionTaskOrchestrator:
                 continue
             source_package = _source_package_from_author_video(author, video)
             source_package["task_id"] = task_id
+            _merge_source_package(source_package, detail_package)
             extract_package = normalized.get("source_package") if isinstance(normalized.get("source_package"), dict) else {}
             _merge_source_package(source_package, extract_package)
             source_package["transcript_text"] = transcript_text
@@ -997,7 +1028,7 @@ def format_task_show(report: dict[str, Any]) -> str:
             f"Task {task['id']} [{task['status']}]",
             f"scope={task['target_scope']} topic={task.get('topic') or ''}",
             f"saved={report['saved_count']} created={report['created_material_count']} reused={report['existing_reused_count']} remaining={report['remaining_count']}",
-            f"runs={len(report['runs'])} skipped={len(report['skipped_candidates'])} api_calls={report['api_call_summary']['total_calls']} cache_hits={report['api_call_summary']['cache_hits']}",
+            f"runs={len(report['runs'])} skipped={len(report['skipped_candidates'])} api_calls={report['collection_call_summary']['total_calls']} cache_hits={report['collection_call_summary']['cache_hits']}",
             f"understanding metadata_ready={understanding['metadata_ready_count']} codex_default={understanding['final_codex_count']} rules_draft={understanding['draft_local_count']} pending_material={understanding['pending_material_understanding_count']}",
         ]
     )
@@ -1057,7 +1088,7 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
         )
     )
     lines.extend(["", "## API Calls", ""])
-    call_summary = report["api_call_summary"]
+    call_summary = report["collection_call_summary"]
     lines.append(f"- total_calls: {call_summary['total_calls']}")
     lines.append(f"- cache_hits: {call_summary['cache_hits']}")
     for item in call_summary["by_tool"]:
@@ -1098,7 +1129,7 @@ def _source_package_from_author_video(author: dict[str, Any], video: dict[str, A
     source_package = dict(video.get("source_package") or {})
     metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
     defaults = {
-        "source_type": "mxnzp_douyin_author",
+        "source_type": "douyin_author",
         "source_platform": "douyin",
         "source_link": video.get("source_url"),
         "title": video.get("title"),
@@ -1217,6 +1248,70 @@ def _optional_int(value: Any) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _author_detail_rejection(
+    source_package: dict[str, Any],
+    *,
+    like_floor: int,
+    min_duration_seconds: int,
+    max_duration_seconds: int,
+) -> str | None:
+    if not source_package:
+        return "Detail provider returned no authoritative source package."
+    duration_ms = _optional_int(source_package.get("duration_ms"))
+    if duration_ms is not None:
+        duration_seconds = duration_ms / 1000
+        if duration_seconds < min_duration_seconds:
+            return f"Authoritative duration {duration_seconds:.1f}s is below {min_duration_seconds}s."
+        if duration_seconds > max_duration_seconds:
+            return f"Authoritative duration {duration_seconds:.1f}s exceeds {max_duration_seconds}s."
+    metrics = source_package.get("public_metrics") if isinstance(source_package.get("public_metrics"), dict) else {}
+    likes = metric_value(metrics, "digg_count", "likes")
+    score = engagement_score({"source_package": {"public_metrics": metrics}})
+    if likes < like_floor and score < max(like_floor * 2, 1):
+        return f"Authoritative metrics are below the viral threshold {like_floor}."
+    return None
+
+
+def _traversal_contract(
+    *,
+    captured_pages: int,
+    captured_items: int,
+    has_next: bool,
+    requested_pages: int,
+    stop_reason: str,
+    source_exhausted: bool,
+) -> dict[str, Any]:
+    request_satisfied = source_exhausted or (requested_pages > 0 and captured_pages >= requested_pages)
+    return {
+        "captured_pages": captured_pages,
+        "captured_items": captured_items,
+        "has_next": has_next,
+        "request_satisfied": request_satisfied,
+        "source_exhausted": source_exhausted,
+        "stop_reason": stop_reason,
+    }
+
+
+def _workflow_goal_status(saved_count: int, target_count: int) -> str:
+    if target_count <= 0 or saved_count >= target_count:
+        return "completed"
+    if saved_count > 0:
+        return "partial"
+    return "empty"
+
+
+def _resume_data_provider(value: Any, *, default: str) -> str:
+    provider = str(value or default).strip().lower()
+    if provider in {"mxnzp", "auto"}:
+        return "direct"
+    return provider
+
+
+def _resume_transcription_provider(value: Any) -> str:
+    provider = str(value or "aliyun").strip().lower()
+    return "aliyun" if provider in {"", "provider"} else provider
 
 
 def _target_understanding(
