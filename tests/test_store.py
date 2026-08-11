@@ -54,18 +54,23 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
     assert {
         "clean_title",
         "source_role_id",
-        "caption_text",
-        "hashtags_json",
+        "source_work_id",
+        "transcription_id",
         "hook_text",
         "core_claim",
         "content_type",
         "oral_script_pattern",
         "risk_level",
+    }.issubset(columns)
+    assert {
+        "caption_text",
+        "hashtags_json",
         "duration_ms",
         "cover_url",
         "video_url",
         "audio_url",
-    }.issubset(columns)
+        "transcript_text",
+    }.isdisjoint(columns)
     assert {
         "confirmation_status",
         "confirmed_at",
@@ -264,6 +269,7 @@ def test_material_v2_promoted_columns_and_pending_summary(tmp_path: Path) -> Non
         run_id=run_id,
         source_package={
             "source_link": "https://example.com/video",
+            "work_id": "7345678901234567001",
             "title": "口袋放三样，不富人也旺 #财运 #国学智慧",
             "platform_caption": "口袋放三样，不富人也旺 #财运 #国学智慧",
             "transcript_text": "口袋放三样不富人也旺。",
@@ -419,6 +425,7 @@ def test_douyin_author_profile_and_video_storage(tmp_path: Path) -> None:
         run_id=run_id,
         source_package={
             "source_link": "https://example.com/video",
+            "work_id": "756",
             "title": "八个旺自己的秘密 #女性成长",
             "platform_caption": "八个旺自己的秘密 #女性成长",
             "transcript_text": "旺自己要先稳住能量。",

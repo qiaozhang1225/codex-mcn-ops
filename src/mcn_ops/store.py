@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 import uuid
@@ -16,8 +17,7 @@ SCHEMA = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    version TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL,
     report_json TEXT NOT NULL DEFAULT '{}'
 );
@@ -169,17 +169,20 @@ CREATE TABLE IF NOT EXISTS source_authors (
     id TEXT PRIMARY KEY,
     platform TEXT NOT NULL,
     platform_author_id TEXT NOT NULL,
-    platform_user_id TEXT,
-    handle TEXT,
-    display_name TEXT NOT NULL,
+    uid TEXT,
+    account_id TEXT,
+    display_name TEXT,
     signature TEXT,
     avatar_url TEXT,
     profile_url TEXT,
-    profile_json TEXT NOT NULL DEFAULT '{}',
+    ip_location TEXT,
+    follower_count INTEGER,
+    following_count INTEGER,
+    work_count INTEGER,
+    total_favorited INTEGER,
+    raw_json TEXT NOT NULL DEFAULT '{}',
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
     UNIQUE(platform, platform_author_id)
 );
 
@@ -188,16 +191,17 @@ CREATE TABLE IF NOT EXISTS source_works (
     platform TEXT NOT NULL,
     platform_work_id TEXT NOT NULL,
     author_id TEXT,
-    canonical_url TEXT,
+    source_url TEXT,
+    short_url TEXT,
     title TEXT,
     caption_text TEXT,
     hashtags_json TEXT NOT NULL DEFAULT '[]',
     published_at TEXT,
     duration_ms INTEGER,
+    cover_url TEXT,
+    raw_json TEXT NOT NULL DEFAULT '{}',
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
     UNIQUE(platform, platform_work_id),
     FOREIGN KEY(author_id) REFERENCES source_authors(id)
 );
@@ -205,34 +209,28 @@ CREATE TABLE IF NOT EXISTS source_works (
 CREATE TABLE IF NOT EXISTS source_observations (
     id TEXT PRIMARY KEY,
     source_work_id TEXT NOT NULL,
-    run_id TEXT,
     provider TEXT NOT NULL,
-    observation_kind TEXT NOT NULL,
+    observation_type TEXT NOT NULL,
+    source_table TEXT NOT NULL,
+    source_row_id TEXT NOT NULL,
     metrics_json TEXT NOT NULL DEFAULT '{}',
-    media_json TEXT NOT NULL DEFAULT '{}',
-    raw_json TEXT NOT NULL DEFAULT '{}',
+    payload_json TEXT NOT NULL DEFAULT '{}',
     observed_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(source_work_id) REFERENCES source_works(id),
-    FOREIGN KEY(run_id) REFERENCES collection_runs(id)
+    UNIQUE(source_table, source_row_id),
+    FOREIGN KEY(source_work_id) REFERENCES source_works(id)
 );
 
 CREATE TABLE IF NOT EXISTS material_transcriptions (
     id TEXT PRIMARY KEY,
     source_work_id TEXT NOT NULL,
+    identity_key TEXT NOT NULL UNIQUE,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
-    options_json TEXT NOT NULL DEFAULT '{}',
-    options_fingerprint TEXT NOT NULL,
     audio_sha256 TEXT,
-    identity_key TEXT NOT NULL UNIQUE,
-    transcript_text TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
-    audio_seconds REAL,
-    estimated_cost REAL,
-    cache_hit INTEGER NOT NULL DEFAULT 0,
-    provider_job_id TEXT,
-    raw_result_json TEXT NOT NULL DEFAULT '{}',
+    transcript_text TEXT NOT NULL,
+    language TEXT,
+    options_json TEXT NOT NULL DEFAULT '{}',
+    provider_payload_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(source_work_id) REFERENCES source_works(id)
@@ -243,14 +241,7 @@ CREATE TABLE IF NOT EXISTS collection_candidates (
     run_id TEXT NOT NULL,
     task_id TEXT,
     role_id TEXT,
-    source_key TEXT NOT NULL,
-    source_url TEXT,
-    title TEXT,
-    author_name TEXT,
-    platform_caption TEXT,
-    metrics_json TEXT NOT NULL DEFAULT '{}',
-    source_package_json TEXT NOT NULL DEFAULT '{}',
-    raw_json TEXT NOT NULL DEFAULT '{}',
+    source_work_id TEXT NOT NULL,
     status TEXT NOT NULL,
     selection_reason TEXT,
     skip_reason TEXT,
@@ -259,10 +250,11 @@ CREATE TABLE IF NOT EXISTS collection_candidates (
     material_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(run_id, source_key),
+    UNIQUE(run_id, source_work_id),
     FOREIGN KEY(run_id) REFERENCES collection_runs(id),
     FOREIGN KEY(task_id) REFERENCES collection_tasks(id),
     FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+    FOREIGN KEY(source_work_id) REFERENCES source_works(id),
     FOREIGN KEY(material_id) REFERENCES collected_materials(id)
 );
 
@@ -272,13 +264,9 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     task_id TEXT,
     role_id TEXT,
     source_role_id TEXT,
-    source_url TEXT,
-    title TEXT,
+    source_work_id TEXT NOT NULL,
+    transcription_id TEXT,
     clean_title TEXT,
-    platform_caption TEXT,
-    caption_text TEXT,
-    hashtags_json TEXT NOT NULL DEFAULT '[]',
-    transcript_text TEXT NOT NULL,
     summary_text TEXT,
     hook_text TEXT,
     core_claim TEXT,
@@ -294,20 +282,6 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     risk_notes_json TEXT NOT NULL DEFAULT '[]',
     recommended_platforms_json TEXT NOT NULL DEFAULT '[]',
     next_collection_keywords_json TEXT NOT NULL DEFAULT '[]',
-    author_name TEXT,
-    author_sec_uid TEXT,
-    author_profile_url TEXT,
-    author_douyin_id TEXT,
-    work_id TEXT,
-    work_short_url TEXT,
-    source_platform TEXT,
-    post_time TEXT,
-    duration_ms INTEGER,
-    cover_url TEXT,
-    video_url TEXT,
-    audio_url TEXT,
-    author_identity_confidence TEXT,
-    metrics_json TEXT NOT NULL DEFAULT '{}',
     material_eligibility_json TEXT NOT NULL DEFAULT '{}',
     eligibility_status TEXT NOT NULL DEFAULT 'accepted',
     eligibility_provider TEXT NOT NULL DEFAULT 'local-rules',
@@ -323,14 +297,14 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     understanding_model TEXT NOT NULL DEFAULT 'gpt-5.5',
     sample_pool_clues_json TEXT NOT NULL DEFAULT '[]',
     understanding_status TEXT NOT NULL DEFAULT 'pending',
-    source_package_json TEXT NOT NULL DEFAULT '{}',
-    raw_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'collected',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(run_id) REFERENCES collection_runs(id),
     FOREIGN KEY(task_id) REFERENCES collection_tasks(id),
-    FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+    FOREIGN KEY(source_work_id) REFERENCES source_works(id),
+    FOREIGN KEY(transcription_id) REFERENCES material_transcriptions(id)
 );
 
 CREATE TABLE IF NOT EXISTS material_role_matches (
@@ -505,7 +479,7 @@ CREATE TABLE IF NOT EXISTS provider_call_logs (
     id TEXT PRIMARY KEY,
     run_id TEXT,
     provider TEXT NOT NULL DEFAULT 'mxnzp',
-    tool_name TEXT NOT NULL,
+    operation TEXT NOT NULL,
     request_fingerprint TEXT NOT NULL,
     status TEXT NOT NULL,
     error TEXT,
@@ -518,7 +492,7 @@ CREATE TABLE IF NOT EXISTS provider_call_logs (
 CREATE TABLE IF NOT EXISTS provider_call_cache (
     provider TEXT NOT NULL,
     request_fingerprint TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
+    operation TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -544,7 +518,7 @@ CREATE INDEX IF NOT EXISTS idx_collection_candidates_run_id ON collection_candid
 CREATE INDEX IF NOT EXISTS idx_collection_candidates_status ON collection_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_collected_materials_run_id ON collected_materials(run_id);
 CREATE INDEX IF NOT EXISTS idx_collected_materials_role_id ON collected_materials(role_id);
-CREATE INDEX IF NOT EXISTS idx_collected_materials_work_id ON collected_materials(work_id);
+CREATE INDEX IF NOT EXISTS idx_collected_materials_source_work ON collected_materials(source_work_id);
 CREATE INDEX IF NOT EXISTS idx_source_authors_display_name ON source_authors(platform, display_name);
 CREATE INDEX IF NOT EXISTS idx_source_works_author ON source_works(author_id);
 CREATE INDEX IF NOT EXISTS idx_source_observations_work ON source_observations(source_work_id, observed_at);
@@ -709,7 +683,6 @@ class Store:
             _migrate_ip_role_v2(conn)
             _migrate_schema_v2(conn)
             _migrate_creation_schema(conn)
-            _backfill_material_v2_columns(conn)
         return self.db_path
 
     def create_content_package(
@@ -1305,6 +1278,144 @@ class Store:
             rows = conn.execute(query, params).fetchall()
         return [_collection_run_row_to_dict(row) for row in rows]
 
+    def _persist_source_package(
+        self,
+        source_package: dict[str, Any],
+        *,
+        raw: dict[str, Any] | None,
+        run_id: str | None,
+        observation_kind: str,
+        provider: str | None = None,
+    ) -> tuple[str, str, str | None]:
+        platform = str(source_package.get("source_platform") or source_package.get("source_type") or "").strip().lower()
+        source_url = str(source_package.get("source_link") or source_package.get("source_url") or "").strip()
+        if not platform:
+            platform = "douyin" if "douyin.com" in source_url else "unknown"
+        platform_work_id = _source_package_platform_work_id(source_package, source_url=source_url, platform=platform)
+        if not platform_work_id:
+            raise ValueError("source package has no authoritative platform work id")
+
+        author_id: str | None = None
+        platform_author_id = str(source_package.get("author_sec_uid") or "").strip()
+        display_name = str(source_package.get("author_name") or "").strip()
+        if platform_author_id and display_name:
+            author_id = self.upsert_source_author(
+                platform=platform,
+                platform_author_id=platform_author_id,
+                platform_user_id=source_package.get("author_uid"),
+                handle=source_package.get("author_douyin_id"),
+                display_name=display_name,
+                profile_url=source_package.get("author_profile_url"),
+                profile=source_package.get("author_profile") or {},
+            )
+
+        caption = str(source_package.get("caption_text") or source_package.get("platform_caption") or "").strip()
+        parsed = parse_caption(title=str(source_package.get("title") or ""), caption=caption)
+        source_work_id = self.upsert_source_work(
+            platform=platform,
+            platform_work_id=platform_work_id,
+            author_id=author_id,
+            canonical_url=source_url or None,
+            title=source_package.get("title"),
+            caption_text=parsed["caption_text"],
+            hashtags=source_package.get("hashtags") or parsed["hashtags"],
+            published_at=source_package.get("post_time"),
+            duration_ms=_optional_int(source_package.get("duration_ms")),
+        )
+        observation_id = self.insert_source_observation(
+            source_work_id=source_work_id,
+            provider=provider or str(source_package.get("provider") or "runtime"),
+            observation_kind=observation_kind,
+            run_id=run_id,
+            metrics=source_package.get("public_metrics") or {},
+            media={
+                "cover_url": source_package.get("cover_url"),
+                "video_url": source_package.get("video_url"),
+                "audio_url": source_package.get("audio_url"),
+            },
+            raw=raw or {},
+        )
+
+        transcription_id: str | None = None
+        transcript = str(source_package.get("transcript_text") or "").strip()
+        if transcript:
+            transcription_provider = str(source_package.get("transcription_provider") or provider or "runtime")
+            transcription_model = str(source_package.get("transcription_model") or "unknown")
+            text_hash = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+            identity_key = f"runtime:{source_work_id}:{transcription_provider}:{transcription_model}:{text_hash}"
+            transcription_id = self.insert_material_transcription(
+                source_work_id=source_work_id,
+                provider=transcription_provider,
+                model=transcription_model,
+                options_fingerprint=str(source_package.get("transcription_options_fingerprint") or "none"),
+                identity_key=identity_key,
+                transcript_text=transcript,
+                audio_sha256=source_package.get("audio_sha256"),
+                raw_result=source_package.get("transcription_result") or {},
+            )
+        return source_work_id, observation_id, transcription_id
+
+    def source_package_for_work(
+        self,
+        source_work_id: str,
+        *,
+        transcription_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            work = conn.execute("SELECT * FROM source_works WHERE id = ?", (source_work_id,)).fetchone()
+            if work is None:
+                raise KeyError(f"source work not found: {source_work_id}")
+            author = None
+            if work["author_id"]:
+                author = conn.execute("SELECT * FROM source_authors WHERE id = ?", (work["author_id"],)).fetchone()
+            observation = conn.execute(
+                """
+                SELECT * FROM source_observations
+                WHERE source_work_id = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """,
+                (source_work_id,),
+            ).fetchone()
+            transcription = None
+            if transcription_id:
+                transcription = conn.execute(
+                    "SELECT * FROM material_transcriptions WHERE id = ?",
+                    (transcription_id,),
+                ).fetchone()
+            elif _table_exists(conn, "material_transcriptions"):
+                transcription = conn.execute(
+                    """
+                    SELECT * FROM material_transcriptions
+                    WHERE source_work_id = ?
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (source_work_id,),
+                ).fetchone()
+        payload = _row_json(observation, "payload_json", {}) if observation else {}
+        media = payload.get("media") or {}
+        return {
+            "source_work_id": source_work_id,
+            "work_id": work["platform_work_id"],
+            "source_link": work["source_url"],
+            "work_short_url": work["short_url"],
+            "source_platform": work["platform"],
+            "title": work["title"],
+            "platform_caption": work["caption_text"],
+            "caption_text": work["caption_text"],
+            "hashtags": _row_json(work, "hashtags_json", []),
+            "post_time": work["published_at"],
+            "duration_ms": work["duration_ms"],
+            "cover_url": work["cover_url"] or media.get("cover_url"),
+            "public_metrics": _row_json(observation, "metrics_json", {}) if observation else {},
+            "author_name": author["display_name"] if author else None,
+            "author_sec_uid": author["platform_author_id"] if author and work["platform"] == "douyin" else None,
+            "author_profile_url": author["profile_url"] if author else None,
+            "author_douyin_id": author["account_id"] if author and work["platform"] == "douyin" else None,
+            "transcript_text": transcription["transcript_text"] if transcription else "",
+        }
+
     def upsert_collection_candidate(
         self,
         run_id: str,
@@ -1318,34 +1429,31 @@ class Store:
         material_id: str | None = None,
     ) -> str:
         source_package = dict(candidate.get("source_package") or {})
-        metrics = source_package.get("public_metrics") or {}
-        source_key = _candidate_source_key(candidate)
+        source_work_id, _, _ = self._persist_source_package(
+            source_package,
+            raw=candidate.get("raw") or {},
+            run_id=run_id,
+            observation_kind="search",
+            provider=str(candidate.get("provider") or source_package.get("provider") or "runtime"),
+        )
         timestamp = now_iso()
         with self.connect() as conn:
             existing = conn.execute(
-                "SELECT id FROM collection_candidates WHERE run_id = ? AND source_key = ?",
-                (run_id, source_key),
+                "SELECT id FROM collection_candidates WHERE run_id = ? AND source_work_id = ?",
+                (run_id, source_work_id),
             ).fetchone()
             candidate_id = existing["id"] if existing else new_id("cand")
             conn.execute(
                 """
                 INSERT INTO collection_candidates(
-                    id, run_id, task_id, role_id, source_key, source_url, title,
-                    author_name, platform_caption, metrics_json, source_package_json,
-                    raw_json, status, selection_reason, skip_reason, skip_detail,
-                    threshold_mode, material_id, created_at, updated_at
+                    id, run_id, task_id, role_id, source_work_id, status,
+                    selection_reason, skip_reason, skip_detail, threshold_mode,
+                    material_id, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id, source_key) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, source_work_id) DO UPDATE SET
                     task_id = excluded.task_id,
                     role_id = excluded.role_id,
-                    source_url = excluded.source_url,
-                    title = excluded.title,
-                    author_name = excluded.author_name,
-                    platform_caption = excluded.platform_caption,
-                    metrics_json = excluded.metrics_json,
-                    source_package_json = excluded.source_package_json,
-                    raw_json = excluded.raw_json,
                     status = excluded.status,
                     selection_reason = excluded.selection_reason,
                     skip_reason = excluded.skip_reason,
@@ -1359,14 +1467,7 @@ class Store:
                     run_id,
                     source_package.get("task_id"),
                     source_package.get("role_id"),
-                    source_key,
-                    source_package.get("source_link"),
-                    source_package.get("title"),
-                    source_package.get("author_name"),
-                    source_package.get("platform_caption"),
-                    dumps(scrub_for_storage(metrics)),
-                    dumps(scrub_for_storage(source_package)),
-                    dumps(scrub_for_storage(candidate.get("raw") or {})),
+                    source_work_id,
                     status,
                     selection_reason,
                     skip_reason,
@@ -1407,7 +1508,35 @@ class Store:
         query += " ORDER BY created_at, id"
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [_candidate_row_to_dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            package = self.source_package_for_work(row["source_work_id"])
+            result.append(
+                {
+                    "id": row["id"],
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "role_id": row["role_id"],
+                    "source_work_id": row["source_work_id"],
+                    "source_key": package.get("source_link") or package.get("work_id"),
+                    "source_url": package.get("source_link"),
+                    "title": package.get("title"),
+                    "author_name": package.get("author_name"),
+                    "platform_caption": package.get("platform_caption"),
+                    "metrics": package.get("public_metrics") or {},
+                    "source_package": package,
+                    "raw": {},
+                    "status": row["status"],
+                    "selection_reason": row["selection_reason"],
+                    "skip_reason": row["skip_reason"],
+                    "skip_detail": row["skip_detail"],
+                    "threshold_mode": row["threshold_mode"],
+                    "material_id": row["material_id"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return result
 
     def insert_collected_material(
         self,
@@ -1419,33 +1548,45 @@ class Store:
     ) -> str:
         material_id = new_id("mat")
         timestamp = now_iso()
-        metrics = source_package.get("public_metrics") or {}
         provider = str(material_understanding.get("understanding_provider") or "codex-agent")
         model = str(material_understanding.get("understanding_model") or "gpt-5.5")
         promoted = _material_promoted_values(source_package, material_understanding, raw)
         eligibility = _material_eligibility_values(source_package)
+        canonical_package = {
+            **source_package,
+            "caption_text": source_package.get("caption_text") or promoted["caption_text"],
+            "hashtags": source_package.get("hashtags") or promoted["hashtags"],
+            "post_time": source_package.get("post_time") or promoted["post_time"],
+            "duration_ms": source_package.get("duration_ms") or promoted["duration_ms"],
+            "cover_url": source_package.get("cover_url") or promoted["cover_url"],
+            "video_url": source_package.get("video_url") or promoted["video_url"],
+            "audio_url": source_package.get("audio_url") or promoted["audio_url"],
+        }
+        source_work_id, _, transcription_id = self._persist_source_package(
+            canonical_package,
+            raw=raw,
+            run_id=run_id,
+            observation_kind="material",
+            provider=str(source_package.get("provider") or "runtime"),
+        )
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO collected_materials(
-                    id, run_id, task_id, role_id, source_role_id, source_url, title, clean_title,
-                    platform_caption, caption_text, hashtags_json,
-                    transcript_text, summary_text, hook_text, core_claim,
+                    id, run_id, task_id, role_id, source_role_id, source_work_id,
+                    transcription_id, clean_title, summary_text, hook_text, core_claim,
                     content_type, oral_script_pattern, audience, emotion_trigger,
                     risk_level, content_structure_json, key_points_json,
                     rewrite_angles_json, usable_quotes_json, risk_notes_json,
                     recommended_platforms_json, next_collection_keywords_json,
-                    author_name, author_sec_uid, author_profile_url, author_douyin_id,
-                    work_id, work_short_url, source_platform, post_time, duration_ms,
-                    cover_url, video_url, audio_url, author_identity_confidence, metrics_json,
                     material_eligibility_json, eligibility_status, eligibility_provider,
                     eligibility_version, eligibility_reason_json, content_form,
                     knowledge_core_score, oral_script_fit_score, ip_fit_score, reject_reason,
                     material_understanding_json, understanding_provider,
                     understanding_model, sample_pool_clues_json, understanding_status,
-                    source_package_json, raw_json, created_at, updated_at
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     material_id,
@@ -1453,13 +1594,9 @@ class Store:
                     source_package.get("task_id"),
                     source_package.get("role_id"),
                     source_package.get("source_role_id") or source_package.get("role_id"),
-                    source_package.get("source_link"),
-                    source_package.get("title"),
+                    source_work_id,
+                    transcription_id,
                     promoted["clean_title"],
-                    source_package.get("platform_caption"),
-                    promoted["caption_text"],
-                    dumps(promoted["hashtags"]),
-                    source_package.get("transcript_text") or "",
                     promoted["summary_text"],
                     promoted["hook_text"],
                     promoted["core_claim"],
@@ -1475,21 +1612,6 @@ class Store:
                     dumps(promoted["risk_notes"]),
                     dumps(promoted["recommended_platforms"]),
                     dumps(promoted["next_collection_keywords"]),
-                    source_package.get("author_name"),
-                    source_package.get("author_sec_uid"),
-                    source_package.get("author_profile_url"),
-                    source_package.get("author_douyin_id"),
-                    source_package.get("work_id"),
-                    source_package.get("work_short_url"),
-                    source_package.get("source_platform") or source_package.get("source_type"),
-                    promoted["post_time"],
-                    promoted["duration_ms"],
-                    promoted["cover_url"],
-                    promoted["video_url"],
-                    promoted["audio_url"],
-                    (source_package.get("author_identity") or {}).get("confidence")
-                    or source_package.get("author_identity_confidence"),
-                    dumps(scrub_for_storage(metrics)),
                     dumps(scrub_for_storage(eligibility["material_eligibility"])),
                     eligibility["eligibility_status"],
                     eligibility["eligibility_provider"],
@@ -1505,8 +1627,6 @@ class Store:
                     model,
                     dumps(scrub_for_storage(source_package.get("sample_pool_clues") or [])),
                     source_package.get("understanding_status") or "success",
-                    dumps(scrub_for_storage(source_package)),
-                    dumps(scrub_for_storage(raw)),
                     timestamp,
                     timestamp,
                 ),
@@ -1516,7 +1636,79 @@ class Store:
     def get_collected_material(self, material_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM collected_materials WHERE id = ?", (material_id,)).fetchone()
-        return _material_row_to_dict(row) if row else None
+        return self._material_row_to_runtime_dict(row) if row else None
+
+    def _material_row_to_runtime_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        package = self.source_package_for_work(
+            row["source_work_id"],
+            transcription_id=row["transcription_id"],
+        )
+        understanding = _row_json(row, "material_understanding_json", {})
+        return {
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "task_id": row["task_id"],
+            "role_id": row["role_id"],
+            "source_role_id": row["source_role_id"],
+            "source_work_id": row["source_work_id"],
+            "transcription_id": row["transcription_id"],
+            "source_url": package.get("source_link"),
+            "title": package.get("title"),
+            "clean_title": row["clean_title"],
+            "platform_caption": package.get("platform_caption"),
+            "caption_text": package.get("caption_text"),
+            "hashtags": package.get("hashtags") or [],
+            "transcript_text": package.get("transcript_text") or "",
+            "summary_text": row["summary_text"],
+            "hook_text": row["hook_text"],
+            "core_claim": row["core_claim"],
+            "content_type": row["content_type"],
+            "oral_script_pattern": row["oral_script_pattern"],
+            "audience": row["audience"],
+            "emotion_trigger": row["emotion_trigger"],
+            "risk_level": row["risk_level"],
+            "content_structure": _row_json(row, "content_structure_json", []),
+            "key_points": _row_json(row, "key_points_json", []),
+            "rewrite_angles": _row_json(row, "rewrite_angles_json", []),
+            "usable_quotes": _row_json(row, "usable_quotes_json", []),
+            "risk_notes": _row_json(row, "risk_notes_json", []),
+            "recommended_platforms": _row_json(row, "recommended_platforms_json", []),
+            "next_collection_keywords": _row_json(row, "next_collection_keywords_json", []),
+            "author_name": package.get("author_name"),
+            "author_sec_uid": package.get("author_sec_uid"),
+            "author_profile_url": package.get("author_profile_url"),
+            "author_douyin_id": package.get("author_douyin_id"),
+            "work_id": package.get("work_id"),
+            "work_short_url": package.get("work_short_url"),
+            "source_platform": package.get("source_platform"),
+            "post_time": package.get("post_time"),
+            "duration_ms": package.get("duration_ms"),
+            "cover_url": package.get("cover_url"),
+            "video_url": None,
+            "audio_url": None,
+            "author_identity_confidence": None,
+            "metrics": package.get("public_metrics") or {},
+            "material_eligibility": _row_json(row, "material_eligibility_json", {}),
+            "eligibility_status": row["eligibility_status"],
+            "eligibility_provider": row["eligibility_provider"],
+            "eligibility_version": row["eligibility_version"],
+            "eligibility_reasons": _row_json(row, "eligibility_reason_json", []),
+            "content_form": row["content_form"],
+            "knowledge_core_score": row["knowledge_core_score"],
+            "oral_script_fit_score": row["oral_script_fit_score"],
+            "ip_fit_score": row["ip_fit_score"],
+            "reject_reason": row["reject_reason"],
+            "material_understanding": understanding,
+            "understanding_provider": row["understanding_provider"],
+            "understanding_model": row["understanding_model"],
+            "sample_pool_clues": _row_json(row, "sample_pool_clues_json", []),
+            "understanding_status": row["understanding_status"],
+            "source_package": package,
+            "raw": {},
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def list_collected_materials(
         self,
@@ -1558,7 +1750,7 @@ class Store:
         query += " ORDER BY created_at, id"
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [_material_row_to_dict(row) for row in rows]
+        return [self._material_row_to_runtime_dict(row) for row in rows]
 
     def update_material_understanding(
         self,
@@ -1634,8 +1826,6 @@ class Store:
         if not material:
             raise KeyError(f"material not found: {material_id}")
         values = _material_eligibility_values({"material_eligibility": eligibility})
-        source_package = dict(material.get("source_package") or {})
-        source_package["material_eligibility"] = eligibility
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1650,7 +1840,6 @@ class Store:
                     oral_script_fit_score = ?,
                     ip_fit_score = ?,
                     reject_reason = ?,
-                    source_package_json = ?,
                     status = COALESCE(?, status),
                     updated_at = ?
                 WHERE id = ?
@@ -1666,7 +1855,6 @@ class Store:
                     values["oral_script_fit_score"],
                     values["ip_fit_score"],
                     values["reject_reason"],
-                    dumps(scrub_for_storage(source_package)),
                     status,
                     now_iso(),
                     material_id,
@@ -1718,26 +1906,35 @@ class Store:
         author_douyin_id: str | None = None,
         work_id: str | None = None,
     ) -> None:
+        material = self.get_collected_material(material_id)
+        if not material:
+            raise KeyError(f"material not found: {material_id}")
+        package = material.get("source_package") or {}
+        sec_uid = str(author_sec_uid or package.get("author_sec_uid") or "").strip()
+        display_name = str(author_name or package.get("author_name") or "").strip()
+        author_id: str | None = None
+        if sec_uid and display_name:
+            author_id = self.upsert_source_author(
+                platform=str(package.get("source_platform") or "douyin"),
+                platform_author_id=sec_uid,
+                handle=author_douyin_id or package.get("author_douyin_id"),
+                display_name=display_name,
+                profile_url=author_profile_url or package.get("author_profile_url"),
+            )
         with self.connect() as conn:
             conn.execute(
                 """
-                UPDATE collected_materials
-                SET author_name = COALESCE(?, author_name),
-                    author_sec_uid = COALESCE(?, author_sec_uid),
-                    author_profile_url = COALESCE(?, author_profile_url),
-                    author_douyin_id = COALESCE(?, author_douyin_id),
-                    work_id = COALESCE(?, work_id),
-                    updated_at = ?
+                UPDATE source_works
+                SET author_id = COALESCE(?, author_id),
+                    platform_work_id = COALESCE(?, platform_work_id),
+                    last_seen_at = ?
                 WHERE id = ?
                 """,
                 (
-                    author_name,
-                    author_sec_uid,
-                    author_profile_url,
-                    author_douyin_id,
+                    author_id,
                     work_id,
                     now_iso(),
-                    material_id,
+                    material["source_work_id"],
                 ),
             )
 
@@ -1769,21 +1966,26 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO source_authors(
-                    id, platform, platform_author_id, platform_user_id, handle,
-                    display_name, signature, avatar_url, profile_url, profile_json,
-                    first_seen_at, last_seen_at, created_at, updated_at
+                    id, platform, platform_author_id, uid, account_id,
+                    display_name, signature, avatar_url, profile_url, ip_location,
+                    follower_count, following_count, work_count, total_favorited,
+                    raw_json, first_seen_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, platform_author_id) DO UPDATE SET
-                    platform_user_id = COALESCE(excluded.platform_user_id, source_authors.platform_user_id),
-                    handle = COALESCE(excluded.handle, source_authors.handle),
+                    uid = COALESCE(excluded.uid, source_authors.uid),
+                    account_id = COALESCE(excluded.account_id, source_authors.account_id),
                     display_name = excluded.display_name,
                     signature = COALESCE(excluded.signature, source_authors.signature),
                     avatar_url = COALESCE(excluded.avatar_url, source_authors.avatar_url),
                     profile_url = COALESCE(excluded.profile_url, source_authors.profile_url),
-                    profile_json = excluded.profile_json,
-                    last_seen_at = excluded.last_seen_at,
-                    updated_at = excluded.updated_at
+                    ip_location = COALESCE(excluded.ip_location, source_authors.ip_location),
+                    follower_count = COALESCE(excluded.follower_count, source_authors.follower_count),
+                    following_count = COALESCE(excluded.following_count, source_authors.following_count),
+                    work_count = COALESCE(excluded.work_count, source_authors.work_count),
+                    total_favorited = COALESCE(excluded.total_favorited, source_authors.total_favorited),
+                    raw_json = excluded.raw_json,
+                    last_seen_at = excluded.last_seen_at
                 """,
                 (
                     author_id,
@@ -1795,9 +1997,12 @@ class Store:
                     signature,
                     avatar_url,
                     profile_url,
+                    (profile or {}).get("ip_location"),
+                    _optional_int((profile or {}).get("follower_count")),
+                    _optional_int((profile or {}).get("following_count")),
+                    _optional_int((profile or {}).get("aweme_count") or (profile or {}).get("work_count")),
+                    _optional_int((profile or {}).get("total_favorited")),
                     dumps(scrub_for_storage(profile or {})),
-                    timestamp,
-                    timestamp,
                     timestamp,
                     timestamp,
                 ),
@@ -1827,7 +2032,7 @@ class Store:
         if platform:
             query += " WHERE platform = ?"
             params = (platform.strip().lower(),)
-        query += " ORDER BY updated_at DESC, display_name"
+        query += " ORDER BY last_seen_at DESC, display_name"
         with self.connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [_source_author_row_to_dict(row) for row in rows]
@@ -1859,21 +2064,20 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO source_works(
-                    id, platform, platform_work_id, author_id, canonical_url, title,
+                    id, platform, platform_work_id, author_id, source_url, title,
                     caption_text, hashtags_json, published_at, duration_ms,
-                    first_seen_at, last_seen_at, created_at, updated_at
+                    raw_json, first_seen_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
                 ON CONFLICT(platform, platform_work_id) DO UPDATE SET
                     author_id = COALESCE(excluded.author_id, source_works.author_id),
-                    canonical_url = COALESCE(excluded.canonical_url, source_works.canonical_url),
+                    source_url = COALESCE(excluded.source_url, source_works.source_url),
                     title = COALESCE(excluded.title, source_works.title),
                     caption_text = COALESCE(excluded.caption_text, source_works.caption_text),
                     hashtags_json = excluded.hashtags_json,
                     published_at = COALESCE(excluded.published_at, source_works.published_at),
                     duration_ms = COALESCE(excluded.duration_ms, source_works.duration_ms),
-                    last_seen_at = excluded.last_seen_at,
-                    updated_at = excluded.updated_at
+                    last_seen_at = excluded.last_seen_at
                 """,
                 (
                     work_id,
@@ -1886,8 +2090,6 @@ class Store:
                     dumps(_clean_list(hashtags)),
                     published_at,
                     duration_ms,
-                    timestamp,
-                    timestamp,
                     timestamp,
                     timestamp,
                 ),
@@ -1914,7 +2116,7 @@ class Store:
         query = "SELECT * FROM source_works"
         if where:
             query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY published_at DESC, created_at DESC, id"
+        query += " ORDER BY published_at DESC, first_seen_at DESC, id"
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [_source_work_row_to_dict(row) for row in rows]
@@ -1937,22 +2139,21 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO source_observations(
-                    id, source_work_id, run_id, provider, observation_kind,
-                    metrics_json, media_json, raw_json, observed_at, created_at
+                    id, source_work_id, provider, observation_type, source_table,
+                    source_row_id, metrics_json, payload_json, observed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     observation_id,
                     source_work_id,
-                    run_id,
                     provider,
                     observation_kind,
+                    f"runtime:{observation_kind}",
+                    observation_id,
                     dumps(scrub_for_storage(metrics or {})),
-                    dumps(scrub_for_storage(media or {})),
-                    dumps(scrub_for_storage(raw or {})),
+                    dumps(scrub_for_storage({"run_id": run_id, "media": media or {}, "raw": raw or {}})),
                     observed_at or timestamp,
-                    timestamp,
                 ),
             )
         return observation_id
@@ -1987,41 +2188,66 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO material_transcriptions(
-                    id, source_work_id, provider, model, options_json,
-                    options_fingerprint, audio_sha256, identity_key, transcript_text,
-                    status, audio_seconds, estimated_cost, cache_hit, provider_job_id,
-                    raw_result_json, created_at, updated_at
+                    id, source_work_id, identity_key, provider, model, audio_sha256,
+                    transcript_text, options_json, provider_payload_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(identity_key) DO UPDATE SET
                     transcript_text = excluded.transcript_text,
-                    status = excluded.status,
-                    audio_seconds = COALESCE(excluded.audio_seconds, material_transcriptions.audio_seconds),
-                    estimated_cost = COALESCE(excluded.estimated_cost, material_transcriptions.estimated_cost),
-                    cache_hit = excluded.cache_hit,
-                    provider_job_id = COALESCE(excluded.provider_job_id, material_transcriptions.provider_job_id),
-                    raw_result_json = excluded.raw_result_json,
+                    provider_payload_json = excluded.provider_payload_json,
                     updated_at = excluded.updated_at
                 """,
                 (
                     transcription_id,
                     source_work_id,
+                    identity_key,
                     provider,
                     model,
-                    dumps(scrub_for_storage(options or {})),
-                    options_fingerprint,
                     audio_sha256,
-                    identity_key,
                     transcript_text,
-                    status,
-                    audio_seconds,
-                    estimated_cost,
-                    int(cache_hit),
-                    provider_job_id,
-                    dumps(scrub_for_storage(raw_result or {})),
+                    dumps(scrub_for_storage({**(options or {}), "options_fingerprint": options_fingerprint})),
+                    dumps(
+                        scrub_for_storage(
+                            {
+                                "status": status,
+                                "audio_seconds": audio_seconds,
+                                "estimated_cost": estimated_cost,
+                                "cache_hit": cache_hit,
+                                "provider_job_id": provider_job_id,
+                                "raw_result": raw_result or {},
+                            }
+                        )
+                    ),
                     timestamp,
                     timestamp,
                 ),
+            )
+        return transcription_id
+
+    def replace_material_transcription_text(
+        self,
+        material_id: str,
+        transcript_text: str,
+        *,
+        provider: str = "manual",
+        model: str = "manual",
+    ) -> str:
+        material = self.get_collected_material(material_id)
+        if not material:
+            raise KeyError(f"material not found: {material_id}")
+        text_hash = hashlib.sha256(transcript_text.encode("utf-8")).hexdigest()
+        transcription_id = self.insert_material_transcription(
+            source_work_id=material["source_work_id"],
+            provider=provider,
+            model=model,
+            options_fingerprint="manual",
+            identity_key=f"manual:{material_id}:{text_hash}",
+            transcript_text=transcript_text,
+        )
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE collected_materials SET transcription_id = ?, updated_at = ? WHERE id = ?",
+                (transcription_id, now_iso(), material_id),
             )
         return transcription_id
 
@@ -2121,7 +2347,7 @@ class Store:
                     """
                     SELECT * FROM source_observations
                     WHERE source_work_id = ?
-                    ORDER BY observed_at DESC, created_at DESC, id DESC
+                    ORDER BY observed_at DESC, id DESC
                     LIMIT 1
                     """,
                     (work["id"],),
@@ -2129,9 +2355,10 @@ class Store:
                 item = _source_work_to_douyin_compat(work, author_sec_uid)
                 if observation:
                     item["metrics"] = _row_json(observation, "metrics_json", {})
-                    media = _row_json(observation, "media_json", {})
+                    payload = _row_json(observation, "payload_json", {})
+                    media = payload.get("media") or {}
                     item["cover_url"] = media.get("cover_url")
-                    item["raw"] = _row_json(observation, "raw_json", {})
+                    item["raw"] = payload.get("raw") or {}
                 item["source_package"] = {
                     "work_id": work["platform_work_id"],
                     "source_link": work.get("canonical_url"),
@@ -2932,7 +3159,7 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO provider_call_logs(
-                    id, run_id, provider, tool_name, request_fingerprint, status,
+                    id, run_id, provider, operation, request_fingerprint, status,
                     error, duration_ms, cache_hit, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2991,11 +3218,11 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO provider_call_cache(
-                    provider, request_fingerprint, tool_name, response_json, created_at, updated_at, hit_count
+                    provider, request_fingerprint, operation, response_json, created_at, updated_at, hit_count
                 )
                 VALUES (?, ?, ?, ?, ?, ?, 0)
                 ON CONFLICT(provider, request_fingerprint) DO UPDATE SET
-                    tool_name = excluded.tool_name,
+                    operation = excluded.operation,
                     response_json = excluded.response_json,
                     updated_at = excluded.updated_at
                 """,
@@ -3013,11 +3240,11 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT provider, tool_name, status, COUNT(*) AS count, SUM(cache_hit) AS cache_hits
+                SELECT provider, operation, status, COUNT(*) AS count, SUM(cache_hit) AS cache_hits
                 FROM provider_call_logs
                 WHERE run_id = ?
-                GROUP BY provider, tool_name, status
-                ORDER BY provider, tool_name, status
+                GROUP BY provider, operation, status
+                ORDER BY provider, operation, status
                 """,
                 (run_id,),
             ).fetchall()
@@ -3027,7 +3254,7 @@ class Store:
             "by_tool": [
                 {
                     "provider": row["provider"],
-                    "tool_name": row["tool_name"],
+                    "tool_name": row["operation"],
                     "status": row["status"],
                     "count": row["count"],
                     "cache_hits": row["cache_hits"] or 0,
@@ -3040,12 +3267,12 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT l.provider, l.tool_name, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
+                SELECT l.provider, l.operation, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
                 FROM provider_call_logs l
                 JOIN collection_runs r ON r.id = l.run_id
                 WHERE r.task_id = ?
-                GROUP BY l.provider, l.tool_name, l.status
-                ORDER BY l.provider, l.tool_name, l.status
+                GROUP BY l.provider, l.operation, l.status
+                ORDER BY l.provider, l.operation, l.status
                 """,
                 (task_id,),
             ).fetchall()
@@ -3055,7 +3282,7 @@ class Store:
             "by_tool": [
                 {
                     "provider": row["provider"],
-                    "tool_name": row["tool_name"],
+                    "tool_name": row["operation"],
                     "status": row["status"],
                     "count": row["count"],
                     "cache_hits": row["cache_hits"] or 0,
@@ -3268,15 +3495,6 @@ def _migrate_ip_role_v2(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_schema_v2(conn: sqlite3.Connection) -> None:
-    if _table_exists(conn, "collected_materials"):
-        existing = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(collected_materials)").fetchall()
-        }
-        for column, definition in MATERIAL_V2_COLUMNS.items():
-            if column not in existing:
-                conn.execute(f"ALTER TABLE collected_materials ADD COLUMN {column} {definition}")
-        conn.execute("UPDATE collected_materials SET source_role_id = COALESCE(source_role_id, role_id)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS material_creations (
@@ -3882,21 +4100,35 @@ def _material_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _source_author_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    profile = _row_json(row, "raw_json", {})
+    profile.update(
+        {
+            key: row[key]
+            for key in (
+                "ip_location",
+                "follower_count",
+                "following_count",
+                "work_count",
+                "total_favorited",
+            )
+            if row[key] is not None
+        }
+    )
     return {
         "id": row["id"],
         "platform": row["platform"],
         "platform_author_id": row["platform_author_id"],
-        "platform_user_id": row["platform_user_id"],
-        "handle": row["handle"],
+        "platform_user_id": row["uid"],
+        "handle": row["account_id"],
         "display_name": row["display_name"],
         "signature": row["signature"],
         "avatar_url": row["avatar_url"],
         "profile_url": row["profile_url"],
-        "profile": _row_json(row, "profile_json", {}),
+        "profile": profile,
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": row["first_seen_at"],
+        "updated_at": row["last_seen_at"],
     }
 
 
@@ -3906,7 +4138,7 @@ def _source_work_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "platform": row["platform"],
         "platform_work_id": row["platform_work_id"],
         "author_id": row["author_id"],
-        "canonical_url": row["canonical_url"],
+        "canonical_url": row["source_url"],
         "title": row["title"],
         "caption_text": row["caption_text"],
         "hashtags": _row_json(row, "hashtags_json", []),
@@ -3914,8 +4146,8 @@ def _source_work_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "duration_ms": row["duration_ms"],
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": row["first_seen_at"],
+        "updated_at": row["last_seen_at"],
     }
 
 
@@ -3932,7 +4164,7 @@ def _source_author_to_douyin_compat(author: dict[str, Any]) -> dict[str, Any]:
         "ip_location": profile.get("ip_location"),
         "follower_count": _optional_int(profile.get("follower_count")),
         "following_count": _optional_int(profile.get("following_count")),
-        "aweme_count": _optional_int(profile.get("aweme_count")),
+        "aweme_count": _optional_int(profile.get("aweme_count") or profile.get("work_count")),
         "total_favorited": _optional_int(profile.get("total_favorited")),
         "source_material_id": None,
         "source_work_id": None,
@@ -4195,6 +4427,28 @@ def _candidate_source_key(candidate: dict[str, Any]) -> str:
         or dumps(scrub_for_storage(source_package))
     )
     return str(value)
+
+
+def _source_package_platform_work_id(
+    source_package: dict[str, Any],
+    *,
+    source_url: str,
+    platform: str,
+) -> str | None:
+    for key in ("work_id", "aweme_id", "platform_work_id", "id"):
+        value = str(source_package.get(key) or "").strip()
+        if value:
+            return value
+    if source_url:
+        video_match = re.search(r"/video/([^/?#]+)", source_url)
+        if video_match:
+            return video_match.group(1)
+        modal_match = re.search(r"(?:[?&])modal_id=([^&#]+)", source_url)
+        if modal_match:
+            return modal_match.group(1)
+        if platform != "douyin":
+            return source_url
+    return None
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:

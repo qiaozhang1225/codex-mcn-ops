@@ -373,7 +373,9 @@ def test_cli_collect_task_keyword_reaches_target_and_reports_codex_understanding
     assert payload["understanding_summary"]["final_codex_count"] == 3
     assert payload["understanding_summary"]["draft_local_count"] == 0
     assert payload["understanding_summary"]["pending_material_understanding_count"] == 0
-    assert payload["api_call_summary"]["total_calls"] >= 1
+    assert payload["collection_call_summary"]["total_calls"] >= 1
+    assert "api_call_summary" not in payload
+    assert "mxnzp_call_summary" not in payload
 
     assert main(["--db-path", str(db_path), "collect", "task", "report", "--task-id", task_id]) == 0
     report_text = capsys.readouterr().out

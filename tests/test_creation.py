@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -373,11 +372,7 @@ def test_rewrite_draft_preserves_viral_hook_asr_correction_and_length(tmp_path: 
         "一个人住的地方长期混乱，身边的人长期抱怨，自己的念头长期焦急，机会来了也接不住。"
     )
     source_package["transcript_text"] = long_transcript_unit * 12
-    with store.connect() as conn:
-        conn.execute(
-            "UPDATE collected_materials SET transcript_text = ?, source_package_json = ? WHERE id = ?",
-            (source_package["transcript_text"], json.dumps(source_package, ensure_ascii=False), material_id),
-        )
+    store.replace_material_transcription_text(material_id, source_package["transcript_text"])
     store.insert_material_role_match(
         material_id=material_id,
         role_id=role_id,
@@ -450,11 +445,7 @@ def test_rewrite_draft_defers_source_risk_and_protects_opening(tmp_path: Path) -
         f"{opening}第一，眼神稳，不慌张。第二，说话不乱，不轻易抱怨。"
         "第三，做事有分寸，机会来了能接得住。这样的财运，不是凭空来的。"
     )
-    with store.connect() as conn:
-        conn.execute(
-            "UPDATE collected_materials SET transcript_text = ?, source_package_json = ? WHERE id = ?",
-            (source_package["transcript_text"], json.dumps(source_package, ensure_ascii=False), material_id),
-        )
+    store.replace_material_transcription_text(material_id, source_package["transcript_text"])
     store.insert_material_role_match(
         material_id=material_id,
         role_id=role_id,

@@ -765,6 +765,29 @@ class CollectionSchemaV3Migrator:
         resolved: Mapping[tuple[str, str], tuple[str, str]],
         transcription_ids: Mapping[str, str],
     ) -> None:
+        defaults: dict[str, Any] = {
+            "content_structure_json": "[]",
+            "key_points_json": "[]",
+            "rewrite_angles_json": "[]",
+            "usable_quotes_json": "[]",
+            "risk_notes_json": "[]",
+            "recommended_platforms_json": "[]",
+            "next_collection_keywords_json": "[]",
+            "material_eligibility_json": "{}",
+            "eligibility_status": "accepted",
+            "eligibility_provider": "local-rules",
+            "eligibility_version": "material-eligibility-v1",
+            "eligibility_reason_json": "[]",
+            "knowledge_core_score": 0,
+            "oral_script_fit_score": 0,
+            "ip_fit_score": 0,
+            "material_understanding_json": "{}",
+            "understanding_provider": "codex-agent",
+            "understanding_model": "unknown",
+            "sample_pool_clues_json": "[]",
+            "understanding_status": "pending",
+            "status": "collected",
+        }
         columns = [
             "id", "run_id", "task_id", "role_id", "source_role_id", "clean_title",
             "summary_text", "hook_text", "core_claim", "content_type", "oral_script_pattern",
@@ -782,9 +805,12 @@ class CollectionSchemaV3Migrator:
         for row in rows:
             material_id = str(row["id"])
             work_id = resolved[("collected_materials", material_id)][0]
-            values = [row.get(column) for column in columns[:5]]
+            values = [row.get(column, defaults.get(column)) for column in columns[:5]]
             values.extend([self._work_id(work_id), transcription_ids.get(material_id)])
-            values.extend(row.get(column) for column in columns[5:])
+            values.extend(
+                row.get(column) if row.get(column) is not None else defaults.get(column)
+                for column in columns[5:]
+            )
             conn.execute(sql, values)
 
     def _validate_final(self, conn: sqlite3.Connection, report: dict[str, Any]) -> None:

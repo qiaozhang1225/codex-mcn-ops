@@ -20,6 +20,44 @@ from mcn_ops.store import SCHEMA
 
 
 LEGACY_COLLECTION_SCHEMA_FOR_TEST = """
+DROP TABLE collection_candidates;
+DROP TABLE collected_materials;
+CREATE TABLE collected_materials (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT,
+    role_id TEXT,
+    source_role_id TEXT,
+    source_url TEXT,
+    title TEXT,
+    transcript_text TEXT NOT NULL,
+    author_name TEXT,
+    author_sec_uid TEXT,
+    author_profile_url TEXT,
+    author_douyin_id TEXT,
+    work_id TEXT,
+    source_platform TEXT,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    material_understanding_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE collection_candidates (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT,
+    role_id TEXT,
+    source_key TEXT NOT NULL,
+    source_url TEXT,
+    title TEXT,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    source_package_json TEXT NOT NULL DEFAULT '{}',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    material_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE douyin_authors (
     sec_uid TEXT PRIMARY KEY,
     uid TEXT,
