@@ -40,4 +40,44 @@ class MemoryTranscriptionCache:
         return copy.deepcopy(item) if item is not None else None
 
     def put(self, key: str, result: ProviderResult) -> None:
-        self._items[key] = copy.deepcopy(result)
+        self._items[key] = cache_safe_provider_result(result)
+
+
+_SECRET_KEY_MARKERS = (
+    "a_bogus",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "secret",
+)
+_EPHEMERAL_MEDIA_KEYS = {
+    "audio_url",
+    "cover_url",
+    "file_url",
+    "media_url",
+    "transcription_url",
+    "uploaded_url",
+    "video_url",
+}
+
+
+def cache_safe_provider_result(result: ProviderResult) -> ProviderResult:
+    """Remove credentials and expiring media URLs before any cache persists them."""
+    return _cache_safe_value(copy.deepcopy(result))
+
+
+def _cache_safe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in _EPHEMERAL_MEDIA_KEYS:
+                continue
+            if any(marker in lowered for marker in _SECRET_KEY_MARKERS):
+                continue
+            output[key] = _cache_safe_value(item)
+        return output
+    if isinstance(value, list):
+        return [_cache_safe_value(item) for item in value]
+    return value

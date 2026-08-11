@@ -217,6 +217,22 @@ def test_cache_key_is_stable_and_provider_aware() -> None:
     assert first != other
 
 
+def test_cache_key_separates_audio_model_and_options() -> None:
+    common = {
+        "audio_sha256": "a" * 64,
+        "provider": "aliyun-qwen-asr",
+        "model": "qwen3-asr-flash",
+        "options": {"language": "zh", "enable_itn": False},
+    }
+    baseline = transcription_cache_key(**common)
+
+    assert baseline != transcription_cache_key(**{**common, "audio_sha256": "b" * 64})
+    assert baseline != transcription_cache_key(**{**common, "model": "qwen3-asr-flash-filetrans"})
+    assert baseline != transcription_cache_key(
+        **{**common, "options": {"language": "zh", "enable_itn": True}}
+    )
+
+
 def test_long_result_can_fall_back_to_sentence_text() -> None:
     text, segments, language = normalize_long_transcription(
         {
@@ -355,7 +371,7 @@ def test_long_task_resumes_persisted_task_id_without_resubmitting(tmp_path: Path
         options={"enable_itn": False, "enable_words": False, "language": "zh"},
     )
     assert cache.get_job(key) is None
-    assert cleaned == [uploaded_url]
+    assert cleaned == [], "signed upload URLs must not be persisted across processes"
 
 
 def test_recursive_scrubbing_removes_keys_tokens_and_signed_queries() -> None:

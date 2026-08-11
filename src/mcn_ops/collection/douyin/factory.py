@@ -24,16 +24,31 @@ class TranscribingDouyinProvider:
         self.data_provider = data_provider
         self.transcription_provider = transcription_provider
         self.provider_name = data_provider.provider_name
+        self.data_provider_name = data_provider.provider_name
+        self.transcription_provider_name = (
+            transcription_provider.provider_name if transcription_provider is not None else "none"
+        )
         self.browser_pagination = bool(getattr(data_provider, "browser_pagination", False))
 
     def call(self, method_key, params=None, body=None, use_cache=True):
-        if method_key != "video_to_text_v2" or self.transcription_provider is None:
+        if method_key not in {"video_to_text_v2", "douyin_extract_video_text"}:
             return self.data_provider.call(method_key, params=params, body=body, use_cache=use_cache)
+        if self.transcription_provider is None:
+            raise ProviderConfigError(
+                "transcription provider is not configured; select aliyun explicitly"
+            )
         supplied = {**(params or {}), **(body or {})}
         source = str(supplied.get("url") or "").strip()
         if not source:
             raise ProviderConfigError("video_to_text_v2 requires url")
-        return self.transcription_provider.transcribe(source, use_cache=use_cache)
+        source_package = supplied.get("source_package")
+        if source_package is not None and not isinstance(source_package, dict):
+            raise ProviderConfigError("source_package must be an object")
+        return self.transcription_provider.transcribe(
+            source,
+            source_package=source_package,
+            use_cache=use_cache,
+        )
 
 
 def load_local_env(path: str | Path = ".env.local") -> None:

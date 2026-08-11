@@ -35,9 +35,11 @@ class FakeTranscriber:
 
     def __init__(self) -> None:
         self.sources: list[str] = []
+        self.source_packages: list[dict[str, Any] | None] = []
 
     def transcribe(self, source, *, source_package=None, use_cache=True):
         self.sources.append(source)
+        self.source_packages.append(source_package)
         return build_provider_result(
             provider=self.provider_name,
             method_key="transcribe",
@@ -99,7 +101,11 @@ def test_registry_maps_stable_tools_to_provider_and_transcriber() -> None:
     registry = build_douyin_registry(direct, transcription_provider=transcriber)
 
     registry.run("douyin_search_videos", {"keyword": "财运", "offset": "12", "search_id": "s1"})
-    transcript = registry.run("douyin_extract_video_text", {"url": "https://v.douyin.com/test"})
+    source_package = {"work_id": "123", "audio_url": "https://media.example/audio.mp3"}
+    transcript = registry.run(
+        "douyin_extract_video_text",
+        {"url": "https://v.douyin.com/test", "source_package": source_package},
+    )
 
     assert direct.calls[0] == {
         "method_key": "video_search",
@@ -108,5 +114,5 @@ def test_registry_maps_stable_tools_to_provider_and_transcriber() -> None:
         "use_cache": True,
     }
     assert transcriber.sources == ["https://v.douyin.com/test"]
+    assert transcriber.source_packages == [source_package]
     assert transcript["normalized"]["text"] == "离线转写"
-

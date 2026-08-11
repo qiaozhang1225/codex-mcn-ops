@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from ..douyin.contracts import ProviderResult
+from .cache import cache_safe_provider_result
 
 
 class SqliteTranscriptionCache:
@@ -38,7 +39,12 @@ class SqliteTranscriptionCache:
 
     def put(self, key: str, result: ProviderResult) -> None:
         self._initialize()
-        serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        serialized = json.dumps(
+            cache_safe_provider_result(result),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         with sqlite3.connect(self.path) as connection:
             connection.execute(
                 """
@@ -55,15 +61,12 @@ class SqliteTranscriptionCache:
         self._initialize()
         with sqlite3.connect(self.path) as connection:
             row = connection.execute(
-                "SELECT task_id, status, uploaded_url FROM transcription_jobs WHERE cache_key = ?",
+                "SELECT task_id, status FROM transcription_jobs WHERE cache_key = ?",
                 (key,),
             ).fetchone()
         if row is None:
             return None
-        result = {"task_id": str(row[0]), "status": str(row[1])}
-        if row[2]:
-            result["uploaded_url"] = str(row[2])
-        return result
+        return {"task_id": str(row[0]), "status": str(row[1])}
 
     def put_job(
         self,
@@ -85,7 +88,7 @@ class SqliteTranscriptionCache:
                     uploaded_url = excluded.uploaded_url,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (key, task_id, status, uploaded_url),
+                (key, task_id, status, None),
             )
 
     def delete_job(self, key: str) -> None:
@@ -126,3 +129,36 @@ class SqliteTranscriptionCache:
             }
             if "uploaded_url" not in columns:
                 connection.execute("ALTER TABLE transcription_jobs ADD COLUMN uploaded_url TEXT")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version < 2:
+                self._scrub_legacy_payloads(connection)
+                connection.execute("UPDATE transcription_jobs SET uploaded_url = NULL")
+                connection.execute("PRAGMA user_version = 2")
+
+    @staticmethod
+    def _scrub_legacy_payloads(connection: sqlite3.Connection) -> None:
+        for cache_key, serialized in connection.execute(
+            "SELECT cache_key, result_json FROM transcription_cache"
+        ).fetchall():
+            try:
+                value = json.loads(str(serialized))
+            except (TypeError, ValueError):
+                connection.execute(
+                    "DELETE FROM transcription_cache WHERE cache_key = ?",
+                    (cache_key,),
+                )
+                continue
+            if not isinstance(value, dict):
+                connection.execute(
+                    "DELETE FROM transcription_cache WHERE cache_key = ?",
+                    (cache_key,),
+                )
+                continue
+            safe = cache_safe_provider_result(value)
+            connection.execute(
+                "UPDATE transcription_cache SET result_json = ? WHERE cache_key = ?",
+                (
+                    json.dumps(safe, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                    cache_key,
+                ),
+            )

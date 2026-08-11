@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from ..contracts import ProviderResult, build_provider_result, empty_paging
+from ..contracts import ProviderResult, build_provider_result, empty_paging, normalize_paging
 from ..errors import (
     ProviderAuthError,
     ProviderInputError,
@@ -385,15 +385,21 @@ def _normalize(method_key: str, raw: dict[str, Any]) -> tuple[dict[str, Any], di
     if method_key == "user_post":
         items = [_normalize_video(item) for item in _video_items(raw)]
         paging = _paging(raw, cursor_keys=("max_cursor", "cursor"))
-        return {"items": items, "source_packages": [_source_package(item) for item in items]}, paging
+        return {
+            "items": items,
+            "source_packages": [_source_package(item) for item in items],
+        }, normalize_paging(paging, captured_items=len(items))
     if method_key == "video_search":
         items = [_normalize_video(item) for item in _search_video_items(raw)]
         paging = _paging(raw, cursor_keys=("cursor", "offset"))
-        return {"items": items, "source_packages": [_source_package(item) for item in items]}, paging
+        return {
+            "items": items,
+            "source_packages": [_source_package(item) for item in items],
+        }, normalize_paging(paging, captured_items=len(items))
     if method_key == "user_search":
         items = [_normalize_user(item) for item in _search_user_items(raw)]
         paging = _paging(raw, cursor_keys=("cursor", "offset"))
-        return {"items": items}, paging
+        return {"items": items}, normalize_paging(paging, captured_items=len(items))
     if method_key == "user_info":
         item = raw.get("user") or raw.get("user_info") or raw.get("data") or {}
         return {"user": _normalize_user(item)}, paging

@@ -131,7 +131,10 @@ def build_douyin_registry(
             registry,
             "douyin_extract_video_text",
             "Extract spoken copy text from a Douyin video.",
-            {"url": {"type": "string"}},
+            {
+                "url": {"type": "string"},
+                "source_package": {"type": "object", "additionalProperties": True},
+            },
             ["url"],
             _transcription_handler(provider, transcription_provider),
         )
@@ -143,8 +146,17 @@ def _transcription_handler(
     transcription_provider: TranscriptionProvider | None,
 ) -> Callable[[dict[str, Any]], ProviderResult]:
     if transcription_provider is None:
-        return lambda args: provider.call("video_to_text_v2", body={"url": args["url"]})
-    return lambda args: transcription_provider.transcribe(args["url"])
+        return lambda args: provider.call(
+            "video_to_text_v2",
+            body={
+                "url": args["url"],
+                **_maybe("source_package", args.get("source_package")),
+            },
+        )
+    return lambda args: transcription_provider.transcribe(
+        args["url"],
+        source_package=args.get("source_package"),
+    )
 
 
 def _register(

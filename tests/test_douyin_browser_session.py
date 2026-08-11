@@ -199,6 +199,12 @@ def test_browser_video_search_aggregates_scroll_pages_and_deduplicates() -> None
         "2222222222222222222",
     ]
     assert result["paging"]["cursor"] == "40"
+    assert result["paging"]["next_cursor"] == "40"
+    assert result["paging"]["captured_pages"] == 2
+    assert result["paging"]["captured_items"] == 2
+    assert result["paging"]["stop_reason"] == "max_pages"
+    assert result["paging"]["request_satisfied"] is True
+    assert result["paging"]["source_exhausted"] is False
     assert result["paging"]["raw"]["browser_aggregated"] is True
     assert result["paging"]["raw"]["pages_captured"] == 2
 
@@ -292,6 +298,8 @@ def test_browser_user_posts_uses_profile_scroll_and_normalizes_all_items() -> No
     assert result["normalized"]["items"][0]["author_name"] == "目标作者"
     assert result["normalized"]["items"][0]["id"] == "3333333333333333333"
     assert result["paging"]["has_next"] is False
+    assert result["paging"]["source_exhausted"] is True
+    assert result["paging"]["stop_reason"] == "no_next_page"
 
 
 def test_browser_multi_page_request_fails_closed_when_only_first_page_was_observed() -> None:

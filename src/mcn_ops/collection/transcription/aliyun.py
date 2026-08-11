@@ -23,7 +23,7 @@ from ..douyin.errors import (
     ProviderUnavailableError,
     TranscriptionInputError,
 )
-from .cache import MemoryTranscriptionCache, transcription_cache_key
+from .cache import MemoryTranscriptionCache, cache_safe_provider_result, transcription_cache_key
 from .media import PreparedMedia, normalize_prepared_media, prepare_media, validate_public_https_url
 
 
@@ -181,7 +181,7 @@ class AliyunTranscriptionProvider:
                     uploaded_url=uploaded_url,
                 )
             if use_cache:
-                self.cache.put(cache_key, result)
+                self.cache.put(cache_key, cache_safe_provider_result(result))
                 if not is_short:
                     self._clear_pending_task(cache_key)
             if not is_short and uploaded_url:

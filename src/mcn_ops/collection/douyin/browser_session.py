@@ -7,7 +7,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .contracts import ProviderResult, build_provider_result
+from .contracts import ProviderResult, build_provider_result, normalize_paging
 from .direct.client import (
     DirectDouyinClient,
     _canonical_method,
@@ -174,6 +174,8 @@ class BrowserSessionDouyinClient:
         if browser_meta:
             paging["raw"] = {**(paging.get("raw") or {}), **browser_meta}
             _ensure_requested_traversal_completed(navigation, paging)
+        items = normalized.get("items") if isinstance(normalized.get("items"), list) else []
+        paging = normalize_paging(paging, captured_items=len(items))
         result = build_provider_result(
             provider=self.provider_name,
             method_key=method_key,

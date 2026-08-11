@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ class DouyinTranscriptionService:
             normalized = detail.get("normalized") if isinstance(detail.get("normalized"), dict) else {}
             package = dict(normalized.get("source_package") or {})
         media_source = str(package.get("audio_url") or package.get("video_url") or source).strip()
-        if media_source == source and source.startswith(("http://", "https://")) and not package:
+        if media_source == source and _is_douyin_url(source):
             raise ProviderResponseError("Douyin detail returned no transcribable audio or video URL")
         result = dict(
             self.transcription_provider.transcribe(
@@ -61,3 +62,11 @@ class DouyinTranscriptionService:
         result["normalized"] = normalized
         result["method_key"] = "video_to_text_v2"
         return result  # type: ignore[return-value]
+
+
+def _is_douyin_url(value: str) -> bool:
+    try:
+        hostname = (urllib.parse.urlsplit(value).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return hostname == "douyin.com" or hostname.endswith(".douyin.com")

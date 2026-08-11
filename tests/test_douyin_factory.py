@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from mcn_ops.collection.douyin.contracts import build_provider_result
+from mcn_ops.collection.douyin.errors import ProviderConfigError
 import mcn_ops.collection.douyin.factory as factory
 from mcn_ops.collection.douyin.factory import TranscribingDouyinProvider
 from mcn_ops.collection.douyin.registry import build_douyin_registry
@@ -27,7 +30,11 @@ class FakeBrowserData(FakeData):
 class FakeTranscription:
     provider_name = "fake-asr"
 
+    def __init__(self) -> None:
+        self.source_package = None
+
     def transcribe(self, source, *, source_package=None, use_cache=True):
+        self.source_package = source_package
         return build_provider_result(
             provider="fake-asr",
             method_key="video_to_text_v2",
@@ -36,15 +43,23 @@ class FakeTranscription:
 
 
 def test_composed_provider_routes_only_transcription_calls() -> None:
+    transcription = FakeTranscription()
     provider = TranscribingDouyinProvider(
         data_provider=FakeData(),
-        transcription_provider=FakeTranscription(),
+        transcription_provider=transcription,
     )
 
     assert provider.call("detail_v4")["provider"] == "direct"
     transcribed = provider.call("video_to_text_v2", body={"url": "https://example.com/audio.mp3"})
     assert transcribed["provider"] == "fake-asr"
     assert transcribed["normalized"]["text"] == "https://example.com/audio.mp3"
+
+    source_package = {"work_id": "123", "audio_url": "https://media.example/audio.mp3"}
+    provider.call(
+        "douyin_extract_video_text",
+        body={"url": "https://www.douyin.com/video/123", "source_package": source_package},
+    )
+    assert transcription.source_package == source_package
 
 
 def test_provider_default_does_not_implicitly_enable_paid_asr(monkeypatch) -> None:
@@ -57,7 +72,8 @@ def test_provider_default_does_not_implicitly_enable_paid_asr(monkeypatch) -> No
     )
 
     assert provider.transcription_provider is None
-    assert provider.call("video_to_text_v2")["provider"] == "direct"
+    with pytest.raises(ProviderConfigError, match="select aliyun explicitly"):
+        provider.call("video_to_text_v2", body={"url": "https://www.douyin.com/video/123"})
 
 
 def test_registry_passes_browser_page_limits_only_to_browser_provider() -> None:

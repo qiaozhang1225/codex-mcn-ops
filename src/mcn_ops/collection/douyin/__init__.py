@@ -4,6 +4,7 @@ from .contracts import (
     ProviderResult,
     TranscriptionProvider,
     build_provider_result,
+    normalize_paging,
     provider_cache_namespace,
 )
 from .errors import (
@@ -31,5 +32,6 @@ __all__ = [
     "ProviderUnavailableError",
     "TranscriptionInputError",
     "build_provider_result",
+    "normalize_paging",
     "provider_cache_namespace",
 ]
