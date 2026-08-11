@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
+import mcn_ops.collection.workflows as workflows
 from mcn_ops.cli import main
 from mcn_ops.store import Store
 
@@ -145,6 +146,184 @@ def test_cli_collection_material_flow(tmp_path: Path, capsys) -> None:
     assert creations_payload["creations"][0]["content_package_id"] == promote_payload["content_id"]
 
 
+def test_cli_role_v2_file_confirm_packet_export_and_confirmed_filter(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    role_file = tmp_path / "role.json"
+    export_file = tmp_path / "roles-export.json"
+    role_file.write_text(
+        json.dumps(
+            {
+                "name": "见心说",
+                "positioning": "中年修心口播",
+                "role_baseline": "温和克制的修心型老师",
+                "search_keywords": ["修心", "内耗"],
+                "target_audience": {"life_stage": "中年"},
+                "fit_themes": ["放下执念"],
+                "avoid_themes": ["暴富承诺"],
+                "style_anchors": {"opening_style": "生活化判断开头"},
+                "forbidden_expressions": ["保证发财"],
+                "typical_topics": ["人到中年要学会放下"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["--db-path", str(db_path), "collect", "role", "upsert", "--file", str(role_file), "--json"]) == 0
+    upsert_payload = _read_json(capsys)
+    role_id = upsert_payload["role_id"]
+    assert upsert_payload["role"]["confirmation_status"] == "draft"
+    assert upsert_payload["role"]["persona_packet"]["target_ip"] == "见心说"
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "role",
+                "confirm",
+                "--role-id",
+                role_id,
+                "--change-reason",
+                "首次确认",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    confirm_payload = _read_json(capsys)
+    assert confirm_payload["role"]["confirmation_status"] == "confirmed"
+    assert confirm_payload["profile_version"] == 1
+
+    assert main(["--db-path", str(db_path), "collect", "role", "packet", "--role-id", role_id, "--json"]) == 0
+    packet_payload = _read_json(capsys)
+    assert packet_payload["persona_packet"]["target_ip"] == "见心说"
+    assert packet_payload["persona_packet"]["search_keywords"] == ["修心", "内耗"]
+
+    import_file = tmp_path / "roles-import.json"
+    import_file.write_text(
+        json.dumps({"roles": [{"name": "导入角色", "confirmation_status": "confirmed"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert main(["--db-path", str(db_path), "collect", "role", "import", "--file", str(import_file), "--json"]) == 0
+    import_payload = _read_json(capsys)
+    imported_role_id = import_payload["role_ids"][0]
+
+    assert main(["--db-path", str(db_path), "collect", "role", "show", "--role-id", imported_role_id, "--json"]) == 0
+    imported = _read_json(capsys)
+    assert imported["confirmation_status"] == "agent_suggested"
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "role",
+                "list",
+                "--confirmed-only",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    listed = _read_json(capsys)
+    assert [role["id"] for role in listed["roles"]] == [role_id]
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "role",
+                "export",
+                "--file",
+                str(export_file),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    export_payload = _read_json(capsys)
+    exported = json.loads(export_file.read_text(encoding="utf-8"))
+    assert export_payload["count"] == 2
+    assert {role["name"] for role in exported["roles"]} == {"见心说", "导入角色"}
+
+
+def test_cli_collect_task_keyword_requires_confirmed_role(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "role",
+                "upsert",
+                "--name",
+                "草稿角色",
+                "--search-keyword",
+                "知识型口播",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    role_id = _read_json(capsys)["role_id"]
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "task",
+                "keyword",
+                "--topic",
+                "知识型口播",
+                "--target-count",
+                "1",
+                "--like-floor",
+                "1",
+                "--role-id",
+                role_id,
+                "--json",
+            ]
+        )
+        == 1
+    )
+    assert "confirm the IP role" in capsys.readouterr().err
+
+    assert main(["--db-path", str(db_path), "collect", "role", "confirm", "--role-id", role_id]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "task",
+                "keyword",
+                "--topic",
+                "知识型口播",
+                "--target-count",
+                "1",
+                "--like-floor",
+                "1",
+                "--role-id",
+                role_id,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = _read_json(capsys)
+    assert payload["saved_count"] == 1
+
+
 def test_cli_collect_task_keyword_reaches_target_and_reports_codex_understanding(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "mcn.sqlite"
 
@@ -184,6 +363,49 @@ def test_cli_collect_task_keyword_reaches_target_and_reports_codex_understanding
     report_text = capsys.readouterr().out
     assert "Collection Task Report" in report_text
     assert "metadata_ready_count: 3" in report_text
+
+
+def test_cli_collect_task_keyword_continues_after_keyword_error(tmp_path: Path, capsys, monkeypatch) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    original_run = workflows.TopicCollectionRunner.run
+
+    def flaky_run(self, config):
+        if config.topic == "坏词":
+            raise RuntimeError("temporary keyword failure")
+        return original_run(self, config)
+
+    monkeypatch.setattr(workflows.TopicCollectionRunner, "run", flaky_run)
+
+    assert main(["--db-path", str(db_path), "init-db"]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "collect",
+                "task",
+                "keyword",
+                "--topic",
+                "坏词",
+                "--keyword",
+                "知识型口播",
+                "--target-count",
+                "1",
+                "--like-floor",
+                "1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = _read_json(capsys)
+
+    assert payload["saved_count"] == 1
+    assert payload["task"]["status"] == "completed"
+    assert payload["task"]["summary"]["keyword_errors"] == [
+        {"keyword": "坏词", "error": "temporary keyword failure"}
+    ]
 
 
 def test_cli_author_videos_ranks_stored_viral_candidates(tmp_path: Path, capsys) -> None:
@@ -428,3 +650,148 @@ def test_cli_author_materialize_preserves_existing_understanding(tmp_path: Path,
     assert refreshed["understanding_provider"] == "codex-agent"
     assert refreshed["understanding_model"] == "gpt-5.5"
     assert refreshed["summary_text"] == "Codex 深度摘要"
+
+
+def test_cli_create_task_selects_material_and_builds_packet(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    store = Store(db_path)
+    store.init_db()
+    role_id = store.upsert_ip_role(
+        name="思丞说",
+        positioning="国学智慧口播",
+        search_keywords=["财运"],
+        fit_themes=["财运"],
+        role_baseline="克制的国学知识分享者",
+    )
+    store.confirm_ip_role(role_id, change_reason="test")
+    run_id = store.create_collection_run(
+        task_id=None,
+        role_id=role_id,
+        topic="财运",
+        target_count=1,
+        like_floor=1,
+        super_like_threshold=100,
+        tool_provider="mock",
+    )
+    material_id = store.insert_collected_material(
+        run_id=run_id,
+        source_package={
+            "role_id": role_id,
+            "source_link": "mock://fortune",
+            "title": "一个人发财前的征兆",
+            "platform_caption": "一个人发财前的征兆 #财运",
+            "transcript_text": "一个人发财前，会先把判断和节奏稳住。",
+            "source_platform": "mock",
+            "public_metrics": {"likes": 10000},
+            "material_eligibility": {
+                "eligibility_status": "accepted",
+                "knowledge_core_score": 0.9,
+                "oral_script_fit_score": 0.9,
+            },
+        },
+        material_understanding={
+            "topic_summary": "发财前的征兆是判断变稳。",
+            "hook": "一个人发财前，往往先有这些变化。",
+            "core_claim": "财运不是只靠玄学动作，而是先稳住判断。",
+            "content_type": "征兆判断",
+            "key_points": ["判断变稳", "节奏变慢"],
+            "understanding_provider": "codex-agent",
+            "understanding_model": "gpt-5.5",
+        },
+        raw={},
+    )
+    store.insert_material_role_match(
+        material_id=material_id,
+        role_id=role_id,
+        task_id=None,
+        fit_score=0.9,
+        decision="accepted",
+        reasons=["适合知识型口播"],
+    )
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "create",
+                "task",
+                "new",
+                "--role-id",
+                role_id,
+                "--topic",
+                "财运",
+                "--goal",
+                "生成一条五段式口播",
+                "--platform",
+                "douyin",
+                "--target-count",
+                "1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    task_id = _read_json(capsys)["task"]["id"]
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "create",
+                "task",
+                "run",
+                "--task-id",
+                task_id,
+                "--stage",
+                "material_selection",
+                "--knowledge-root",
+                str(tmp_path / "knowledge"),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    selection = _read_json(capsys)
+    assert selection["output"]["selected"][0]["material_id"] == material_id
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "create",
+                "task",
+                "confirm",
+                "--task-id",
+                task_id,
+                "--stage",
+                "material_selection",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    _read_json(capsys)
+
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "create",
+                "knowledge",
+                "packet",
+                "--task-id",
+                task_id,
+                "--knowledge-root",
+                str(tmp_path / "knowledge"),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    packet = _read_json(capsys)
+    assert packet["selected_materials"][0]["id"] == material_id
+    assert "transcript_text" not in packet["selected_materials"][0]

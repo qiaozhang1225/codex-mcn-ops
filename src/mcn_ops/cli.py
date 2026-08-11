@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +14,15 @@ from .adapters import list_platforms
 from .collection.api_manifest import catalog_as_dict, load_manifest_from_markdown
 from .collection.douyin_cookie import fetch_douyin_cookie
 from .collection.douyin_login_cookie import login_and_fetch_douyin_cookie, write_env_cookie
+from .collection.douyin.doctor import DoctorCheck, run_doctor
+from .collection.douyin.direct.client import cookie_looks_authenticated
+from .collection.douyin.factory import (
+    build_collection_provider,
+    build_data_provider,
+    build_transcription_provider,
+    load_local_env,
+)
+from .collection.douyin.registry import build_douyin_registry
 from .collection.mock_tools import build_mock_source_registry
 from .collection.mxnzp_client import MxnzpConfig, MxnzpDouyinProClient
 from .collection.mxnzp_tools import build_mxnzp_douyin_registry
@@ -30,6 +41,20 @@ from .collection.workflows import (
     format_task_report_markdown,
     format_task_show,
 )
+from .creation import (
+    CREATION_STAGES,
+    DEFAULT_CREATION_MODEL,
+    DEFAULT_CREATION_PROVIDER,
+    apply_learning_update,
+    build_creation_context_packet,
+    build_creation_task_report,
+    confirm_creation_stage,
+    create_creation_task,
+    export_creation_task_markdown,
+    format_creation_task_report_markdown,
+    generate_learning_update_proposals,
+    run_creation_stage,
+)
 from .feishu import build_publish_job_payload, write_payload
 from .publisher import PublishRunner
 from .report import build_daily_report
@@ -38,6 +63,13 @@ from .store import DEFAULT_DB_PATH, Store, loads
 
 def json_print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _add_douyin_provider_args(parser: argparse.ArgumentParser, *, include_transcription: bool = False) -> None:
+    parser.add_argument("--provider", choices=["direct", "mxnzp", "auto"], default="direct")
+    parser.add_argument("--allow-paid-fallback", action="store_true")
+    if include_transcription:
+        parser.add_argument("--transcription-provider", choices=["provider", "aliyun", "none"], default="aliyun")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +95,80 @@ def build_parser() -> argparse.ArgumentParser:
     create_content.add_argument("--cover")
     create_content.add_argument("--hashtag", action="append", default=[])
     create_content.add_argument("--json", action="store_true")
+
+    create_parser = subparsers.add_parser("create", help="High-level creation workflow commands")
+    create_sub = create_parser.add_subparsers(dest="create_command", required=True)
+
+    create_task = create_sub.add_parser("task", help="Manage creation tasks")
+    create_task_sub = create_task.add_subparsers(dest="create_task_command", required=True)
+    create_task_new = create_task_sub.add_parser("new", help="Create a new IP creation task")
+    create_task_new.add_argument("--role-id", required=True)
+    create_task_new.add_argument("--topic", required=True)
+    create_task_new.add_argument("--goal", required=True)
+    create_task_new.add_argument("--platform", required=True, choices=list_platforms())
+    create_task_new.add_argument("--target-count", type=int, default=1)
+    create_task_new.add_argument("--provider", default=DEFAULT_CREATION_PROVIDER)
+    create_task_new.add_argument("--model", default=DEFAULT_CREATION_MODEL)
+    create_task_new.add_argument("--allow-reuse-material", action="store_true")
+    create_task_new.add_argument("--json", action="store_true")
+    create_task_run = create_task_sub.add_parser("run", help="Run one creation task stage")
+    create_task_run.add_argument("--task-id", required=True)
+    create_task_run.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_run.add_argument("--knowledge-root", default="knowledge")
+    create_task_run.add_argument("--json", action="store_true")
+    create_task_confirm = create_task_sub.add_parser("confirm", help="Confirm one creation task stage")
+    create_task_confirm.add_argument("--task-id", required=True)
+    create_task_confirm.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_confirm.add_argument("--json", action="store_true")
+    create_task_retry = create_task_sub.add_parser("retry", help="Retry one creation task stage with a note")
+    create_task_retry.add_argument("--task-id", required=True)
+    create_task_retry.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_retry.add_argument("--note", required=True)
+    create_task_retry.add_argument("--knowledge-root", default="knowledge")
+    create_task_retry.add_argument("--json", action="store_true")
+    create_task_report = create_task_sub.add_parser("report", help="Show a creation task report")
+    create_task_report.add_argument("--task-id", required=True)
+    create_task_report.add_argument("--json", action="store_true")
+    create_task_export = create_task_sub.add_parser("export", help="Export a creation task as Markdown")
+    create_task_export.add_argument("--task-id", required=True)
+    create_task_export.add_argument("--format", choices=["markdown"], default="markdown")
+    create_task_export.add_argument("--output")
+    create_task_export.add_argument("--json", action="store_true")
+
+    create_feedback = create_sub.add_parser("feedback", help="Record and analyze creation feedback")
+    create_feedback_sub = create_feedback.add_subparsers(dest="create_feedback_command", required=True)
+    create_feedback_add = create_feedback_sub.add_parser("add", help="Add one lightweight publish or stage feedback event")
+    create_feedback_add.add_argument("--content-id")
+    create_feedback_add.add_argument("--platform", required=True, choices=list_platforms())
+    create_feedback_add.add_argument("--metrics-json", default="{}")
+    create_feedback_add.add_argument("--notice", default="")
+    create_feedback_add.add_argument("--human-note", default="")
+    create_feedback_add.add_argument("--judgment", default="")
+    create_feedback_add.add_argument("--task-id")
+    create_feedback_add.add_argument("--role-id")
+    create_feedback_add.add_argument("--stage", choices=CREATION_STAGES)
+    create_feedback_add.add_argument("--json", action="store_true")
+    create_feedback_analyze = create_feedback_sub.add_parser("analyze", help="Summarize feedback for one IP role")
+    create_feedback_analyze.add_argument("--role-id", required=True)
+    create_feedback_analyze.add_argument("--json", action="store_true")
+
+    create_learning = create_sub.add_parser("learning", help="Manage Markdown learning update proposals")
+    create_learning_sub = create_learning.add_subparsers(dest="create_learning_command", required=True)
+    create_learning_propose = create_learning_sub.add_parser("propose", help="Propose Markdown learning updates")
+    create_learning_propose.add_argument("--role-id", required=True)
+    create_learning_propose.add_argument("--knowledge-root", default="knowledge")
+    create_learning_propose.add_argument("--json", action="store_true")
+    create_learning_apply = create_learning_sub.add_parser("apply", help="Apply one pending Markdown learning update")
+    create_learning_apply.add_argument("--proposal-id", required=True)
+    create_learning_apply.add_argument("--json", action="store_true")
+
+    create_knowledge = create_sub.add_parser("knowledge", help="Inspect creation knowledge packets")
+    create_knowledge_sub = create_knowledge.add_subparsers(dest="create_knowledge_command", required=True)
+    create_knowledge_packet = create_knowledge_sub.add_parser("packet", help="Show the context packet for a creation task")
+    create_knowledge_packet.add_argument("--task-id", required=True)
+    create_knowledge_packet.add_argument("--knowledge-root", default="knowledge")
+    create_knowledge_packet.add_argument("--include-transcript", action="store_true")
+    create_knowledge_packet.add_argument("--json", action="store_true")
 
     collect_parser = subparsers.add_parser("collect", help="Material collection commands")
     collect_sub = collect_parser.add_subparsers(dest="collect_command", required=True)
@@ -99,6 +205,47 @@ def build_parser() -> argparse.ArgumentParser:
     douyin_login_cookie.add_argument("--close-browser", action="store_true")
     douyin_login_cookie.add_argument("--json", action="store_true")
 
+    douyin = collect_sub.add_parser("douyin", help="Use provider-neutral Douyin data and transcription commands")
+    douyin_sub = douyin.add_subparsers(dest="douyin_command", required=True)
+    douyin_doctor = douyin_sub.add_parser("doctor", help="Check Direct Douyin and transcription configuration")
+    _add_douyin_provider_args(douyin_doctor, include_transcription=True)
+    douyin_doctor.add_argument("--json", action="store_true")
+    douyin_detail = douyin_sub.add_parser("detail", help="Fetch one Douyin video detail")
+    douyin_detail.add_argument("url")
+    _add_douyin_provider_args(douyin_detail)
+    douyin_detail.add_argument("--no-cache", action="store_true")
+    douyin_detail.add_argument("--json", action="store_true")
+    douyin_search_video = douyin_sub.add_parser("search-video", help="Search Douyin videos")
+    douyin_search_video.add_argument("--keyword", required=True)
+    douyin_search_video.add_argument("--offset", default="0")
+    douyin_search_video.add_argument("--search-id", default="")
+    douyin_search_video.add_argument("--max-pages", type=int, default=1)
+    douyin_search_video.add_argument("--max-items", type=int, default=0)
+    _add_douyin_provider_args(douyin_search_video)
+    douyin_search_video.add_argument("--no-cache", action="store_true")
+    douyin_search_video.add_argument("--json", action="store_true")
+    douyin_search_user = douyin_sub.add_parser("search-user", help="Search Douyin users")
+    douyin_search_user.add_argument("--keyword", required=True)
+    douyin_search_user.add_argument("--offset", default="0")
+    douyin_search_user.add_argument("--search-id", default="")
+    _add_douyin_provider_args(douyin_search_user)
+    douyin_search_user.add_argument("--no-cache", action="store_true")
+    douyin_search_user.add_argument("--json", action="store_true")
+    douyin_user_posts = douyin_sub.add_parser("user-posts", help="Fetch one Douyin user's posted videos")
+    douyin_user_posts.add_argument("--sec-uid", required=True)
+    douyin_user_posts.add_argument("--cursor", default="0")
+    douyin_user_posts.add_argument("--sort-type", type=int, choices=[0, 1], default=0)
+    douyin_user_posts.add_argument("--max-pages", type=int, default=1)
+    douyin_user_posts.add_argument("--max-items", type=int, default=0)
+    _add_douyin_provider_args(douyin_user_posts)
+    douyin_user_posts.add_argument("--no-cache", action="store_true")
+    douyin_user_posts.add_argument("--json", action="store_true")
+    douyin_transcribe = douyin_sub.add_parser("transcribe", help="Transcribe one Douyin video's spoken copy")
+    douyin_transcribe.add_argument("url")
+    _add_douyin_provider_args(douyin_transcribe, include_transcription=True)
+    douyin_transcribe.add_argument("--no-cache", action="store_true")
+    douyin_transcribe.add_argument("--json", action="store_true")
+
     task = collect_sub.add_parser("task", help="Run high-level material collection tasks")
     task_sub = task.add_subparsers(dest="task_command", required=True)
     task_keyword = task_sub.add_parser("keyword", help="Collect enough materials for one topic")
@@ -108,7 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_keyword.add_argument("--related-keyword", action="append", default=[])
     task_keyword.add_argument("--role-id")
     task_keyword.add_argument("--role-name")
-    task_keyword.add_argument("--tool-provider", choices=["mock", "mxnzp"], default="mock")
+    task_keyword.add_argument("--tool-provider", choices=["mock", "mxnzp", "direct", "auto"], default="mock")
+    task_keyword.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_keyword.add_argument("--allow-paid-fallback", action="store_true")
     task_keyword.add_argument("--like-floor", type=int, default=10000)
     task_keyword.add_argument("--min-duration-seconds", type=int, default=20)
     task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
@@ -125,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_author.add_argument("--min-duration-seconds", type=int, default=20)
     task_author.add_argument("--max-duration-seconds", type=int, default=300)
     task_author.add_argument("--materialize-top", type=int, default=0, help="Use 0 to materialize every qualified viral video")
-    task_author.add_argument("--max-pages", type=int, default=0, help="Use 0 to continue until MXNZP reports no next page")
+    task_author.add_argument("--max-pages", type=int, default=0, help="Use 0 to continue until the provider reports no next page")
     task_author.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
     task_author.add_argument("--skip-expand", action="store_true")
     task_author.add_argument("--login-cookie", action="store_true")
@@ -134,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_author.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_author.add_argument("--no-cache", action="store_true")
     task_author.add_argument("--json", action="store_true")
+    task_author.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    task_author.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_author.add_argument("--allow-paid-fallback", action="store_true")
 
     task_discover = task_sub.add_parser("discover-authors", help="Discover source authors from the database and collect their viral works")
     task_discover.add_argument("--min-appearances", type=int, default=2)
@@ -151,6 +303,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_discover.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
     task_discover.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_discover.add_argument("--json", action="store_true")
+    task_discover.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    task_discover.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_discover.add_argument("--allow-paid-fallback", action="store_true")
 
     task_show = task_sub.add_parser("show", help="Show a collection task summary")
     task_show.add_argument("--task-id", required=True)
@@ -179,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     author_expand.add_argument("--name")
     author_expand.add_argument("--cursor", default="")
     author_expand.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
-    author_expand.add_argument("--max-pages", type=int, default=20, help="Use 0 to continue until MXNZP reports no next page")
+    author_expand.add_argument("--max-pages", type=int, default=20, help="Use 0 to continue until the provider reports no next page")
     author_expand.add_argument("--like-floor", type=int, default=5000)
     author_expand.add_argument("--min-duration-seconds", type=int, default=20)
     author_expand.add_argument("--max-duration-seconds", type=int, default=300)
@@ -188,6 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     author_expand.add_argument("--login-cookie", action="store_true")
     author_expand.add_argument("--no-cache", action="store_true")
     author_expand.add_argument("--json", action="store_true")
+    author_expand.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    author_expand.add_argument("--allow-paid-fallback", action="store_true")
     author_materialize = author_sub.add_parser(
         "materialize",
         help="Transcribe ranked author videos into collected materials and run material understanding",
@@ -205,11 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     author_materialize.add_argument("--refresh-existing-understanding", action="store_true")
     author_materialize.add_argument("--no-cache", action="store_true")
     author_materialize.add_argument("--json", action="store_true")
+    author_materialize.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    author_materialize.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    author_materialize.add_argument("--allow-paid-fallback", action="store_true")
 
     role = collect_sub.add_parser("role", help="Manage IP role profiles")
     role_sub = role.add_subparsers(dest="role_command", required=True)
     role_upsert = role_sub.add_parser("upsert", help="Create or update an IP role")
-    role_upsert.add_argument("--name", required=True)
+    role_upsert.add_argument("--name")
+    role_upsert.add_argument("--file", help="Read one complete role profile JSON file")
     role_upsert.add_argument("--positioning", default="")
     role_upsert.add_argument("--target-direction", action="append", default=[])
     role_upsert.add_argument("--search-keyword", action="append", default=[])
@@ -220,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     role_upsert.add_argument("--json", action="store_true")
     role_list = role_sub.add_parser("list", help="List IP roles")
     role_list.add_argument("--enabled-only", action="store_true")
+    role_list.add_argument("--confirmed-only", action="store_true")
     role_list.add_argument("--json", action="store_true")
     role_show = role_sub.add_parser("show", help="Show one IP role")
     role_show.add_argument("--role-id")
@@ -228,6 +390,17 @@ def build_parser() -> argparse.ArgumentParser:
     role_import = role_sub.add_parser("import", help="Import roles from a JSON file")
     role_import.add_argument("--file", required=True)
     role_import.add_argument("--json", action="store_true")
+    role_export = role_sub.add_parser("export", help="Export complete IP role profiles")
+    role_export.add_argument("--file", required=True)
+    role_export.add_argument("--json", action="store_true")
+    role_confirm = role_sub.add_parser("confirm", help="Confirm one IP role profile and snapshot its version")
+    role_confirm.add_argument("--role-id", required=True)
+    role_confirm.add_argument("--change-reason", default="")
+    role_confirm.add_argument("--json", action="store_true")
+    role_packet = role_sub.add_parser("packet", help="Build and show one IP role persona packet")
+    role_packet.add_argument("--role-id")
+    role_packet.add_argument("--name")
+    role_packet.add_argument("--json", action="store_true")
     role_match = role_sub.add_parser("match-existing", help="Match existing materials against one IP role")
     role_match.add_argument("--role-id", required=True)
     role_match.add_argument("--task-id")
@@ -240,7 +413,9 @@ def build_parser() -> argparse.ArgumentParser:
     collect_run.add_argument("--super-like-threshold", type=int, default=100000)
     collect_run.add_argument("--min-duration-seconds", type=int, default=20)
     collect_run.add_argument("--max-duration-seconds", type=int, default=300)
-    collect_run.add_argument("--tool-provider", choices=["mock", "mxnzp"], default="mock")
+    collect_run.add_argument("--tool-provider", choices=["mock", "mxnzp", "direct", "auto"], default="mock")
+    collect_run.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    collect_run.add_argument("--allow-paid-fallback", action="store_true")
     collect_run.add_argument("--max-search-pages", type=int, default=3)
     collect_run.add_argument("--page-size", type=int, default=5)
     collect_run.add_argument("--role-id")
@@ -374,6 +549,184 @@ def handle_content(args: argparse.Namespace, store: Store) -> int:
             print(content_id)
         return 0
     raise ValueError(args.content_command)
+
+
+def handle_create(args: argparse.Namespace, store: Store) -> int:
+    if args.create_command == "task":
+        if args.create_task_command == "new":
+            report = create_creation_task(
+                store,
+                role_id=args.role_id,
+                topic=args.topic,
+                goal=args.goal,
+                platform=args.platform,
+                target_count=args.target_count,
+                provider=args.provider,
+                model=args.model,
+                allow_reuse_material=args.allow_reuse_material,
+            )
+            if args.json:
+                json_print(report)
+            else:
+                print(report["task"]["id"])
+            return 0
+
+        if args.create_task_command == "run":
+            result = run_creation_stage(
+                store,
+                args.task_id,
+                stage_key=args.stage,
+                knowledge_root=Path(args.knowledge_root),
+            )
+            if args.json:
+                json_print(result)
+            else:
+                print(result["stage_run"]["id"])
+            return 0
+
+        if args.create_task_command == "confirm":
+            report = confirm_creation_stage(store, args.task_id, stage_key=args.stage)
+            if args.json:
+                json_print(report)
+            else:
+                print(f"{args.task_id}\t{args.stage}\tconfirmed")
+            return 0
+
+        if args.create_task_command == "retry":
+            result = run_creation_stage(
+                store,
+                args.task_id,
+                stage_key=args.stage,
+                knowledge_root=Path(args.knowledge_root),
+                note=args.note,
+            )
+            if args.json:
+                json_print(result)
+            else:
+                print(result["stage_run"]["id"])
+            return 0
+
+        if args.create_task_command == "report":
+            report = build_creation_task_report(store, args.task_id)
+            if args.json:
+                json_print(report)
+            else:
+                print(format_creation_task_report_markdown(report))
+            return 0
+
+        if args.create_task_command == "export":
+            markdown = export_creation_task_markdown(store, args.task_id)
+            if args.output:
+                output = Path(args.output)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(markdown, encoding="utf-8")
+                if args.json:
+                    json_print({"file": str(output), "task_id": args.task_id})
+                else:
+                    print(output)
+            elif args.json:
+                json_print({"task_id": args.task_id, "markdown": markdown})
+            else:
+                print(markdown, end="")
+            return 0
+
+    if args.create_command == "feedback":
+        if args.create_feedback_command == "add":
+            metrics = parse_json_object(args.metrics_json)
+            role_id = args.role_id
+            task_id = args.task_id
+            if args.content_id and (not role_id or not task_id):
+                inferred = _infer_creation_from_content(store, args.content_id)
+                role_id = role_id or inferred.get("role_id")
+                task_id = task_id or inferred.get("task_id")
+            if args.content_id:
+                feedback_id = store.insert_creation_feedback_event(
+                    content_package_id=args.content_id,
+                    task_id=task_id,
+                    role_id=role_id,
+                    platform=args.platform,
+                    metrics=metrics,
+                    notice=args.notice,
+                    human_note=args.human_note,
+                    judgment=args.judgment,
+                )
+                payload = {"feedback_id": feedback_id, "feedback_type": "publish", "role_id": role_id, "task_id": task_id}
+            else:
+                if not task_id or not role_id or not args.stage:
+                    raise ValueError("stage feedback requires --task-id, --role-id, and --stage when --content-id is omitted")
+                feedback_id = store.insert_creation_stage_feedback_event(
+                    task_id=task_id,
+                    role_id=role_id,
+                    stage_key=args.stage,
+                    platform=args.platform,
+                    human_note=args.human_note or args.notice,
+                    judgment=args.judgment,
+                    metadata={"metrics": metrics, "notice": args.notice},
+                )
+                payload = {"feedback_id": feedback_id, "feedback_type": "stage", "role_id": role_id, "task_id": task_id, "stage": args.stage}
+            if args.json:
+                json_print(payload)
+            else:
+                print(feedback_id)
+            return 0
+
+        if args.create_feedback_command == "analyze":
+            events = store.list_creation_feedback_events(role_id=args.role_id)
+            stage_events = store.list_creation_stage_feedback_events(role_id=args.role_id)
+            observations = store.list_risk_term_observations(role_id=args.role_id)
+            payload = {
+                "role_id": args.role_id,
+                "feedback_count": len(events),
+                "stage_feedback_count": len(stage_events),
+                "risk_observation_count": len(observations),
+                "recent_feedback": events[:10],
+                "recent_stage_feedback": stage_events[:10],
+                "risk_terms": sorted({item["term"] for item in observations}),
+            }
+            if args.json:
+                json_print(payload)
+            else:
+                print(f"feedback={payload['feedback_count']} stage_feedback={payload['stage_feedback_count']} risk_terms={len(payload['risk_terms'])}")
+                for term in payload["risk_terms"]:
+                    print(term)
+            return 0
+
+    if args.create_command == "learning":
+        if args.create_learning_command == "propose":
+            result = generate_learning_update_proposals(
+                store,
+                role_id=args.role_id,
+                knowledge_root=Path(args.knowledge_root),
+            )
+            if args.json:
+                json_print(result)
+            else:
+                print(result["update_id"])
+            return 0
+
+        if args.create_learning_command == "apply":
+            result = apply_learning_update(store, args.proposal_id)
+            if args.json:
+                json_print(result)
+            else:
+                print(result["id"])
+            return 0
+
+    if args.create_command == "knowledge":
+        if args.create_knowledge_command == "packet":
+            packet = build_creation_context_packet(
+                store,
+                args.task_id,
+                knowledge_root=Path(args.knowledge_root),
+                include_transcript=args.include_transcript,
+            )
+            if args.json:
+                json_print(packet)
+            else:
+                print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+    raise ValueError(args.create_command)
 
 
 def handle_publish(args: argparse.Namespace, store: Store) -> int:
@@ -545,6 +898,9 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
                 print(json.dumps(payload, ensure_ascii=False))
         return 0 if result.cookie_valid else 1
 
+    if args.collect_command == "douyin":
+        return handle_collect_douyin(args)
+
     if args.collect_command == "task":
         return handle_collect_task(args, store)
 
@@ -556,7 +912,11 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
 
     if args.collect_command == "run":
         role_profile = store.get_ip_role(args.role_id) if args.role_id else None
-        tools = _build_collection_tools(args.tool_provider)
+        tools = _build_collection_tools(
+            args.tool_provider,
+            transcription_provider=args.transcription_provider,
+            allow_paid_fallback=args.allow_paid_fallback,
+        )
         runner = TopicCollectionRunner(tools, store)
         result = runner.run(
             CollectionConfig(
@@ -649,6 +1009,124 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
     raise ValueError(args.collect_command)
 
 
+def handle_collect_douyin(args: argparse.Namespace) -> int:
+    load_local_env()
+    if args.douyin_command == "doctor":
+        provider = build_data_provider(args.provider, allow_paid_fallback=args.allow_paid_fallback)
+        browser_session = bool(getattr(provider, "browser_pagination", False))
+        transcription = None
+        transcription_error: str | None = None
+        if args.transcription_provider != "none":
+            try:
+                transcription = build_transcription_provider(
+                    args.transcription_provider,
+                    data_provider=provider,
+                )
+            except Exception as exc:
+                transcription_error = type(exc).__name__
+        checks = [
+            DoctorCheck(
+                "douyin_auth",
+                lambda: {
+                    "ok": browser_session
+                    or cookie_looks_authenticated(os.environ.get("DOUYIN_COOKIE"))
+                    or args.provider == "mxnzp",
+                    "code": (
+                        "ego_browser_session"
+                        if browser_session
+                        else "authenticated_cookie"
+                        if cookie_looks_authenticated(os.environ.get("DOUYIN_COOKIE"))
+                        else "anonymous_or_expired"
+                        if os.environ.get("DOUYIN_COOKIE", "").strip()
+                        else "not_configured"
+                    ),
+                },
+            ),
+            DoctorCheck(
+                "ffmpeg",
+                lambda: {"ok": bool(shutil.which("ffmpeg")), "code": "available" if shutil.which("ffmpeg") else "missing"},
+            ),
+            DoctorCheck(
+                "ffprobe",
+                lambda: {"ok": bool(shutil.which("ffprobe")), "code": "available" if shutil.which("ffprobe") else "missing"},
+            ),
+        ]
+        if transcription_error:
+            checks.append(
+                DoctorCheck(
+                    "aliyun_asr_config",
+                    lambda: {"ok": False, "code": "not_configured", "error_type": transcription_error},
+                )
+            )
+        payload = run_doctor(
+            provider,
+            transcription_provider=transcription,
+            transcription_required=args.transcription_provider != "none",
+            checks=checks,
+        )
+        _print_douyin_payload(payload, as_json=args.json)
+        return 0 if payload["ok"] else 1
+
+    if args.douyin_command == "transcribe":
+        provider = build_collection_provider(
+            args.provider,
+            transcription_provider_name=args.transcription_provider,
+            allow_paid_fallback=args.allow_paid_fallback,
+        )
+        payload = provider.call(
+            "video_to_text_v2",
+            body={"url": args.url},
+            use_cache=not args.no_cache,
+        )
+        _print_douyin_payload(payload, as_json=args.json)
+        return 0
+
+    provider = build_data_provider(args.provider, allow_paid_fallback=args.allow_paid_fallback)
+    if args.douyin_command == "detail":
+        payload = provider.call("detail_v4", body={"url": args.url}, use_cache=not args.no_cache)
+    elif args.douyin_command == "search-video":
+        payload = provider.call(
+            "video_search",
+            params={
+                "keyword": args.keyword,
+                "offset": args.offset,
+                "search_id": args.search_id,
+                "max_pages": args.max_pages,
+                "max_items": args.max_items,
+            },
+            use_cache=not args.no_cache,
+        )
+    elif args.douyin_command == "search-user":
+        payload = provider.call(
+            "user_search",
+            params={"keyword": args.keyword, "offset": args.offset, "search_id": args.search_id},
+            use_cache=not args.no_cache,
+        )
+    elif args.douyin_command == "user-posts":
+        payload = provider.call(
+            "user_post",
+            params={
+                "userId": args.sec_uid,
+                "cursor": args.cursor,
+                "sortType": args.sort_type,
+                "max_pages": args.max_pages,
+                "max_items": args.max_items,
+            },
+            use_cache=not args.no_cache,
+        )
+    else:
+        raise ValueError(args.douyin_command)
+    _print_douyin_payload(payload, as_json=args.json)
+    return 0
+
+
+def _print_douyin_payload(payload: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        json_print(payload)
+    else:
+        print(json.dumps(payload, ensure_ascii=False))
+
+
 def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
     orchestrator = CollectionTaskOrchestrator(store)
     if args.task_command == "keyword":
@@ -663,6 +1141,8 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             target_count=args.target_count,
             policy=_collection_policy_from_args(args),
             tool_provider=args.tool_provider,
+            transcription_provider=args.transcription_provider,
+            allow_paid_fallback=args.allow_paid_fallback,
             keywords=args.keyword,
             related_keywords=args.related_keyword,
             role_id=role_id,
@@ -680,6 +1160,9 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             name=args.name,
             sec_uid=args.sec_uid,
             policy=_collection_policy_from_args(args),
+            data_provider=args.data_provider,
+            transcription_provider=args.transcription_provider,
+            allow_paid_fallback=args.allow_paid_fallback,
             like_floor=args.like_floor,
             materialize_top=args.materialize_top,
             max_pages=args.max_pages,
@@ -712,6 +1195,9 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             understanding_provider=args.understanding_provider,
             understanding_model=args.understanding_model,
             policy=_collection_policy_from_args(args),
+            data_provider=args.data_provider,
+            transcription_provider=args.transcription_provider,
+            allow_paid_fallback=args.allow_paid_fallback,
         )
         if args.json:
             json_print(report)
@@ -793,16 +1279,15 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
 
     if args.author_command == "expand":
         author = _resolve_douyin_author(store, sec_uid=args.sec_uid, name=args.name)
-        config = MxnzpConfig.from_env()
-        cookie = None
-        if args.login_cookie and not config.douyin_cookie:
+        load_local_env()
+        if args.login_cookie and not os.environ.get("DOUYIN_COOKIE", "").strip():
             if not args.json:
                 print("请在打开的浏览器窗口登录抖音；登录成功后本命令会自动检测长 cookie。", file=sys.stderr)
             login_result = login_and_fetch_douyin_cookie()
             if not login_result.cookie_valid:
                 raise ValueError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
-            cookie = login_result.cookie
-        client = MxnzpDouyinProClient(config)
+            os.environ["DOUYIN_COOKIE"] = login_result.cookie
+        client = build_data_provider(args.data_provider, allow_paid_fallback=args.allow_paid_fallback)
         cursor = args.cursor or ""
         page_limit = args.max_pages if args.max_pages > 0 else 1000
         pages: list[dict[str, Any]] = []
@@ -815,9 +1300,8 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
                 "userId": author["sec_uid"],
                 "sortType": args.sort_type,
                 "cursor": cursor,
+                "max_pages": args.max_pages,
             }
-            if cookie:
-                params["cookie"] = cookie
             result = client.call("user_post", params=params, use_cache=not args.no_cache)
             normalized = result.get("normalized") if isinstance(result.get("normalized"), dict) else {}
             items = normalized.get("items") if isinstance(normalized.get("items"), list) else []
@@ -863,6 +1347,9 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
             if not has_next:
                 stop_reason = "no_next_page"
                 break
+            if bool((paging.get("raw") or {}).get("browser_aggregated")):
+                stop_reason = str((paging.get("raw") or {}).get("stop_reason") or "browser_aggregated")
+                break
             if not next_cursor or next_cursor in seen_cursors:
                 stop_reason = "cursor_exhausted"
                 break
@@ -904,9 +1391,9 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
             target_count=args.top,
             like_floor=args.like_floor,
             super_like_threshold=100000,
-            tool_provider="mxnzp_author",
+            tool_provider=f"{args.data_provider}_author",
         )
-        client: MxnzpDouyinProClient | None = None
+        client = None
         ranked_videos = _rank_author_videos(
             store.list_douyin_author_videos(author["sec_uid"]),
             like_floor=args.like_floor,
@@ -952,7 +1439,11 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
                     skipped.append({"work_id": video.get("work_id"), "title": video.get("title"), "reason": "missing_source_url"})
                     continue
                 if client is None:
-                    client = MxnzpDouyinProClient(MxnzpConfig.from_env())
+                    client = build_collection_provider(
+                        args.data_provider,
+                        transcription_provider_name=args.transcription_provider,
+                        allow_paid_fallback=args.allow_paid_fallback,
+                    )
                 extract_result = client.call("video_to_text_v2", body={"url": source_url}, use_cache=not args.no_cache)
                 normalized = extract_result.get("normalized") if isinstance(extract_result.get("normalized"), dict) else {}
                 transcript_text = str(
@@ -1190,67 +1681,200 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _read_role_json_file(file_path: str) -> Any:
+    return json.loads(Path(file_path).read_text(encoding="utf-8"))
+
+
+def _role_items_from_json(decoded: Any) -> list[dict[str, Any]]:
+    roles = decoded.get("roles", decoded) if isinstance(decoded, dict) else decoded
+    if isinstance(roles, dict):
+        roles = [roles]
+    if not isinstance(roles, list):
+        raise ValueError("role JSON must be an object, array, or {\"roles\": [...]}")
+    result: list[dict[str, Any]] = []
+    for item in roles:
+        if not isinstance(item, dict):
+            raise ValueError("each role must be a JSON object")
+        result.append(item)
+    return result
+
+
+def _role_text_field(item: dict[str, Any], key: str) -> str | None:
+    if key not in item:
+        return None
+    return str(item.get(key) or "")
+
+
+def _role_list_field(item: dict[str, Any], *keys: str) -> list[str] | None:
+    for key in keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            return [str(part) for part in value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        return [str(value)]
+    return None
+
+
+def _role_json_field(item: dict[str, Any], key: str) -> Any:
+    json_key = f"{key}_json"
+    if key in item:
+        return item[key]
+    if json_key in item:
+        return item[json_key]
+    return None
+
+
+def _upsert_role_from_payload(
+    store: Store,
+    item: dict[str, Any],
+    *,
+    import_mode: bool = False,
+) -> str:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("role name is required")
+    existing = store.get_ip_role(name=name)
+    status = item.get("confirmation_status")
+    if status == "confirmed":
+        status = "agent_suggested"
+    elif status is None and import_mode and existing is None:
+        status = "agent_suggested"
+    return store.upsert_ip_role(
+        name=name,
+        positioning=_role_text_field(item, "positioning"),
+        target_directions=_role_list_field(item, "target_directions", "target_direction"),
+        search_keywords=_role_list_field(item, "search_keywords", "search_keyword"),
+        avoid_directions=_role_list_field(item, "avoid_directions", "avoid_direction"),
+        preferred_content=_role_list_field(item, "preferred_content"),
+        forbidden_content=_role_list_field(item, "forbidden_content"),
+        confirmation_status=str(status) if status else None,
+        role_baseline=_role_text_field(item, "role_baseline"),
+        life_stage=_role_text_field(item, "life_stage"),
+        core_temperament=_role_text_field(item, "core_temperament"),
+        speaking_posture=_role_text_field(item, "speaking_posture"),
+        target_audience=_role_json_field(item, "target_audience"),
+        fit_themes=_role_list_field(item, "fit_themes"),
+        avoid_themes=_role_list_field(item, "avoid_themes"),
+        style_anchors=_role_json_field(item, "style_anchors"),
+        expression_constraints=_role_json_field(item, "expression_constraints"),
+        forbidden_expressions=_role_list_field(item, "forbidden_expressions"),
+        typical_topics=_role_list_field(item, "typical_topics"),
+        theme_map=_role_json_field(item, "theme_map"),
+        source_evidence=_role_json_field(item, "source_evidence"),
+        agent_suggestions=_role_json_field(item, "agent_suggestions"),
+        notes=_role_text_field(item, "notes"),
+        enabled=bool(item["enabled"]) if "enabled" in item else None,
+    )
+
+
+def _format_role_summary(role: dict[str, Any]) -> str:
+    packet_ready = "yes" if role.get("persona_packet") else "no"
+    keywords = ", ".join(role.get("search_keywords") or [])
+    forbidden = ", ".join((role.get("forbidden_content") or []) + (role.get("forbidden_expressions") or []))
+    lines = [
+        f"id: {role['id']}",
+        f"name: {role['name']}",
+        f"status: {role['confirmation_status']}",
+        f"enabled: {str(bool(role['enabled'])).lower()}",
+        f"profile_version: {role['profile_version']}",
+        f"needs_reconfirm: {str(bool(role['needs_reconfirm'])).lower()}",
+        f"positioning: {role.get('positioning') or ''}",
+        f"search_keywords: {keywords}",
+        f"forbidden: {forbidden}",
+        f"persona_packet_ready: {packet_ready}",
+    ]
+    return "\n".join(lines)
+
+
 def handle_collect_role(args: argparse.Namespace, store: Store) -> int:
     if args.role_command == "upsert":
-        role_id = store.upsert_ip_role(
-            name=args.name,
-            positioning=args.positioning,
-            target_directions=args.target_direction,
-            search_keywords=args.search_keyword,
-            avoid_directions=args.avoid_direction,
-            preferred_content=args.preferred_content,
-            forbidden_content=args.forbidden_content,
-            enabled=not args.disabled,
-        )
+        if args.file:
+            items = _role_items_from_json(_read_role_json_file(args.file))
+            if len(items) != 1:
+                raise ValueError("role upsert --file expects exactly one role object; use role import for multiple roles")
+            role_id = _upsert_role_from_payload(store, items[0], import_mode=False)
+        else:
+            if not args.name:
+                raise ValueError("--name is required unless --file is used")
+            role_id = store.upsert_ip_role(
+                name=args.name,
+                positioning=args.positioning,
+                target_directions=args.target_direction,
+                search_keywords=args.search_keyword,
+                avoid_directions=args.avoid_direction,
+                preferred_content=args.preferred_content,
+                forbidden_content=args.forbidden_content,
+                enabled=not args.disabled,
+            )
         if args.json:
-            json_print({"role_id": role_id})
+            json_print({"role_id": role_id, "role": store.get_ip_role(role_id)})
         else:
             print(role_id)
         return 0
 
     if args.role_command == "list":
-        roles = store.list_ip_roles(enabled_only=args.enabled_only)
+        roles = store.list_ip_roles(enabled_only=args.enabled_only, confirmed_only=args.confirmed_only)
         if args.json:
             json_print({"roles": roles})
         else:
             for role in roles:
                 enabled = "enabled" if role["enabled"] else "disabled"
-                print(f"{role['id']}\t{enabled}\t{role['name']}\t{role['positioning']}")
+                print(
+                    f"{role['id']}\t{enabled}\t{role['confirmation_status']}\t"
+                    f"v{role['profile_version']}\t{role['name']}\t{role['positioning']}"
+                )
         return 0
 
     if args.role_command == "show":
         role = store.get_ip_role(args.role_id, name=args.name)
         if not role:
             raise KeyError("role not found")
-        json_print(role)
+        if args.json:
+            json_print(role)
+        else:
+            print(_format_role_summary(role))
         return 0
 
     if args.role_command == "import":
-        raw = Path(args.file).read_text(encoding="utf-8")
-        decoded = json.loads(raw)
-        roles = decoded.get("roles", decoded) if isinstance(decoded, dict) else decoded
-        if not isinstance(roles, list):
-            raise ValueError("role import file must be a JSON array or {\"roles\": [...]}")
+        roles = _role_items_from_json(_read_role_json_file(args.file))
         imported: list[str] = []
         for item in roles:
-            if not isinstance(item, dict):
-                raise ValueError("each role must be a JSON object")
-            imported.append(
-                store.upsert_ip_role(
-                    name=str(item["name"]),
-                    positioning=str(item.get("positioning") or ""),
-                    target_directions=list(item.get("target_directions") or []),
-                    search_keywords=list(item.get("search_keywords") or []),
-                    avoid_directions=list(item.get("avoid_directions") or []),
-                    preferred_content=list(item.get("preferred_content") or []),
-                    forbidden_content=list(item.get("forbidden_content") or []),
-                    enabled=bool(item.get("enabled", True)),
-                )
-            )
+            imported.append(_upsert_role_from_payload(store, item, import_mode=True))
         if args.json:
             json_print({"role_ids": imported})
         else:
             print("\n".join(imported))
+        return 0
+
+    if args.role_command == "export":
+        roles = store.export_ip_roles()
+        output = Path(args.file)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"roles": roles}, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        if args.json:
+            json_print({"file": str(output), "count": len(roles)})
+        else:
+            print(output)
+        return 0
+
+    if args.role_command == "confirm":
+        result = store.confirm_ip_role(args.role_id, change_reason=args.change_reason)
+        if args.json:
+            json_print(result)
+        else:
+            print(f"{result['role_id']}\tv{result['profile_version']}\t{result['version_id']}")
+        return 0
+
+    if args.role_command == "packet":
+        packet = store.build_ip_role_persona_packet(args.role_id, name=args.name)
+        if args.json:
+            json_print({"persona_packet": packet})
+        else:
+            print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
     if args.role_command == "match-existing":
@@ -1270,10 +1894,20 @@ def handle_collect_role(args: argparse.Namespace, store: Store) -> int:
                 matched_keywords=match["matched_keywords"],
                 avoidance_notes=match["avoidance_notes"],
             )
-            matches.append({"match_id": match_id, "material_id": material["id"], **match})
+            matches.append(
+                {
+                    "match_id": match_id,
+                    "material_id": material["id"],
+                    "role_confirmation_status": role.get("confirmation_status"),
+                    "not_confirmed": role.get("confirmation_status") != "confirmed",
+                    **match,
+                }
+            )
         if args.json:
             json_print({"matches": matches})
         else:
+            if role.get("confirmation_status") != "confirmed":
+                print(f"warning: role {role['id']} is {role.get('confirmation_status')}; matches are diagnostic", file=sys.stderr)
             print("\n".join(item["match_id"] for item in matches))
         return 0
 
@@ -1360,6 +1994,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "content":
             store.init_db()
             return handle_content(args, store)
+        if args.command == "create":
+            store.init_db()
+            return handle_create(args, store)
         if args.command == "publish":
             store.init_db()
             return handle_publish(args, store)
@@ -1385,16 +2022,41 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _collect_command_needs_db_init(args: argparse.Namespace) -> bool:
-    if getattr(args, "collect_command", None) in {"catalog", "mxnzp-call", "douyin-cookie", "douyin-login-cookie"}:
+    if getattr(args, "collect_command", None) in {"catalog", "mxnzp-call", "douyin-cookie", "douyin-login-cookie", "douyin"}:
         return False
     if getattr(args, "collect_command", None) == "author" and getattr(args, "author_command", None) in {"list", "videos"}:
         return False
     return True
 
 
-def _build_collection_tools(provider: str):
-    if provider == "mxnzp":
-        return build_mxnzp_douyin_registry()
+def _infer_creation_from_content(store: Store, content_id: str) -> dict[str, str | None]:
+    creations = store.list_material_creations(content_package_id=content_id)
+    if creations:
+        first = creations[0]
+        return {"role_id": first.get("role_id"), "task_id": first.get("task_id")}
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT id, role_id FROM creation_tasks WHERE content_package_id = ? ORDER BY updated_at DESC, id LIMIT 1",
+            (content_id,),
+        ).fetchone()
+    if row:
+        return {"role_id": row["role_id"], "task_id": row["id"]}
+    return {"role_id": None, "task_id": None}
+
+
+def _build_collection_tools(
+    provider: str,
+    *,
+    transcription_provider: str = "provider",
+    allow_paid_fallback: bool = False,
+):
+    if provider in {"mxnzp", "direct", "auto"}:
+        resolved = build_collection_provider(
+            provider,
+            transcription_provider_name=transcription_provider,
+            allow_paid_fallback=allow_paid_fallback,
+        )
+        return build_douyin_registry(resolved)
     if provider == "mock":
         return build_mock_source_registry()
     raise ValueError(f"unknown collection tool provider: {provider}")
@@ -1437,7 +2099,16 @@ def _match_material_to_roles(
             matched_keywords=match["matched_keywords"],
             avoidance_notes=match["avoidance_notes"],
         )
-        matches.append({"match_id": match_id, "material_id": material["id"], "role_id": role["id"], **match})
+        matches.append(
+            {
+                "match_id": match_id,
+                "material_id": material["id"],
+                "role_id": role["id"],
+                "role_confirmation_status": role.get("confirmation_status"),
+                "not_confirmed": role.get("confirmation_status") != "confirmed",
+                **match,
+            }
+        )
     return matches
 
 

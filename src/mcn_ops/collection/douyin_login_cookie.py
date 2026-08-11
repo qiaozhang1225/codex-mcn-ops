@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 
 from .douyin_cookie import DEFAULT_DOUYIN_HOME, DEFAULT_USER_AGENT, DouyinCookieResult
+from .douyin.direct.client import cookie_looks_authenticated
 
 
 DEFAULT_PROFILE_DIR = Path("data/browser-profiles/douyin-cookie")
@@ -181,7 +182,10 @@ def _fetch_cookie_from_devtools(port: int, *, min_cookie_length: int) -> DouyinC
         return DouyinCookieResult(
             status="success",
             cookie=cookie,
-            cookie_valid=len(cookie) > min_cookie_length,
+            cookie_valid=(
+                len(cookie) > min_cookie_length
+                and cookie_looks_authenticated(cookie)
+            ),
             cookie_count=len(douyin_cookies),
             cookie_names=names,
             final_url=target.get("url"),

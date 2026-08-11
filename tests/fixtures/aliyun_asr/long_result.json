@@ -1,0 +1,25 @@
+{
+  "file_url": "https://media.example.com/long.mp3?token=secret",
+  "transcripts": [
+    {
+      "channel_id": 0,
+      "text": "第一句话。第二句话。",
+      "sentences": [
+        {
+          "begin_time": 0,
+          "end_time": 1500,
+          "text": "第一句话。",
+          "emotion": "neutral",
+          "language": "zh"
+        },
+        {
+          "begin_time": 1500,
+          "end_time": 3200,
+          "text": "第二句话。",
+          "emotion": "neutral",
+          "language": "zh"
+        }
+      ]
+    }
+  ]
+}

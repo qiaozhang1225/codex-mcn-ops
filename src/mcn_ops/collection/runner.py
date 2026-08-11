@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..store import Store
+from .eligibility import evaluate_material_eligibility, is_material_eligible
 from .tools import ToolExecutionError, ToolRegistry
 from .understanding import DEFAULT_UNDERSTANDING_MODEL, DEFAULT_UNDERSTANDING_PROVIDER, build_material_understanding, validate_understanding
 
@@ -48,7 +49,7 @@ class CollectionResult:
     existing_reused_material_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "run_id": self.run_id,
             "topic": self.topic,
             "status": self.status,
@@ -60,26 +61,31 @@ class CollectionResult:
             "threshold_mode": self.threshold_mode,
             "repeated_author_clues": self.repeated_author_clues,
             "mxnzp_call_summary": self.call_summary,
+            "collection_call_summary": self.call_summary,
             "understanding_success_count": self.understanding_success_count,
             "existing_reused_count": len(self.existing_reused_material_ids),
             "existing_reused_material_ids": self.existing_reused_material_ids,
         }
+        return payload
 
 
 class LoggedToolExecutor:
-    def __init__(self, tools: ToolRegistry, store: Store, run_id: str) -> None:
+    def __init__(self, tools: ToolRegistry, store: Store, run_id: str, provider: str = "legacy") -> None:
         self.tools = tools
         self.store = store
         self.run_id = run_id
+        self.provider = provider
 
     def run(self, tool_name: str, arguments: dict[str, Any], use_cache: bool = True) -> dict[str, Any]:
-        fingerprint = request_fingerprint(tool_name, arguments)
+        fingerprint = request_fingerprint(tool_name, arguments, provider=self.provider)
         started = time.monotonic()
-        if use_cache:
+        outer_cache_enabled = use_cache and tool_name != "douyin_extract_video_text"
+        if outer_cache_enabled:
             cached = self.store.get_cached_collection_call(fingerprint)
             if cached is not None:
-                self.store.log_mxnzp_call(
+                self.store.log_collection_call(
                     run_id=self.run_id,
+                    provider=self.provider,
                     tool_name=tool_name,
                     request_fingerprint=fingerprint,
                     status="ok",
@@ -91,8 +97,9 @@ class LoggedToolExecutor:
         try:
             result = self.tools.run(tool_name, arguments)
         except ToolExecutionError as exc:
-            self.store.log_mxnzp_call(
+            self.store.log_collection_call(
                 run_id=self.run_id,
+                provider=self.provider,
                 tool_name=tool_name,
                 request_fingerprint=fingerprint,
                 status="error",
@@ -103,10 +110,11 @@ class LoggedToolExecutor:
             raise
 
         status = "ok" if result.get("ok", True) else "error"
-        if use_cache and status == "ok":
-            self.store.put_cached_collection_call(tool_name, fingerprint, result)
-        self.store.log_mxnzp_call(
+        if outer_cache_enabled and status == "ok":
+            self.store.put_cached_collection_call(tool_name, fingerprint, result, provider=self.provider)
+        self.store.log_collection_call(
             run_id=self.run_id,
+            provider=str(result.get("provider") or self.provider),
             tool_name=tool_name,
             request_fingerprint=fingerprint,
             status=status,
@@ -138,7 +146,7 @@ class TopicCollectionRunner:
             super_like_threshold=config.super_like_threshold,
             tool_provider=config.tool_provider,
         )
-        executor = LoggedToolExecutor(self.tools, self.store, run_id)
+        executor = LoggedToolExecutor(self.tools, self.store, run_id, provider=config.tool_provider)
         try:
             discovered = dedupe_candidates(self._search_candidates(executor, config))
             for candidate in discovered:
@@ -197,6 +205,19 @@ class TopicCollectionRunner:
             for candidate in selected:
                 existing = find_existing_material_for_candidate(self.store, candidate) if config.reuse_existing else None
                 if existing:
+                    if existing.get("status") != "collected":
+                        skipped.append(_skip(candidate, "existing_unusable_material", "Matched an existing material that is not collected."))
+                        self.store.upsert_collection_candidate(
+                            run_id,
+                            candidate,
+                            status="skipped",
+                            selection_reason=_selection_reason(candidate, threshold_mode),
+                            skip_reason="existing_unusable_material",
+                            skip_detail="Matched an existing material that has been rejected or downgraded.",
+                            threshold_mode=threshold_mode,
+                            material_id=str(existing["id"]),
+                        )
+                        continue
                     material_id = str(existing["id"])
                     saved_material_ids.append(material_id)
                     existing_reused_material_ids.append(material_id)
@@ -246,6 +267,21 @@ class TopicCollectionRunner:
                 source_package["task_id"] = config.task_id
                 source_package["role_id"] = config.role_id
                 source_package = self._resolve_short_link(executor, source_package)
+                eligibility = evaluate_material_eligibility(source_package, role_profile=config.role_profile)
+                source_package["material_eligibility"] = eligibility
+                if not is_material_eligible(eligibility):
+                    skipped.append(_skip(candidate, str(eligibility.get("reject_reason") or "eligibility_rejected"), "; ".join(eligibility.get("reasons") or [])))
+                    candidate["source_package"] = source_package
+                    self.store.upsert_collection_candidate(
+                        run_id,
+                        candidate,
+                        status="eligibility_rejected",
+                        selection_reason=_selection_reason(candidate, threshold_mode),
+                        skip_reason=str(eligibility.get("reject_reason") or "eligibility_rejected"),
+                        skip_detail="; ".join(eligibility.get("reasons") or []),
+                        threshold_mode=threshold_mode,
+                    )
+                    continue
                 material_understanding = build_material_understanding(
                     source_package,
                     provider=config.understanding_provider,
@@ -322,7 +358,13 @@ class TopicCollectionRunner:
             for _page in range(max(1, config.max_search_pages)):
                 result = executor.run(
                     "douyin_search_videos",
-                    {"keyword": keyword, "offset": offset, "search_id": search_id},
+                    {
+                        "keyword": keyword,
+                        "offset": offset,
+                        "search_id": search_id,
+                        "max_pages": config.max_search_pages,
+                        "max_items": 0,
+                    },
                 )
                 page_candidates: list[dict[str, Any]] = []
                 for candidate in candidates_from_mxnzp_result(result):
@@ -332,6 +374,8 @@ class TopicCollectionRunner:
                     page_candidates.append(candidate)
                 candidates.extend(page_candidates)
                 paging = result.get("paging") or {}
+                if bool((paging.get("raw") or {}).get("browser_aggregated")):
+                    break
                 if not paging.get("has_next"):
                     break
                 if not should_continue_search_pages(candidates, page_candidates, config):
@@ -387,8 +431,23 @@ class TopicCollectionRunner:
         return source_package
 
 
-def request_fingerprint(tool_name: str, arguments: dict[str, Any]) -> str:
-    payload = json.dumps({"tool_name": tool_name, "arguments": arguments}, ensure_ascii=False, sort_keys=True)
+def request_fingerprint(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    provider: str = "legacy",
+    contract_version: str = "v1",
+) -> str:
+    payload = json.dumps(
+        {
+            "provider": provider,
+            "contract_version": contract_version,
+            "tool_name": tool_name,
+            "arguments": arguments,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -805,6 +864,14 @@ def _topic_terms(topic: str) -> list[str]:
         "选题",
         "账号",
         "MCN",
+        "道家",
+        "修行",
+        "修心",
+        "道德经",
+        "庄子",
+        "财运",
+        "守财",
+        "贵人运",
     ]
     terms.extend([term for term in known_terms if term and term in normalized])
     return _unique_strings(terms)

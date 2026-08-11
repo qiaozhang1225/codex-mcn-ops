@@ -8,11 +8,85 @@ Collect reusable short-video material for IP creation while keeping the system C
 
 ```bash
 mcn collect role upsert --name "知识型老师" --search-keyword 知识型口播
+mcn collect role confirm --role-id role_xxxxxxxxxxxx --change-reason 首次确认
 mcn collect run --topic 知识型口播 --target-count 1 --tool-provider mock --like-floor 1
 mcn collect report --run-id crun_xxxxxxxxxxxx
 mcn collect match --run-id crun_xxxxxxxxxxxx
 mcn material promote --material-id mat_xxxxxxxxxxxx --platform douyin
 ```
+
+## IP Role Profile Maintenance
+
+Formal collection and rewriting should start from a confirmed IP role profile. Low-level diagnostic commands can use drafts, but `mcn collect task keyword --role-id ...` requires `confirmation_status=confirmed`.
+
+Create or update a complete role profile from JSON:
+
+```json
+{
+  "name": "见心说",
+  "positioning": "中年修心口播",
+  "role_baseline": "温和克制的修心型老师",
+  "life_stage": "50岁以上",
+  "core_temperament": "稳定、克制、不表演",
+  "speaking_posture": "像过来人慢慢提醒",
+  "target_audience": {
+    "life_stage": "中年",
+    "pain_points": ["内耗", "执念"]
+  },
+  "search_keywords": ["修心", "内耗"],
+  "fit_themes": ["修心", "放下执念"],
+  "avoid_themes": ["暴富承诺"],
+  "style_anchors": {
+    "opening_style": "一句生活化判断开头",
+    "ending_style": "克制收束，不强行动员"
+  },
+  "expression_constraints": {
+    "allowed_intensity": "medium"
+  },
+  "forbidden_expressions": ["保证发财"],
+  "typical_topics": ["人到中年要学会放下"]
+}
+```
+
+Recommended command sequence:
+
+```bash
+mcn collect role upsert --file role.json --json
+mcn collect role show --role-id role_xxxxxxxxxxxx
+mcn collect role confirm --role-id role_xxxxxxxxxxxx --change-reason 首次确认
+mcn collect role packet --role-id role_xxxxxxxxxxxx --json
+mcn collect role export --file data/ip-roles-export.json --json
+```
+
+Status rules:
+
+- `draft`: editable, not valid for formal high-level collection tasks.
+- `agent_suggested`: imported or Codex-suggested profile waiting for confirmation.
+- `confirmed`: valid for formal collection and later creation flows.
+- `needs_reconfirm`: a key strategy field changed after confirmation; confirm again before formal use.
+
+`source_role_id` on a material means the role that started collection. It is not the material's only suitable IP. Use `material_role_matches` to inspect all IP-role fit judgments.
+
+## Handoff To Creation
+
+Once a role profile is confirmed and material collection has produced accepted materials with material understanding, use the high-level creation workflow instead of directly copying transcripts into drafts.
+
+```bash
+mcn create task new \
+  --role-id role_xxxxxxxxxxxx \
+  --topic 财运 \
+  --goal "生成一条知识型五段式口播" \
+  --platform douyin \
+  --target-count 3
+
+mcn create task run --task-id createtask_xxxxxxxxxxxx --stage material_selection
+mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage material_selection
+mcn create task run --task-id createtask_xxxxxxxxxxxx --stage creation_brief
+```
+
+Creation tasks read `knowledge/creation/*.md` and `knowledge/ip/<role_slug>/*.md` as the long-term rewrite background. SQLite remains the fact and audit store; Markdown stores reusable creative experience, risk wording, and feedback learnings.
+
+Use `mcn create knowledge packet --task-id ... --json` to inspect the exact context before a formal rewrite stage. By default, the packet uses promoted material understanding fields and does not include complete transcripts.
 
 ## High-Level Collection Tasks
 
@@ -217,6 +291,41 @@ This means a hot keyword can continue past the early pages when the current page
 It also means the search can stop early when enough good candidates already exist for the target collection count.
 
 Public metrics are ranked by a weighted engagement score. Likes matter, but saves and shares carry extra weight because they better indicate reusable material value.
+
+## Formal Material Eligibility Gate
+
+Search prefiltering only decides whether a result is worth spending transcript API cost. It is not the final judgment.
+
+After transcript extraction, the workflow runs `material-eligibility-v1` before inserting a reusable formal material or running material understanding. This gate protects the formal library from noisy short-video formats that may have traffic but cannot become knowledge-sharing oral-script drafts.
+
+Formal reusable material must satisfy all of the following:
+
+- has a non-empty transcript or caption long enough to support later understanding;
+- has a clear knowledge core, viewpoint, explanation chain, judgment logic, or reusable list structure;
+- fits oral-script collection rather than pure interaction, blessing, emotional prompting, plot, parenting, pet, or entertainment scenes;
+- does not rely on concrete ritual actions such as pouring water, breathing toward the sun, chanting formulas, placing objects, or asking viewers to perform a luck ritual.
+
+Common reject examples:
+
+- `倒一杯自来水，吐三口气...`
+- `玄学转运小妙招`
+- `大晴天找个开阔地，迎着太阳深吸一口气`
+- `爸爸带娃` / `养宠修行` / drama interaction clips
+- missing transcript or transcript too short to judge
+
+The gate writes:
+
+- `eligibility_status`
+- `reject_reason`
+- `content_form`
+- `knowledge_core_score`
+- `oral_script_fit_score`
+- `ip_fit_score`
+- full `material_eligibility_json`
+
+`collection_candidates` may keep rejected or broad results for audit. `collected_materials.status='collected'` is the reusable formal pool. Rows marked `eligibility_rejected`, `missing_transcript`, `topic_mismatch`, or `role_boundary_mismatch` should not be used for normal二创 unless explicitly reviewed and restored.
+
+A single Buddhist-color term is not automatically rejected. If the script has a strong knowledge explanation chain, it can stay in the pool with `content_form='佛教色彩'`, and later IP matching or rewriting should decide whether to translate it into道家/国学 expression or reject it for a specific IP boundary.
 
 ## Material Understanding
 

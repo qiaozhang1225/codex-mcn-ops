@@ -74,6 +74,8 @@ class PagingState:
 
 
 class MxnzpDouyinProClient:
+    provider_name = "mxnzp"
+
     def __init__(
         self,
         config: MxnzpConfig,
@@ -118,6 +120,7 @@ class MxnzpDouyinProClient:
         normalized = normalize_response(method_key, safe_raw)
         result = {
             "ok": True,
+            "provider": self.provider_name,
             "method_key": method_key,
             "endpoint": method.endpoint,
             "cost_weight": method.cost_weight,

@@ -1,0 +1,13 @@
+{
+  "output": {
+    "task_id": "task-test-123",
+    "task_status": "SUCCEEDED",
+    "result": {
+      "transcription_url": "https://results.example.com/result.json?Signature=secret"
+    }
+  },
+  "request_id": "request-poll-2",
+  "usage": {
+    "seconds": 361
+  }
+}

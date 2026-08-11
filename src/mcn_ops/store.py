@@ -15,19 +15,8 @@ DEFAULT_DB_PATH = Path("data/mcn_ops.sqlite")
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS ip_profiles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    positioning TEXT NOT NULL DEFAULT '',
-    keywords_json TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS content_packages (
     id TEXT PRIMARY KEY,
-    ip_profile_id TEXT,
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     media_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -36,8 +25,7 @@ CREATE TABLE IF NOT EXISTS content_packages (
     status TEXT NOT NULL DEFAULT 'draft',
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(ip_profile_id) REFERENCES ip_profiles(id)
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS publish_jobs (
@@ -51,30 +39,6 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(content_id) REFERENCES content_packages(id)
-);
-
-CREATE TABLE IF NOT EXISTS android_devices (
-    serial TEXT PRIMARY KEY,
-    label TEXT NOT NULL DEFAULT '',
-    model TEXT,
-    status TEXT NOT NULL DEFAULT 'unknown',
-    last_seen_at TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS app_accounts (
-    id TEXT PRIMARY KEY,
-    device_serial TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    account_label TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'unknown',
-    last_checked_at TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(device_serial) REFERENCES android_devices(serial)
 );
 
 CREATE TABLE IF NOT EXISTS publish_run_logs (
@@ -112,9 +76,39 @@ CREATE TABLE IF NOT EXISTS ip_roles (
     avoid_directions_json TEXT NOT NULL DEFAULT '[]',
     preferred_content_json TEXT NOT NULL DEFAULT '[]',
     forbidden_content_json TEXT NOT NULL DEFAULT '[]',
+    confirmation_status TEXT NOT NULL DEFAULT 'draft',
+    confirmed_at TEXT,
+    needs_reconfirm INTEGER NOT NULL DEFAULT 0,
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    role_baseline TEXT NOT NULL DEFAULT '',
+    life_stage TEXT NOT NULL DEFAULT '',
+    core_temperament TEXT NOT NULL DEFAULT '',
+    speaking_posture TEXT NOT NULL DEFAULT '',
+    target_audience_json TEXT NOT NULL DEFAULT '{}',
+    fit_themes_json TEXT NOT NULL DEFAULT '[]',
+    avoid_themes_json TEXT NOT NULL DEFAULT '[]',
+    style_anchors_json TEXT NOT NULL DEFAULT '{}',
+    expression_constraints_json TEXT NOT NULL DEFAULT '{}',
+    forbidden_expressions_json TEXT NOT NULL DEFAULT '[]',
+    typical_topics_json TEXT NOT NULL DEFAULT '[]',
+    theme_map_json TEXT NOT NULL DEFAULT '{}',
+    persona_packet_json TEXT NOT NULL DEFAULT '{}',
+    source_evidence_json TEXT NOT NULL DEFAULT '{}',
+    agent_suggestions_json TEXT NOT NULL DEFAULT '{}',
+    notes TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ip_role_versions (
+    id TEXT PRIMARY KEY,
+    role_id TEXT NOT NULL,
+    profile_version INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL DEFAULT '{}',
+    change_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id)
 );
 
 CREATE TABLE IF NOT EXISTS collection_tasks (
@@ -234,6 +228,16 @@ CREATE TABLE IF NOT EXISTS collected_materials (
     audio_url TEXT,
     author_identity_confidence TEXT,
     metrics_json TEXT NOT NULL DEFAULT '{}',
+    material_eligibility_json TEXT NOT NULL DEFAULT '{}',
+    eligibility_status TEXT NOT NULL DEFAULT 'accepted',
+    eligibility_provider TEXT NOT NULL DEFAULT 'local-rules',
+    eligibility_version TEXT NOT NULL DEFAULT 'material-eligibility-v1',
+    eligibility_reason_json TEXT NOT NULL DEFAULT '[]',
+    content_form TEXT,
+    knowledge_core_score REAL NOT NULL DEFAULT 0,
+    oral_script_fit_score REAL NOT NULL DEFAULT 0,
+    ip_fit_score REAL NOT NULL DEFAULT 0,
+    reject_reason TEXT,
     material_understanding_json TEXT NOT NULL DEFAULT '{}',
     understanding_provider TEXT NOT NULL DEFAULT 'codex-agent',
     understanding_model TEXT NOT NULL DEFAULT 'gpt-5.5',
@@ -330,9 +334,142 @@ CREATE TABLE IF NOT EXISTS material_creations (
     FOREIGN KEY(task_id) REFERENCES collection_tasks(id)
 );
 
+CREATE TABLE IF NOT EXISTS creation_tasks (
+    id TEXT PRIMARY KEY,
+    role_id TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    goal TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL,
+    target_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'draft',
+    provider TEXT NOT NULL DEFAULT 'codex-agent',
+    model TEXT NOT NULL DEFAULT 'gpt-5.5',
+    allow_reuse_material INTEGER NOT NULL DEFAULT 0,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    content_package_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+    FOREIGN KEY(content_package_id) REFERENCES content_packages(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_stage_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    stage_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'needs_confirmation',
+    provider TEXT NOT NULL DEFAULT 'codex-agent',
+    model TEXT NOT NULL DEFAULT 'gpt-5.5',
+    input_json TEXT NOT NULL DEFAULT '{}',
+    output_json TEXT NOT NULL DEFAULT '{}',
+    output_markdown TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    confirmed_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_material_selections (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    material_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    selection_status TEXT NOT NULL DEFAULT 'selected',
+    score REAL NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, material_id),
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+    FOREIGN KEY(material_id) REFERENCES collected_materials(id),
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_drafts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    stage_run_id TEXT,
+    draft_type TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+    FOREIGN KEY(stage_run_id) REFERENCES creation_stage_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_delivery_packages (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    content_package_id TEXT,
+    platform TEXT NOT NULL,
+    package_json TEXT NOT NULL DEFAULT '{}',
+    markdown_path TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+    FOREIGN KEY(content_package_id) REFERENCES content_packages(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_feedback_events (
+    id TEXT PRIMARY KEY,
+    content_package_id TEXT NOT NULL,
+    task_id TEXT,
+    role_id TEXT,
+    platform TEXT NOT NULL,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    notice TEXT NOT NULL DEFAULT '',
+    human_note TEXT NOT NULL DEFAULT '',
+    judgment TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(content_package_id) REFERENCES content_packages(id),
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+);
+
+CREATE TABLE IF NOT EXISTS risk_term_observations (
+    id TEXT PRIMARY KEY,
+    role_id TEXT,
+    content_package_id TEXT,
+    task_id TEXT,
+    term TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    position TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '待验证',
+    source TEXT NOT NULL DEFAULT 'creation',
+    sample_text TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+    FOREIGN KEY(content_package_id) REFERENCES content_packages(id),
+    FOREIGN KEY(task_id) REFERENCES creation_tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS creation_learning_updates (
+    id TEXT PRIMARY KEY,
+    role_id TEXT NOT NULL,
+    source_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    target_file TEXT NOT NULL,
+    proposed_markdown TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    applied_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+);
+
 CREATE TABLE IF NOT EXISTS mxnzp_call_logs (
     id TEXT PRIMARY KEY,
     run_id TEXT,
+    provider TEXT NOT NULL DEFAULT 'mxnzp',
     tool_name TEXT NOT NULL,
     request_fingerprint TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -345,6 +482,7 @@ CREATE TABLE IF NOT EXISTS mxnzp_call_logs (
 
 CREATE TABLE IF NOT EXISTS mxnzp_call_cache (
     request_fingerprint TEXT PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'mxnzp',
     tool_name TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -378,6 +516,12 @@ CREATE INDEX IF NOT EXISTS idx_material_role_matches_material_id ON material_rol
 CREATE INDEX IF NOT EXISTS idx_material_role_matches_role_id ON material_role_matches(role_id);
 CREATE INDEX IF NOT EXISTS idx_material_creations_material_id ON material_creations(material_id);
 CREATE INDEX IF NOT EXISTS idx_material_creations_role_id ON material_creations(role_id);
+CREATE INDEX IF NOT EXISTS idx_ip_role_versions_role_id ON ip_role_versions(role_id);
+CREATE INDEX IF NOT EXISTS idx_creation_tasks_role_id ON creation_tasks(role_id);
+CREATE INDEX IF NOT EXISTS idx_creation_stage_runs_task_stage ON creation_stage_runs(task_id, stage_key);
+CREATE INDEX IF NOT EXISTS idx_creation_material_selections_task_id ON creation_material_selections(task_id);
+CREATE INDEX IF NOT EXISTS idx_creation_feedback_events_role_id ON creation_feedback_events(role_id);
+CREATE INDEX IF NOT EXISTS idx_risk_term_observations_role_id ON risk_term_observations(role_id);
 """
 
 
@@ -438,6 +582,63 @@ MATERIAL_V2_COLUMNS: dict[str, str] = {
     "cover_url": "TEXT",
     "video_url": "TEXT",
     "audio_url": "TEXT",
+    "material_eligibility_json": "TEXT NOT NULL DEFAULT '{}'",
+    "eligibility_status": "TEXT NOT NULL DEFAULT 'accepted'",
+    "eligibility_provider": "TEXT NOT NULL DEFAULT 'local-rules'",
+    "eligibility_version": "TEXT NOT NULL DEFAULT 'material-eligibility-v1'",
+    "eligibility_reason_json": "TEXT NOT NULL DEFAULT '[]'",
+    "content_form": "TEXT",
+    "knowledge_core_score": "REAL NOT NULL DEFAULT 0",
+    "oral_script_fit_score": "REAL NOT NULL DEFAULT 0",
+    "ip_fit_score": "REAL NOT NULL DEFAULT 0",
+    "reject_reason": "TEXT",
+}
+
+
+IP_ROLE_CONFIRMATION_STATUSES = {"draft", "agent_suggested", "confirmed", "needs_reconfirm"}
+
+IP_ROLE_V2_COLUMNS: dict[str, str] = {
+    "confirmation_status": "TEXT NOT NULL DEFAULT 'draft'",
+    "confirmed_at": "TEXT",
+    "needs_reconfirm": "INTEGER NOT NULL DEFAULT 0",
+    "profile_version": "INTEGER NOT NULL DEFAULT 1",
+    "role_baseline": "TEXT NOT NULL DEFAULT ''",
+    "life_stage": "TEXT NOT NULL DEFAULT ''",
+    "core_temperament": "TEXT NOT NULL DEFAULT ''",
+    "speaking_posture": "TEXT NOT NULL DEFAULT ''",
+    "target_audience_json": "TEXT NOT NULL DEFAULT '{}'",
+    "fit_themes_json": "TEXT NOT NULL DEFAULT '[]'",
+    "avoid_themes_json": "TEXT NOT NULL DEFAULT '[]'",
+    "style_anchors_json": "TEXT NOT NULL DEFAULT '{}'",
+    "expression_constraints_json": "TEXT NOT NULL DEFAULT '{}'",
+    "forbidden_expressions_json": "TEXT NOT NULL DEFAULT '[]'",
+    "typical_topics_json": "TEXT NOT NULL DEFAULT '[]'",
+    "theme_map_json": "TEXT NOT NULL DEFAULT '{}'",
+    "persona_packet_json": "TEXT NOT NULL DEFAULT '{}'",
+    "source_evidence_json": "TEXT NOT NULL DEFAULT '{}'",
+    "agent_suggestions_json": "TEXT NOT NULL DEFAULT '{}'",
+    "notes": "TEXT NOT NULL DEFAULT ''",
+}
+
+IP_ROLE_RECONFIRM_FIELDS = {
+    "positioning",
+    "target_directions",
+    "search_keywords",
+    "avoid_directions",
+    "preferred_content",
+    "forbidden_content",
+    "role_baseline",
+    "life_stage",
+    "core_temperament",
+    "speaking_posture",
+    "target_audience",
+    "fit_themes",
+    "avoid_themes",
+    "style_anchors",
+    "expression_constraints",
+    "forbidden_expressions",
+    "typical_topics",
+    "theme_map",
 }
 
 
@@ -460,25 +661,12 @@ class Store:
     def init_db(self) -> Path:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            _migrate_ip_role_v2(conn)
             _migrate_schema_v2(conn)
+            _migrate_creation_schema(conn)
+            _migrate_collection_provider_schema(conn)
             _backfill_material_v2_columns(conn)
         return self.db_path
-
-    def upsert_device(self, serial: str, *, model: str | None = None, status: str = "device") -> None:
-        timestamp = now_iso()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO android_devices(serial, model, status, last_seen_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(serial) DO UPDATE SET
-                    model = COALESCE(excluded.model, android_devices.model),
-                    status = excluded.status,
-                    last_seen_at = excluded.last_seen_at,
-                    updated_at = excluded.updated_at
-                """,
-                (serial, model, status, timestamp, timestamp, timestamp),
-            )
 
     def create_content_package(
         self,
@@ -488,7 +676,6 @@ class Store:
         media_paths: list[str],
         cover_path: str | None = None,
         hashtags: list[str] | None = None,
-        ip_profile_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
         content_id = new_id("content")
@@ -497,14 +684,13 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO content_packages(
-                    id, ip_profile_id, title, body, media_paths_json, cover_path,
+                    id, title, body, media_paths_json, cover_path,
                     hashtags_json, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     content_id,
-                    ip_profile_id,
                     title,
                     body,
                     dumps(media_paths),
@@ -651,29 +837,95 @@ class Store:
         self,
         *,
         name: str,
-        positioning: str = "",
+        positioning: str | None = "",
         target_directions: list[str] | None = None,
         search_keywords: list[str] | None = None,
         avoid_directions: list[str] | None = None,
         preferred_content: list[str] | None = None,
         forbidden_content: list[str] | None = None,
-        enabled: bool = True,
+        confirmation_status: str | None = None,
+        role_baseline: str | None = None,
+        life_stage: str | None = None,
+        core_temperament: str | None = None,
+        speaking_posture: str | None = None,
+        target_audience: Any = None,
+        fit_themes: list[str] | None = None,
+        avoid_themes: list[str] | None = None,
+        style_anchors: Any = None,
+        expression_constraints: Any = None,
+        forbidden_expressions: list[str] | None = None,
+        typical_topics: list[str] | None = None,
+        theme_map: Any = None,
+        source_evidence: Any = None,
+        agent_suggestions: Any = None,
+        notes: str | None = None,
+        enabled: bool | None = True,
     ) -> str:
         role_name = name.strip()
         if not role_name:
             raise ValueError("role name is required")
         timestamp = now_iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT id FROM ip_roles WHERE name = ?", (role_name,)).fetchone()
-            role_id = row["id"] if row else new_id("role")
+            row = conn.execute("SELECT * FROM ip_roles WHERE name = ?", (role_name,)).fetchone()
+            existing = _role_row_to_dict(row) if row else None
+            role_id = existing["id"] if existing else new_id("role")
+            status = _role_confirmation_status(
+                confirmation_status
+                or (str(existing.get("confirmation_status")) if existing else None)
+                or "draft"
+            )
+            prepared = {
+                "id": role_id,
+                "name": role_name,
+                "positioning": _preserve_text(positioning, existing, "positioning"),
+                "target_directions": _preserve_list(target_directions, existing, "target_directions"),
+                "search_keywords": _preserve_list(search_keywords, existing, "search_keywords"),
+                "avoid_directions": _preserve_list(avoid_directions, existing, "avoid_directions"),
+                "preferred_content": _preserve_list(preferred_content, existing, "preferred_content"),
+                "forbidden_content": _preserve_list(forbidden_content, existing, "forbidden_content"),
+                "confirmation_status": status,
+                "confirmed_at": existing.get("confirmed_at") if existing else None,
+                "needs_reconfirm": bool(existing.get("needs_reconfirm")) if existing else False,
+                "profile_version": int(existing.get("profile_version") or 1) if existing else 1,
+                "role_baseline": _preserve_text(role_baseline, existing, "role_baseline"),
+                "life_stage": _preserve_text(life_stage, existing, "life_stage"),
+                "core_temperament": _preserve_text(core_temperament, existing, "core_temperament"),
+                "speaking_posture": _preserve_text(speaking_posture, existing, "speaking_posture"),
+                "target_audience": _preserve_json(target_audience, existing, "target_audience", {}),
+                "fit_themes": _preserve_list(fit_themes, existing, "fit_themes"),
+                "avoid_themes": _preserve_list(avoid_themes, existing, "avoid_themes"),
+                "style_anchors": _preserve_json(style_anchors, existing, "style_anchors", {}),
+                "expression_constraints": _preserve_json(expression_constraints, existing, "expression_constraints", {}),
+                "forbidden_expressions": _preserve_list(forbidden_expressions, existing, "forbidden_expressions"),
+                "typical_topics": _preserve_list(typical_topics, existing, "typical_topics"),
+                "theme_map": _preserve_json(theme_map, existing, "theme_map", {}),
+                "source_evidence": _preserve_json(source_evidence, existing, "source_evidence", {}),
+                "agent_suggestions": _preserve_json(agent_suggestions, existing, "agent_suggestions", {}),
+                "notes": _preserve_text(notes, existing, "notes"),
+                "enabled": bool(existing.get("enabled")) if enabled is None and existing else (True if enabled is None else bool(enabled)),
+                "created_at": existing.get("created_at") if existing else timestamp,
+                "updated_at": timestamp,
+            }
+            if existing and _ip_role_needs_reconfirm(existing, prepared):
+                prepared["confirmation_status"] = "needs_reconfirm"
+                prepared["needs_reconfirm"] = True
+            elif prepared["confirmation_status"] == "confirmed":
+                prepared["needs_reconfirm"] = False
+            prepared["persona_packet"] = build_ip_role_persona_packet(prepared)
             conn.execute(
                 """
                 INSERT INTO ip_roles(
                     id, name, positioning, target_directions_json, search_keywords_json,
                     avoid_directions_json, preferred_content_json, forbidden_content_json,
+                    confirmation_status, confirmed_at, needs_reconfirm, profile_version,
+                    role_baseline, life_stage, core_temperament, speaking_posture,
+                    target_audience_json, fit_themes_json, avoid_themes_json,
+                    style_anchors_json, expression_constraints_json, forbidden_expressions_json,
+                    typical_topics_json, theme_map_json, persona_packet_json,
+                    source_evidence_json, agent_suggestions_json, notes,
                     enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     positioning = excluded.positioning,
                     target_directions_json = excluded.target_directions_json,
@@ -681,33 +933,80 @@ class Store:
                     avoid_directions_json = excluded.avoid_directions_json,
                     preferred_content_json = excluded.preferred_content_json,
                     forbidden_content_json = excluded.forbidden_content_json,
+                    confirmation_status = excluded.confirmation_status,
+                    confirmed_at = excluded.confirmed_at,
+                    needs_reconfirm = excluded.needs_reconfirm,
+                    profile_version = excluded.profile_version,
+                    role_baseline = excluded.role_baseline,
+                    life_stage = excluded.life_stage,
+                    core_temperament = excluded.core_temperament,
+                    speaking_posture = excluded.speaking_posture,
+                    target_audience_json = excluded.target_audience_json,
+                    fit_themes_json = excluded.fit_themes_json,
+                    avoid_themes_json = excluded.avoid_themes_json,
+                    style_anchors_json = excluded.style_anchors_json,
+                    expression_constraints_json = excluded.expression_constraints_json,
+                    forbidden_expressions_json = excluded.forbidden_expressions_json,
+                    typical_topics_json = excluded.typical_topics_json,
+                    theme_map_json = excluded.theme_map_json,
+                    persona_packet_json = excluded.persona_packet_json,
+                    source_evidence_json = excluded.source_evidence_json,
+                    agent_suggestions_json = excluded.agent_suggestions_json,
+                    notes = excluded.notes,
                     enabled = excluded.enabled,
                     updated_at = excluded.updated_at
                 """,
                 (
                     role_id,
                     role_name,
-                    positioning,
-                    dumps(_clean_list(target_directions)),
-                    dumps(_clean_list(search_keywords)),
-                    dumps(_clean_list(avoid_directions)),
-                    dumps(_clean_list(preferred_content)),
-                    dumps(_clean_list(forbidden_content)),
-                    int(enabled),
-                    timestamp,
-                    timestamp,
+                    prepared["positioning"],
+                    dumps(prepared["target_directions"]),
+                    dumps(prepared["search_keywords"]),
+                    dumps(prepared["avoid_directions"]),
+                    dumps(prepared["preferred_content"]),
+                    dumps(prepared["forbidden_content"]),
+                    prepared["confirmation_status"],
+                    prepared["confirmed_at"],
+                    int(prepared["needs_reconfirm"]),
+                    prepared["profile_version"],
+                    prepared["role_baseline"],
+                    prepared["life_stage"],
+                    prepared["core_temperament"],
+                    prepared["speaking_posture"],
+                    dumps(prepared["target_audience"]),
+                    dumps(prepared["fit_themes"]),
+                    dumps(prepared["avoid_themes"]),
+                    dumps(prepared["style_anchors"]),
+                    dumps(prepared["expression_constraints"]),
+                    dumps(prepared["forbidden_expressions"]),
+                    dumps(prepared["typical_topics"]),
+                    dumps(prepared["theme_map"]),
+                    dumps(prepared["persona_packet"]),
+                    dumps(prepared["source_evidence"]),
+                    dumps(prepared["agent_suggestions"]),
+                    prepared["notes"],
+                    int(prepared["enabled"]),
+                    prepared["created_at"],
+                    prepared["updated_at"],
                 ),
             )
         return role_id
 
-    def list_ip_roles(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+    def list_ip_roles(self, *, enabled_only: bool = False, confirmed_only: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM ip_roles"
-        params: tuple[Any, ...] = ()
-        if enabled_only:
-            query += " WHERE enabled = 1"
+        params: list[Any] = []
+        where: list[str] = []
+        if enabled_only or confirmed_only:
+            where.append("enabled = 1")
+        if confirmed_only:
+            where.append("confirmation_status = ?")
+            where.append("needs_reconfirm = 0")
+            params.append("confirmed")
+        if where:
+            query += " WHERE " + " AND ".join(where)
         query += " ORDER BY created_at, name"
         with self.connect() as conn:
-            rows = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [_role_row_to_dict(row) for row in rows]
 
     def get_ip_role(self, role_id: str | None = None, *, name: str | None = None) -> dict[str, Any] | None:
@@ -719,6 +1018,63 @@ class Store:
             else:
                 row = conn.execute("SELECT * FROM ip_roles WHERE name = ?", (name,)).fetchone()
         return _role_row_to_dict(row) if row else None
+
+    def export_ip_roles(self) -> list[dict[str, Any]]:
+        return self.list_ip_roles()
+
+    def build_ip_role_persona_packet(self, role_id: str | None = None, *, name: str | None = None) -> dict[str, Any]:
+        role = self.get_ip_role(role_id, name=name)
+        if not role:
+            raise KeyError("role not found")
+        packet = build_ip_role_persona_packet(role)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE ip_roles SET persona_packet_json = ?, updated_at = ? WHERE id = ?",
+                (dumps(packet), now_iso(), role["id"]),
+            )
+        return packet
+
+    def confirm_ip_role(self, role_id: str, *, change_reason: str = "") -> dict[str, Any]:
+        role = self.get_ip_role(role_id)
+        if not role:
+            raise KeyError(f"role not found: {role_id}")
+        timestamp = now_iso()
+        has_confirmed_before = bool(role.get("confirmed_at"))
+        next_version = int(role.get("profile_version") or 1) + (1 if has_confirmed_before else 0)
+        role = {**role, "confirmation_status": "confirmed", "needs_reconfirm": False, "profile_version": next_version}
+        packet = build_ip_role_persona_packet(role)
+        snapshot = {**role, "persona_packet": packet, "confirmed_at": timestamp}
+        version_id = new_id("rver")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE ip_roles
+                SET confirmation_status = 'confirmed',
+                    confirmed_at = ?,
+                    needs_reconfirm = 0,
+                    profile_version = ?,
+                    persona_packet_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, next_version, dumps(packet), timestamp, role_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO ip_role_versions(
+                    id, role_id, profile_version, snapshot_json, change_reason, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (version_id, role_id, next_version, dumps(snapshot), change_reason, timestamp),
+            )
+        updated = self.get_ip_role(role_id)
+        return {
+            "role_id": role_id,
+            "version_id": version_id,
+            "profile_version": next_version,
+            "role": updated,
+        }
 
     def create_collection_task(
         self,
@@ -1023,6 +1379,7 @@ class Store:
         provider = str(material_understanding.get("understanding_provider") or "codex-agent")
         model = str(material_understanding.get("understanding_model") or "gpt-5.5")
         promoted = _material_promoted_values(source_package, material_understanding, raw)
+        eligibility = _material_eligibility_values(source_package)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1037,11 +1394,14 @@ class Store:
                     author_name, author_sec_uid, author_profile_url, author_douyin_id,
                     work_id, work_short_url, source_platform, post_time, duration_ms,
                     cover_url, video_url, audio_url, author_identity_confidence, metrics_json,
+                    material_eligibility_json, eligibility_status, eligibility_provider,
+                    eligibility_version, eligibility_reason_json, content_form,
+                    knowledge_core_score, oral_script_fit_score, ip_fit_score, reject_reason,
                     material_understanding_json, understanding_provider,
                     understanding_model, sample_pool_clues_json, understanding_status,
                     source_package_json, raw_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     material_id,
@@ -1086,6 +1446,16 @@ class Store:
                     (source_package.get("author_identity") or {}).get("confidence")
                     or source_package.get("author_identity_confidence"),
                     dumps(scrub_for_storage(metrics)),
+                    dumps(scrub_for_storage(eligibility["material_eligibility"])),
+                    eligibility["eligibility_status"],
+                    eligibility["eligibility_provider"],
+                    eligibility["eligibility_version"],
+                    dumps(scrub_for_storage(eligibility["eligibility_reasons"])),
+                    eligibility["content_form"],
+                    eligibility["knowledge_core_score"],
+                    eligibility["oral_script_fit_score"],
+                    eligibility["ip_fit_score"],
+                    eligibility["reject_reason"],
                     dumps(scrub_for_storage(material_understanding)),
                     provider,
                     model,
@@ -1204,6 +1574,56 @@ class Store:
                     provider,
                     model,
                     str(understanding.get("status") or "success"),
+                    now_iso(),
+                    material_id,
+                ),
+            )
+
+    def update_material_eligibility(
+        self,
+        material_id: str,
+        *,
+        eligibility: dict[str, Any],
+        status: str | None = None,
+    ) -> None:
+        material = self.get_collected_material(material_id)
+        if not material:
+            raise KeyError(f"material not found: {material_id}")
+        values = _material_eligibility_values({"material_eligibility": eligibility})
+        source_package = dict(material.get("source_package") or {})
+        source_package["material_eligibility"] = eligibility
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE collected_materials
+                SET material_eligibility_json = ?,
+                    eligibility_status = ?,
+                    eligibility_provider = ?,
+                    eligibility_version = ?,
+                    eligibility_reason_json = ?,
+                    content_form = ?,
+                    knowledge_core_score = ?,
+                    oral_script_fit_score = ?,
+                    ip_fit_score = ?,
+                    reject_reason = ?,
+                    source_package_json = ?,
+                    status = COALESCE(?, status),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    dumps(scrub_for_storage(values["material_eligibility"])),
+                    values["eligibility_status"],
+                    values["eligibility_provider"],
+                    values["eligibility_version"],
+                    dumps(scrub_for_storage(values["eligibility_reasons"])),
+                    values["content_form"],
+                    values["knowledge_core_score"],
+                    values["oral_script_fit_score"],
+                    values["ip_fit_score"],
+                    values["reject_reason"],
+                    dumps(scrub_for_storage(source_package)),
+                    status,
                     now_iso(),
                     material_id,
                 ),
@@ -1651,10 +2071,585 @@ class Store:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [_material_creation_row_to_dict(row) for row in rows]
 
-    def log_mxnzp_call(
+    def create_creation_task(
+        self,
+        *,
+        role_id: str,
+        topic: str,
+        goal: str,
+        platform: str,
+        target_count: int,
+        provider: str = "codex-agent",
+        model: str = "gpt-5.5",
+        allow_reuse_material: bool = False,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        task_id = new_id("createtask")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_tasks(
+                    id, role_id, topic, goal, platform, target_count, status,
+                    provider, model, allow_reuse_material, context_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    role_id,
+                    topic,
+                    goal,
+                    platform,
+                    target_count,
+                    "draft",
+                    provider,
+                    model,
+                    int(allow_reuse_material),
+                    dumps(scrub_for_storage(context or {})),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return task_id
+
+    def get_creation_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM creation_tasks WHERE id = ?", (task_id,)).fetchone()
+        return _creation_task_row_to_dict(row) if row else None
+
+    def update_creation_task(
+        self,
+        task_id: str,
+        *,
+        status: str | None = None,
+        content_package_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        completed: bool = False,
+    ) -> None:
+        task = self.get_creation_task(task_id)
+        if not task:
+            raise KeyError(f"creation task not found: {task_id}")
+        next_context = task.get("context") or {}
+        if context:
+            next_context = {**next_context, **context}
+        completed_at = now_iso() if completed else task.get("completed_at")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE creation_tasks
+                SET status = COALESCE(?, status),
+                    content_package_id = COALESCE(?, content_package_id),
+                    context_json = ?,
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    content_package_id,
+                    dumps(scrub_for_storage(next_context)),
+                    completed_at,
+                    now_iso(),
+                    task_id,
+                ),
+            )
+
+    def insert_creation_stage_run(
+        self,
+        *,
+        task_id: str,
+        stage_key: str,
+        status: str,
+        provider: str,
+        model: str,
+        input_data: dict[str, Any] | None = None,
+        output_data: dict[str, Any] | None = None,
+        output_markdown: str = "",
+        note: str = "",
+    ) -> str:
+        timestamp = now_iso()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM creation_stage_runs WHERE task_id = ? AND stage_key = ?",
+                (task_id, stage_key),
+            ).fetchone()
+            version = int(row["version"] or 0) + 1
+            stage_run_id = new_id("cstage")
+            conn.execute(
+                """
+                INSERT INTO creation_stage_runs(
+                    id, task_id, stage_key, status, provider, model, input_json,
+                    output_json, output_markdown, note, version, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stage_run_id,
+                    task_id,
+                    stage_key,
+                    status,
+                    provider,
+                    model,
+                    dumps(scrub_for_storage(input_data or {})),
+                    dumps(scrub_for_storage(output_data or {})),
+                    output_markdown,
+                    note,
+                    version,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return stage_run_id
+
+    def update_creation_stage_status(self, stage_run_id: str, status: str) -> None:
+        confirmed_at = now_iso() if status == "confirmed" else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE creation_stage_runs
+                SET status = ?, confirmed_at = COALESCE(?, confirmed_at), updated_at = ?
+                WHERE id = ?
+                """,
+                (status, confirmed_at, now_iso(), stage_run_id),
+            )
+
+    def list_creation_stage_runs(self, task_id: str, *, stage_key: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM creation_stage_runs WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if stage_key:
+            query += " AND stage_key = ?"
+            params.append(stage_key)
+        query += " ORDER BY created_at, version, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_stage_run_row_to_dict(row) for row in rows]
+
+    def latest_creation_stage_run(self, task_id: str, stage_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM creation_stage_runs
+                WHERE task_id = ? AND stage_key = ?
+                ORDER BY version DESC, created_at DESC
+                LIMIT 1
+                """,
+                (task_id, stage_key),
+            ).fetchone()
+        return _creation_stage_run_row_to_dict(row) if row else None
+
+    def upsert_creation_material_selection(
+        self,
+        *,
+        task_id: str,
+        material_id: str,
+        role_id: str,
+        selection_status: str,
+        score: float,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        selection_id = new_id("csel")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM creation_material_selections WHERE task_id = ? AND material_id = ?",
+                (task_id, material_id),
+            ).fetchone()
+            if existing:
+                selection_id = existing["id"]
+            conn.execute(
+                """
+                INSERT INTO creation_material_selections(
+                    id, task_id, material_id, role_id, selection_status, score,
+                    reason, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, material_id) DO UPDATE SET
+                    role_id = excluded.role_id,
+                    selection_status = excluded.selection_status,
+                    score = excluded.score,
+                    reason = excluded.reason,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    selection_id,
+                    task_id,
+                    material_id,
+                    role_id,
+                    selection_status,
+                    score,
+                    reason,
+                    dumps(scrub_for_storage(metadata or {})),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return selection_id
+
+    def list_creation_material_selections(
+        self,
+        task_id: str,
+        *,
+        selection_status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM creation_material_selections WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if selection_status:
+            query += " AND selection_status = ?"
+            params.append(selection_status)
+        query += " ORDER BY score DESC, created_at, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_material_selection_row_to_dict(row) for row in rows]
+
+    def insert_creation_draft(
+        self,
+        *,
+        task_id: str,
+        stage_run_id: str | None,
+        draft_type: str,
+        title: str,
+        body: str,
+        status: str = "draft",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        draft_id = new_id("cdraft")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_drafts(
+                    id, task_id, stage_run_id, draft_type, title, body, status,
+                    metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft_id,
+                    task_id,
+                    stage_run_id,
+                    draft_type,
+                    title,
+                    body,
+                    status,
+                    dumps(scrub_for_storage(metadata or {})),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return draft_id
+
+    def list_creation_drafts(self, task_id: str, *, draft_type: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM creation_drafts WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if draft_type:
+            query += " AND draft_type = ?"
+            params.append(draft_type)
+        query += " ORDER BY created_at, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_draft_row_to_dict(row) for row in rows]
+
+    def insert_creation_delivery_package(
+        self,
+        *,
+        task_id: str,
+        platform: str,
+        package: dict[str, Any],
+        content_package_id: str | None = None,
+        markdown_path: str | None = None,
+        status: str = "draft",
+    ) -> str:
+        package_id = new_id("cdeliv")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_delivery_packages(
+                    id, task_id, content_package_id, platform, package_json,
+                    markdown_path, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    package_id,
+                    task_id,
+                    content_package_id,
+                    platform,
+                    dumps(scrub_for_storage(package)),
+                    markdown_path,
+                    status,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return package_id
+
+    def list_creation_delivery_packages(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM creation_delivery_packages WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [_creation_delivery_package_row_to_dict(row) for row in rows]
+
+    def insert_creation_feedback_event(
+        self,
+        *,
+        content_package_id: str,
+        platform: str,
+        metrics: dict[str, Any] | None = None,
+        notice: str = "",
+        human_note: str = "",
+        judgment: str = "",
+        task_id: str | None = None,
+        role_id: str | None = None,
+    ) -> str:
+        feedback_id = new_id("cfeed")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_feedback_events(
+                    id, content_package_id, task_id, role_id, platform,
+                    metrics_json, notice, human_note, judgment, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feedback_id,
+                    content_package_id,
+                    task_id,
+                    role_id,
+                    platform,
+                    dumps(scrub_for_storage(metrics or {})),
+                    notice,
+                    human_note,
+                    judgment,
+                    now_iso(),
+                ),
+            )
+        return feedback_id
+
+    def list_creation_feedback_events(
+        self,
+        *,
+        role_id: str | None = None,
+        content_package_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if role_id:
+            where.append("role_id = ?")
+            params.append(role_id)
+        if content_package_id:
+            where.append("content_package_id = ?")
+            params.append(content_package_id)
+        query = "SELECT * FROM creation_feedback_events"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_feedback_event_row_to_dict(row) for row in rows]
+
+    def insert_creation_stage_feedback_event(
+        self,
+        *,
+        task_id: str,
+        role_id: str,
+        stage_key: str,
+        platform: str = "",
+        human_note: str = "",
+        judgment: str = "",
+        status: str = "recorded",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        feedback_id = new_id("csfeed")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_stage_feedback_events(
+                    id, task_id, role_id, stage_key, platform,
+                    human_note, judgment, status, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feedback_id,
+                    task_id,
+                    role_id,
+                    stage_key,
+                    platform,
+                    human_note,
+                    judgment,
+                    status,
+                    dumps(scrub_for_storage(metadata or {})),
+                    now_iso(),
+                ),
+            )
+        return feedback_id
+
+    def list_creation_stage_feedback_events(
+        self,
+        *,
+        role_id: str | None = None,
+        task_id: str | None = None,
+        stage_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if role_id:
+            where.append("role_id = ?")
+            params.append(role_id)
+        if task_id:
+            where.append("task_id = ?")
+            params.append(task_id)
+        if stage_key:
+            where.append("stage_key = ?")
+            params.append(stage_key)
+        query = "SELECT * FROM creation_stage_feedback_events"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_stage_feedback_event_row_to_dict(row) for row in rows]
+
+    def insert_risk_term_observation(
+        self,
+        *,
+        term: str,
+        risk_level: str,
+        status: str = "待验证",
+        position: str = "",
+        source: str = "creation",
+        sample_text: str = "",
+        role_id: str | None = None,
+        content_package_id: str | None = None,
+        task_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        observation_id = new_id("riskobs")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_term_observations(
+                    id, role_id, content_package_id, task_id, term, risk_level,
+                    position, status, source, sample_text, metadata_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation_id,
+                    role_id,
+                    content_package_id,
+                    task_id,
+                    term,
+                    risk_level,
+                    position,
+                    status,
+                    source,
+                    sample_text,
+                    dumps(scrub_for_storage(metadata or {})),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return observation_id
+
+    def list_risk_term_observations(self, *, role_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM risk_term_observations"
+        params: list[Any] = []
+        if role_id:
+            query += " WHERE role_id = ?"
+            params.append(role_id)
+        query += " ORDER BY created_at DESC, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_risk_term_observation_row_to_dict(row) for row in rows]
+
+    def insert_creation_learning_update(
+        self,
+        *,
+        role_id: str,
+        target_file: str,
+        proposed_markdown: str,
+        source_event_ids: list[str] | None = None,
+        status: str = "pending",
+    ) -> str:
+        update_id = new_id("clearn")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creation_learning_updates(
+                    id, role_id, source_event_ids_json, target_file,
+                    proposed_markdown, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    update_id,
+                    role_id,
+                    dumps(_clean_list(source_event_ids)),
+                    target_file,
+                    proposed_markdown,
+                    status,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return update_id
+
+    def get_creation_learning_update(self, update_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM creation_learning_updates WHERE id = ?", (update_id,)).fetchone()
+        return _creation_learning_update_row_to_dict(row) if row else None
+
+    def list_creation_learning_updates(
+        self,
+        *,
+        role_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if role_id:
+            where.append("role_id = ?")
+            params.append(role_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        query = "SELECT * FROM creation_learning_updates"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC, id"
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_creation_learning_update_row_to_dict(row) for row in rows]
+
+    def update_creation_learning_update_status(self, update_id: str, status: str) -> None:
+        applied_at = now_iso() if status == "applied" else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE creation_learning_updates
+                SET status = ?, applied_at = COALESCE(?, applied_at), updated_at = ?
+                WHERE id = ?
+                """,
+                (status, applied_at, now_iso(), update_id),
+            )
+
+    def log_collection_call(
         self,
         *,
         run_id: str | None,
+        provider: str,
         tool_name: str,
         request_fingerprint: str,
         status: str,
@@ -1667,14 +2662,15 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO mxnzp_call_logs(
-                    id, run_id, tool_name, request_fingerprint, status,
+                    id, run_id, provider, tool_name, request_fingerprint, status,
                     error, duration_ms, cache_hit, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     log_id,
                     run_id,
+                    provider,
                     tool_name,
                     request_fingerprint,
                     status,
@@ -1685,6 +2681,28 @@ class Store:
                 ),
             )
         return log_id
+
+    def log_mxnzp_call(
+        self,
+        *,
+        run_id: str | None,
+        tool_name: str,
+        request_fingerprint: str,
+        status: str,
+        duration_ms: int,
+        cache_hit: bool,
+        error: str | None = None,
+    ) -> str:
+        return self.log_collection_call(
+            run_id=run_id,
+            provider="mxnzp",
+            tool_name=tool_name,
+            request_fingerprint=request_fingerprint,
+            status=status,
+            duration_ms=duration_ms,
+            cache_hit=cache_hit,
+            error=error,
+        )
 
     def get_cached_collection_call(self, request_fingerprint: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -1708,22 +2726,26 @@ class Store:
         tool_name: str,
         request_fingerprint: str,
         response: dict[str, Any],
+        *,
+        provider: str = "legacy",
     ) -> None:
         timestamp = now_iso()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO mxnzp_call_cache(
-                    request_fingerprint, tool_name, response_json, created_at, updated_at, hit_count
+                    request_fingerprint, provider, tool_name, response_json, created_at, updated_at, hit_count
                 )
-                VALUES (?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
                 ON CONFLICT(request_fingerprint) DO UPDATE SET
+                    provider = excluded.provider,
                     tool_name = excluded.tool_name,
                     response_json = excluded.response_json,
                     updated_at = excluded.updated_at
                 """,
                 (
                     request_fingerprint,
+                    provider,
                     tool_name,
                     dumps(scrub_for_storage(response)),
                     timestamp,
@@ -1735,11 +2757,11 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT tool_name, status, COUNT(*) AS count, SUM(cache_hit) AS cache_hits
+                SELECT provider, tool_name, status, COUNT(*) AS count, SUM(cache_hit) AS cache_hits
                 FROM mxnzp_call_logs
                 WHERE run_id = ?
-                GROUP BY tool_name, status
-                ORDER BY tool_name, status
+                GROUP BY provider, tool_name, status
+                ORDER BY provider, tool_name, status
                 """,
                 (run_id,),
             ).fetchall()
@@ -1748,6 +2770,7 @@ class Store:
             "cache_hits": sum(int(row["cache_hits"] or 0) for row in rows),
             "by_tool": [
                 {
+                    "provider": row["provider"],
                     "tool_name": row["tool_name"],
                     "status": row["status"],
                     "count": row["count"],
@@ -1761,12 +2784,12 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT l.tool_name, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
+                SELECT l.provider, l.tool_name, l.status, COUNT(*) AS count, SUM(l.cache_hit) AS cache_hits
                 FROM mxnzp_call_logs l
                 JOIN collection_runs r ON r.id = l.run_id
                 WHERE r.task_id = ?
-                GROUP BY l.tool_name, l.status
-                ORDER BY l.tool_name, l.status
+                GROUP BY l.provider, l.tool_name, l.status
+                ORDER BY l.provider, l.tool_name, l.status
                 """,
                 (task_id,),
             ).fetchall()
@@ -1775,6 +2798,7 @@ class Store:
             "cache_hits": sum(int(row["cache_hits"] or 0) for row in rows),
             "by_tool": [
                 {
+                    "provider": row["provider"],
                     "tool_name": row["tool_name"],
                     "status": row["status"],
                     "count": row["count"],
@@ -1888,8 +2912,103 @@ def _clean_list(values: list[str] | None) -> list[str]:
     return result
 
 
+def _json_or_default(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    return value
+
+
+def _preserve_text(value: str | None, existing: dict[str, Any] | None, key: str) -> str:
+    if value is None and existing is not None:
+        return str(existing.get(key) or "")
+    return str(value or "")
+
+
+def _preserve_list(value: list[str] | None, existing: dict[str, Any] | None, key: str) -> list[str]:
+    if value is None and existing is not None:
+        return _clean_list(existing.get(key) or [])
+    return _clean_list(value)
+
+
+def _preserve_json(value: Any, existing: dict[str, Any] | None, key: str, default: Any) -> Any:
+    if value is None and existing is not None:
+        return existing.get(key, default)
+    return _json_or_default(value, default)
+
+
+def _role_confirmation_status(value: str) -> str:
+    status = str(value or "draft").strip()
+    if status not in IP_ROLE_CONFIRMATION_STATUSES:
+        raise ValueError(f"invalid role confirmation_status: {status}")
+    return status
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _ip_role_needs_reconfirm(existing: dict[str, Any], prepared: dict[str, Any]) -> bool:
+    if existing.get("confirmation_status") != "confirmed" or bool(existing.get("needs_reconfirm")):
+        return False
+    for field in IP_ROLE_RECONFIRM_FIELDS:
+        if _stable_json(existing.get(field)) != _stable_json(prepared.get(field)):
+            return True
+    return False
+
+
+def build_ip_role_persona_packet(role: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_ip": role.get("name") or "",
+        "role_id": role.get("id"),
+        "profile_version": role.get("profile_version") or 1,
+        "positioning": role.get("positioning") or "",
+        "role_baseline": role.get("role_baseline") or "",
+        "life_stage": role.get("life_stage") or "",
+        "core_temperament": role.get("core_temperament") or "",
+        "speaking_posture": role.get("speaking_posture") or "",
+        "target_audience": role.get("target_audience") or {},
+        "fit_themes": role.get("fit_themes") or [],
+        "avoid_themes": role.get("avoid_themes") or [],
+        "target_directions": role.get("target_directions") or [],
+        "search_keywords": role.get("search_keywords") or [],
+        "avoid_directions": role.get("avoid_directions") or [],
+        "preferred_content": role.get("preferred_content") or [],
+        "forbidden_content": role.get("forbidden_content") or [],
+        "forbidden_expressions": role.get("forbidden_expressions") or [],
+        "style_anchors": role.get("style_anchors") or {},
+        "expression_constraints": role.get("expression_constraints") or {},
+        "typical_topics": role.get("typical_topics") or [],
+        "theme_map": role.get("theme_map") or {},
+    }
+
+
 def _row_json(row: sqlite3.Row, key: str, default: Any) -> Any:
     return loads(row[key], default)
+
+
+def _migrate_ip_role_v2(conn: sqlite3.Connection) -> None:
+    if _table_exists(conn, "ip_roles"):
+        existing = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(ip_roles)").fetchall()
+        }
+        for column, definition in IP_ROLE_V2_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE ip_roles ADD COLUMN {column} {definition}")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ip_role_versions (
+            id TEXT PRIMARY KEY,
+            role_id TEXT NOT NULL,
+            profile_version INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            change_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_role_versions_role_id ON ip_role_versions(role_id)")
 
 
 def _migrate_schema_v2(conn: sqlite3.Connection) -> None:
@@ -1981,6 +3100,167 @@ def _migrate_schema_v2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_authors_nickname ON douyin_authors(nickname)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_author ON douyin_author_videos(author_sec_uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_douyin_author_videos_work_id ON douyin_author_videos(work_id)")
+
+
+def _migrate_collection_provider_schema(conn: sqlite3.Connection) -> None:
+    for table in ("mxnzp_call_logs", "mxnzp_call_cache"):
+        if not _table_exists(conn, table):
+            continue
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "provider" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN provider TEXT NOT NULL DEFAULT 'mxnzp'")
+
+
+def _migrate_creation_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS creation_tasks (
+            id TEXT PRIMARY KEY,
+            role_id TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            goal TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL,
+            target_count INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'draft',
+            provider TEXT NOT NULL DEFAULT 'codex-agent',
+            model TEXT NOT NULL DEFAULT 'gpt-5.5',
+            allow_reuse_material INTEGER NOT NULL DEFAULT 0,
+            context_json TEXT NOT NULL DEFAULT '{}',
+            content_package_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+            FOREIGN KEY(content_package_id) REFERENCES content_packages(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_stage_runs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            stage_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'needs_confirmation',
+            provider TEXT NOT NULL DEFAULT 'codex-agent',
+            model TEXT NOT NULL DEFAULT 'gpt-5.5',
+            input_json TEXT NOT NULL DEFAULT '{}',
+            output_json TEXT NOT NULL DEFAULT '{}',
+            output_markdown TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            confirmed_at TEXT,
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_material_selections (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            material_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            selection_status TEXT NOT NULL DEFAULT 'selected',
+            score REAL NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(task_id, material_id),
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+            FOREIGN KEY(material_id) REFERENCES collected_materials(id),
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_drafts (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            stage_run_id TEXT,
+            draft_type TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+            FOREIGN KEY(stage_run_id) REFERENCES creation_stage_runs(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_delivery_packages (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            content_package_id TEXT,
+            platform TEXT NOT NULL,
+            package_json TEXT NOT NULL DEFAULT '{}',
+            markdown_path TEXT,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+            FOREIGN KEY(content_package_id) REFERENCES content_packages(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_feedback_events (
+            id TEXT PRIMARY KEY,
+            content_package_id TEXT NOT NULL,
+            task_id TEXT,
+            role_id TEXT,
+            platform TEXT NOT NULL,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            notice TEXT NOT NULL DEFAULT '',
+            human_note TEXT NOT NULL DEFAULT '',
+            judgment TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(content_package_id) REFERENCES content_packages(id),
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_stage_feedback_events (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            stage_key TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT '',
+            human_note TEXT NOT NULL DEFAULT '',
+            judgment TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'recorded',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id),
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+        );
+        CREATE TABLE IF NOT EXISTS risk_term_observations (
+            id TEXT PRIMARY KEY,
+            role_id TEXT,
+            content_package_id TEXT,
+            task_id TEXT,
+            term TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            position TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '待验证',
+            source TEXT NOT NULL DEFAULT 'creation',
+            sample_text TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id),
+            FOREIGN KEY(content_package_id) REFERENCES content_packages(id),
+            FOREIGN KEY(task_id) REFERENCES creation_tasks(id)
+        );
+        CREATE TABLE IF NOT EXISTS creation_learning_updates (
+            id TEXT PRIMARY KEY,
+            role_id TEXT NOT NULL,
+            source_event_ids_json TEXT NOT NULL DEFAULT '[]',
+            target_file TEXT NOT NULL,
+            proposed_markdown TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            applied_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(role_id) REFERENCES ip_roles(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_creation_tasks_role_id ON creation_tasks(role_id);
+        CREATE INDEX IF NOT EXISTS idx_creation_stage_runs_task_stage ON creation_stage_runs(task_id, stage_key);
+        CREATE INDEX IF NOT EXISTS idx_creation_material_selections_task_id ON creation_material_selections(task_id);
+        CREATE INDEX IF NOT EXISTS idx_creation_feedback_events_role_id ON creation_feedback_events(role_id);
+        CREATE INDEX IF NOT EXISTS idx_creation_stage_feedback_events_role_id ON creation_stage_feedback_events(role_id);
+        CREATE INDEX IF NOT EXISTS idx_creation_stage_feedback_events_task_stage ON creation_stage_feedback_events(task_id, stage_key);
+        CREATE INDEX IF NOT EXISTS idx_risk_term_observations_role_id ON risk_term_observations(role_id);
+        """
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -2122,6 +3402,23 @@ def _material_promoted_values(
     }
 
 
+def _material_eligibility_values(source_package: dict[str, Any]) -> dict[str, Any]:
+    value = source_package.get("material_eligibility") if isinstance(source_package.get("material_eligibility"), dict) else {}
+    reasons = _as_list(value.get("reasons"))
+    return {
+        "material_eligibility": value,
+        "eligibility_status": str(value.get("eligibility_status") or "accepted"),
+        "eligibility_provider": str(value.get("eligibility_provider") or "local-rules"),
+        "eligibility_version": str(value.get("eligibility_version") or "material-eligibility-v1"),
+        "eligibility_reasons": reasons,
+        "content_form": _optional_text(value.get("content_form")),
+        "knowledge_core_score": _optional_float(value.get("knowledge_core_score")) or 0.0,
+        "oral_script_fit_score": _optional_float(value.get("oral_script_fit_score")) or 0.0,
+        "ip_fit_score": _optional_float(value.get("ip_fit_score")) or 0.0,
+        "reject_reason": _optional_text(value.get("reject_reason")),
+    }
+
+
 def parse_caption(*, title: str | None, caption: str | None) -> dict[str, Any]:
     raw_caption = str(caption or title or "").strip()
     tags = _dedupe_strings([match.group(1).strip() for match in re.finditer(r"#([^\s#]+)", raw_caption)])
@@ -2160,6 +3457,15 @@ def _optional_int(value: Any) -> int | None:
         return None
     try:
         return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -2206,6 +3512,26 @@ def _role_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "avoid_directions": _row_json(row, "avoid_directions_json", []),
         "preferred_content": _row_json(row, "preferred_content_json", []),
         "forbidden_content": _row_json(row, "forbidden_content_json", []),
+        "confirmation_status": row["confirmation_status"],
+        "confirmed_at": row["confirmed_at"],
+        "needs_reconfirm": bool(row["needs_reconfirm"]),
+        "profile_version": row["profile_version"],
+        "role_baseline": row["role_baseline"],
+        "life_stage": row["life_stage"],
+        "core_temperament": row["core_temperament"],
+        "speaking_posture": row["speaking_posture"],
+        "target_audience": _row_json(row, "target_audience_json", {}),
+        "fit_themes": _row_json(row, "fit_themes_json", []),
+        "avoid_themes": _row_json(row, "avoid_themes_json", []),
+        "style_anchors": _row_json(row, "style_anchors_json", {}),
+        "expression_constraints": _row_json(row, "expression_constraints_json", {}),
+        "forbidden_expressions": _row_json(row, "forbidden_expressions_json", []),
+        "typical_topics": _row_json(row, "typical_topics_json", []),
+        "theme_map": _row_json(row, "theme_map_json", {}),
+        "persona_packet": _row_json(row, "persona_packet_json", {}),
+        "source_evidence": _row_json(row, "source_evidence_json", {}),
+        "agent_suggestions": _row_json(row, "agent_suggestions_json", {}),
+        "notes": row["notes"],
         "enabled": bool(row["enabled"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -2329,6 +3655,16 @@ def _material_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "audio_url": row["audio_url"],
         "author_identity_confidence": row["author_identity_confidence"],
         "metrics": _row_json(row, "metrics_json", {}),
+        "material_eligibility": _row_json(row, "material_eligibility_json", {}),
+        "eligibility_status": row["eligibility_status"],
+        "eligibility_provider": row["eligibility_provider"],
+        "eligibility_version": row["eligibility_version"],
+        "eligibility_reasons": _row_json(row, "eligibility_reason_json", []),
+        "content_form": row["content_form"],
+        "knowledge_core_score": row["knowledge_core_score"],
+        "oral_script_fit_score": row["oral_script_fit_score"],
+        "ip_fit_score": row["ip_fit_score"],
+        "reject_reason": row["reject_reason"],
         "material_understanding": _row_json(row, "material_understanding_json", {}),
         "understanding_provider": row["understanding_provider"],
         "understanding_model": row["understanding_model"],
@@ -2413,6 +3749,151 @@ def _material_creation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "rewrite_angle": row["rewrite_angle"],
         "status": row["status"],
         "metadata": _row_json(row, "metadata_json", {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _creation_task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "role_id": row["role_id"],
+        "topic": row["topic"],
+        "goal": row["goal"],
+        "platform": row["platform"],
+        "target_count": row["target_count"],
+        "status": row["status"],
+        "provider": row["provider"],
+        "model": row["model"],
+        "allow_reuse_material": bool(row["allow_reuse_material"]),
+        "context": _row_json(row, "context_json", {}),
+        "content_package_id": row["content_package_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _creation_stage_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "stage_key": row["stage_key"],
+        "status": row["status"],
+        "provider": row["provider"],
+        "model": row["model"],
+        "input": _row_json(row, "input_json", {}),
+        "output": _row_json(row, "output_json", {}),
+        "output_markdown": row["output_markdown"],
+        "note": row["note"],
+        "version": row["version"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "confirmed_at": row["confirmed_at"],
+    }
+
+
+def _creation_material_selection_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "material_id": row["material_id"],
+        "role_id": row["role_id"],
+        "selection_status": row["selection_status"],
+        "score": row["score"],
+        "reason": row["reason"],
+        "metadata": _row_json(row, "metadata_json", {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _creation_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "stage_run_id": row["stage_run_id"],
+        "draft_type": row["draft_type"],
+        "title": row["title"],
+        "body": row["body"],
+        "status": row["status"],
+        "metadata": _row_json(row, "metadata_json", {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _creation_delivery_package_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "content_package_id": row["content_package_id"],
+        "platform": row["platform"],
+        "package": _row_json(row, "package_json", {}),
+        "markdown_path": row["markdown_path"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _creation_feedback_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "content_package_id": row["content_package_id"],
+        "task_id": row["task_id"],
+        "role_id": row["role_id"],
+        "platform": row["platform"],
+        "metrics": _row_json(row, "metrics_json", {}),
+        "notice": row["notice"],
+        "human_note": row["human_note"],
+        "judgment": row["judgment"],
+        "created_at": row["created_at"],
+    }
+
+
+def _creation_stage_feedback_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "role_id": row["role_id"],
+        "stage_key": row["stage_key"],
+        "platform": row["platform"],
+        "human_note": row["human_note"],
+        "judgment": row["judgment"],
+        "status": row["status"],
+        "metadata": _row_json(row, "metadata_json", {}),
+        "created_at": row["created_at"],
+    }
+
+
+def _risk_term_observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "role_id": row["role_id"],
+        "content_package_id": row["content_package_id"],
+        "task_id": row["task_id"],
+        "term": row["term"],
+        "risk_level": row["risk_level"],
+        "position": row["position"],
+        "status": row["status"],
+        "source": row["source"],
+        "sample_text": row["sample_text"],
+        "metadata": _row_json(row, "metadata_json", {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _creation_learning_update_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "role_id": row["role_id"],
+        "source_event_ids": _row_json(row, "source_event_ids_json", []),
+        "target_file": row["target_file"],
+        "proposed_markdown": row["proposed_markdown"],
+        "status": row["status"],
+        "applied_at": row["applied_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

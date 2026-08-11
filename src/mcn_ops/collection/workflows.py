@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from ..store import Store
 from .douyin_login_cookie import login_and_fetch_douyin_cookie
+from .eligibility import evaluate_material_eligibility, is_material_eligible
 from .mock_tools import build_mock_source_registry
+from .douyin.contracts import DouyinProvider
+from .douyin.factory import build_collection_provider, load_local_env
+from .douyin.registry import build_douyin_registry
 from .mxnzp_client import MxnzpConfig, MxnzpConfigError, MxnzpDouyinProClient
 from .mxnzp_tools import build_mxnzp_douyin_registry
 from .runner import (
@@ -55,6 +60,8 @@ class CollectionTaskOrchestrator:
         target_count: int,
         policy: CollectionPolicy | None = None,
         tool_provider: str = "mock",
+        transcription_provider: str = "provider",
+        allow_paid_fallback: bool = False,
         keywords: list[str] | None = None,
         related_keywords: list[str] | None = None,
         role_id: str | None = None,
@@ -69,12 +76,23 @@ class CollectionTaskOrchestrator:
         if target_count < 1:
             raise ValueError("--target-count must be >= 1")
         role_profile = self.store.get_ip_role(role_id) if role_id else None
+        if role_id and role_profile is None:
+            raise KeyError(f"role not found: {role_id}")
+        if role_profile and (
+            role_profile.get("confirmation_status") != "confirmed" or bool(role_profile.get("needs_reconfirm"))
+        ):
+            raise ValueError(
+                f"role {role_profile['id']} is {role_profile.get('confirmation_status')}; "
+                "confirm the IP role before using it in a formal collection task"
+            )
         command = f"collect task keyword --topic {topic} --target-count {target_count}"
         parsed = {
             "entrypoint": "keyword",
             "topic": topic,
             "target_count": target_count,
             "tool_provider": tool_provider,
+            "transcription_provider": transcription_provider,
+            "allow_paid_fallback": allow_paid_fallback,
             "role_id": role_id,
             "keywords": _unique_strings([topic, *(keywords or [])]),
             "related_keywords": _unique_strings(related_keywords or []),
@@ -89,10 +107,21 @@ class CollectionTaskOrchestrator:
                 topic=topic,
                 parsed=parsed,
             )
-        tools = build_mxnzp_douyin_registry(include_user_post_tools=False) if tool_provider == "mxnzp" else build_mock_source_registry()
+        if tool_provider == "mock":
+            tools = build_mock_source_registry()
+        else:
+            provider = build_collection_provider(
+                tool_provider,
+                transcription_provider_name=transcription_provider,
+                allow_paid_fallback=allow_paid_fallback,
+            )
+            tools = build_douyin_registry(provider, include_user_post_tools=False)
         runner = TopicCollectionRunner(tools, self.store)
-        queue = _unique_strings([topic, *(keywords or []), *(related_keywords or []), *_role_keywords(role_profile)])
+        queue = _unique_strings(
+            [topic, *(keywords or []), *(related_keywords or []), *_role_collection_keywords(role_profile, topic)]
+        )
         exhausted_keywords: list[str] = []
+        keyword_errors: list[dict[str, str]] = []
         run_summaries: list[dict[str, Any]] = []
         error: str | None = None
         try:
@@ -101,31 +130,37 @@ class CollectionTaskOrchestrator:
                 if keyword in exhausted_keywords:
                     continue
                 remaining = max(1, target_count - _task_saved_count(self.build_task_report(task_id)))
-                result = runner.run(
-                    CollectionConfig(
-                        topic=keyword,
-                        target_count=remaining,
-                        like_floor=policy.viral_like_floor,
-                        super_like_threshold=policy.super_like_threshold,
-                        min_duration_seconds=policy.min_duration_seconds,
-                        max_duration_seconds=policy.max_duration_seconds,
-                        tool_provider=tool_provider,
-                        max_search_pages=policy.max_search_pages,
-                        page_size=policy.page_size,
-                        task_id=task_id,
-                        role_id=role_id,
-                        role_profile=role_profile,
-                        search_keywords=[keyword],
-                        understanding_provider=understanding_provider,
-                        understanding_model=understanding_model,
+                try:
+                    result = runner.run(
+                        CollectionConfig(
+                            topic=keyword,
+                            target_count=remaining,
+                            like_floor=policy.viral_like_floor,
+                            super_like_threshold=policy.super_like_threshold,
+                            min_duration_seconds=policy.min_duration_seconds,
+                            max_duration_seconds=policy.max_duration_seconds,
+                            tool_provider=tool_provider,
+                            max_search_pages=policy.max_search_pages,
+                            page_size=policy.page_size,
+                            task_id=task_id,
+                            role_id=role_id,
+                            role_profile=role_profile,
+                            search_keywords=[keyword],
+                            understanding_provider=understanding_provider,
+                            understanding_model=understanding_model,
+                        )
                     )
-                )
+                except Exception as exc:
+                    exhausted_keywords.append(keyword)
+                    keyword_errors.append({"keyword": keyword, "error": str(exc)})
+                    continue
                 exhausted_keywords.append(keyword)
                 run_summaries.append(result.to_dict())
                 report = self.build_task_report(task_id)
                 queue.extend(
                     keyword
                     for keyword in _next_keywords_from_report(report)
+                    if _keyword_in_topic_scope(keyword, topic, role_profile)
                     if keyword not in exhausted_keywords and keyword not in queue
                 )
             report = self.build_task_report(task_id)
@@ -137,6 +172,7 @@ class CollectionTaskOrchestrator:
                 "saved_count": saved_count,
                 "remaining_count": max(target_count - saved_count, 0),
                 "exhausted_keywords": exhausted_keywords,
+                "keyword_errors": keyword_errors,
                 "runs": run_summaries,
                 "understanding": report["understanding_summary"],
             }
@@ -147,7 +183,7 @@ class CollectionTaskOrchestrator:
             self.store.finish_collection_task(
                 task_id,
                 "failed",
-                {"entrypoint": "keyword", "runs": run_summaries, "error": error},
+                {"entrypoint": "keyword", "runs": run_summaries, "keyword_errors": keyword_errors, "error": error},
                 error=error,
             )
             raise
@@ -170,6 +206,9 @@ class CollectionTaskOrchestrator:
         understanding_model: str = TARGET_UNDERSTANDING_MODEL,
         task_id: str | None = None,
         finish_task: bool = True,
+        data_provider: str = "direct",
+        transcription_provider: str = "provider",
+        allow_paid_fallback: bool = False,
     ) -> dict[str, Any]:
         policy = policy or CollectionPolicy()
         floor = like_floor if like_floor is not None else policy.viral_like_floor
@@ -183,6 +222,9 @@ class CollectionTaskOrchestrator:
             "max_pages": max_pages,
             "sort_type": sort_type,
             "skip_expand": skip_expand,
+            "data_provider": data_provider,
+            "transcription_provider": transcription_provider,
+            "allow_paid_fallback": allow_paid_fallback,
             "policy": asdict(policy),
             "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
         }
@@ -201,23 +243,42 @@ class CollectionTaskOrchestrator:
             target_count=materialize_top,
             like_floor=floor,
             super_like_threshold=policy.super_like_threshold,
-            tool_provider="mxnzp_author_task",
+            tool_provider=f"{data_provider}_author_task",
         )
         materialized: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         expand_summary: dict[str, Any] = {"skipped": skip_expand}
         try:
-            client: MxnzpDouyinProClient | None = None
+            client: DouyinProvider | None = None
             author = self._resolve_author(sec_uid=sec_uid, name=name)
+            if author is None and sec_uid:
+                stored_sec_uid = self.store.upsert_douyin_author(
+                    {
+                        "sec_uid": sec_uid,
+                        "nickname": name or sec_uid,
+                        "profile_url": f"https://www.douyin.com/user/{sec_uid}",
+                    }
+                )
+                author = self.store.get_douyin_author(stored_sec_uid)
             if author is None and skip_expand:
                 raise KeyError(f"douyin author not found: {label}")
             if author is None:
-                client = self._build_mxnzp_client(login_cookie=login_cookie)
+                client = self._build_collection_provider(
+                    data_provider=data_provider,
+                    transcription_provider=transcription_provider,
+                    allow_paid_fallback=allow_paid_fallback,
+                    login_cookie=login_cookie,
+                )
                 author = self._search_and_store_author(client, run_id=run_id, name=name or label, use_cache=not no_cache)
             if author is None:
                 raise KeyError(f"douyin author not found: {label}")
             if not skip_expand:
-                client = client or self._build_mxnzp_client(login_cookie=login_cookie)
+                client = client or self._build_collection_provider(
+                    data_provider=data_provider,
+                    transcription_provider=transcription_provider,
+                    allow_paid_fallback=allow_paid_fallback,
+                    login_cookie=login_cookie,
+                )
                 expand_summary = self._expand_author_videos(
                     client,
                     run_id=run_id,
@@ -240,6 +301,9 @@ class CollectionTaskOrchestrator:
                 materialize_top=materialize_top,
                 client=client,
                 use_cache=not no_cache,
+                data_provider=data_provider,
+                transcription_provider=transcription_provider,
+                allow_paid_fallback=allow_paid_fallback,
                 refresh_existing_understanding=refresh_existing_understanding,
                 understanding_provider=understanding_provider,
                 understanding_model=understanding_model,
@@ -303,6 +367,9 @@ class CollectionTaskOrchestrator:
         understanding_model: str = TARGET_UNDERSTANDING_MODEL,
         policy: CollectionPolicy | None = None,
         task_id: str | None = None,
+        data_provider: str = "direct",
+        transcription_provider: str = "provider",
+        allow_paid_fallback: bool = False,
     ) -> dict[str, Any]:
         policy = policy or CollectionPolicy()
         floor = like_floor if like_floor is not None else policy.viral_like_floor
@@ -317,6 +384,9 @@ class CollectionTaskOrchestrator:
             "sort_type": sort_type,
             "skip_expand": skip_expand,
             "dry_run": dry_run,
+            "data_provider": data_provider,
+            "transcription_provider": transcription_provider,
+            "allow_paid_fallback": allow_paid_fallback,
             "authors": discovered,
             "policy": asdict(policy),
             "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
@@ -354,6 +424,9 @@ class CollectionTaskOrchestrator:
                     understanding_model=understanding_model,
                     task_id=task_id,
                     finish_task=False,
+                    data_provider=data_provider,
+                    transcription_provider=transcription_provider,
+                    allow_paid_fallback=allow_paid_fallback,
                 )
                 author_results.append(
                     {
@@ -402,6 +475,8 @@ class CollectionTaskOrchestrator:
                 understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
+                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
+                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
             )
         if entrypoint == "author":
             return self.run_author_task(
@@ -416,6 +491,9 @@ class CollectionTaskOrchestrator:
                 understanding_provider=str((parsed.get("target_understanding") or {}).get("provider") or TARGET_UNDERSTANDING_PROVIDER),
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 task_id=task_id,
+                data_provider=str(parsed.get("data_provider") or "direct"),
+                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
+                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
             )
         if entrypoint == "discovered_authors":
             return self.run_discovered_authors_task(
@@ -431,6 +509,9 @@ class CollectionTaskOrchestrator:
                 understanding_model=str((parsed.get("target_understanding") or {}).get("model") or TARGET_UNDERSTANDING_MODEL),
                 policy=policy,
                 task_id=task_id,
+                data_provider=str(parsed.get("data_provider") or "direct"),
+                transcription_provider=str(parsed.get("transcription_provider") or "provider"),
+                allow_paid_fallback=bool(parsed.get("allow_paid_fallback")),
             )
         raise ValueError(f"unsupported task entrypoint: {entrypoint}")
 
@@ -502,9 +583,29 @@ class CollectionTaskOrchestrator:
             config.douyin_cookie = login_result.cookie
         return MxnzpDouyinProClient(config)
 
+    def _build_collection_provider(
+        self,
+        *,
+        data_provider: str,
+        transcription_provider: str,
+        allow_paid_fallback: bool,
+        login_cookie: bool,
+    ) -> DouyinProvider:
+        load_local_env()
+        if login_cookie and not os.environ.get("DOUYIN_COOKIE", "").strip():
+            login_result = login_and_fetch_douyin_cookie()
+            if not login_result.cookie_valid:
+                raise MxnzpConfigError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
+            os.environ["DOUYIN_COOKIE"] = login_result.cookie
+        return build_collection_provider(
+            data_provider,
+            transcription_provider_name=transcription_provider,
+            allow_paid_fallback=allow_paid_fallback,
+        )
+
     def _call_mxnzp(
         self,
-        client: MxnzpDouyinProClient,
+        client: DouyinProvider,
         *,
         run_id: str,
         method_key: str,
@@ -513,13 +614,16 @@ class CollectionTaskOrchestrator:
         use_cache: bool = True,
     ) -> dict[str, Any]:
         arguments = {"params": params or {}, "body": body or {}}
-        fingerprint = request_fingerprint(method_key, arguments)
+        provider_name = str(getattr(client, "provider_name", "legacy"))
+        fingerprint = request_fingerprint(method_key, arguments, provider=provider_name)
         started = time.monotonic()
-        if use_cache:
+        outer_cache_enabled = use_cache and method_key != "video_to_text_v2"
+        if outer_cache_enabled:
             cached = self.store.get_cached_collection_call(fingerprint)
             if cached is not None:
-                self.store.log_mxnzp_call(
+                self.store.log_collection_call(
                     run_id=run_id,
+                    provider=provider_name,
                     tool_name=method_key,
                     request_fingerprint=fingerprint,
                     status="ok",
@@ -532,8 +636,9 @@ class CollectionTaskOrchestrator:
         try:
             result = client.call(method_key, params=params, body=body, use_cache=use_cache)
         except Exception as exc:
-            self.store.log_mxnzp_call(
+            self.store.log_collection_call(
                 run_id=run_id,
+                provider=provider_name,
                 tool_name=method_key,
                 request_fingerprint=fingerprint,
                 status="error",
@@ -543,10 +648,11 @@ class CollectionTaskOrchestrator:
             )
             raise
         status = "ok" if result.get("ok", True) else "error"
-        if use_cache and status == "ok":
-            self.store.put_cached_collection_call(method_key, fingerprint, result)
-        self.store.log_mxnzp_call(
+        if outer_cache_enabled and status == "ok":
+            self.store.put_cached_collection_call(method_key, fingerprint, result, provider=provider_name)
+        self.store.log_collection_call(
             run_id=run_id,
+            provider=str(result.get("provider") or provider_name),
             tool_name=method_key,
             request_fingerprint=fingerprint,
             status=status,
@@ -571,7 +677,7 @@ class CollectionTaskOrchestrator:
 
     def _search_and_store_author(
         self,
-        client: MxnzpDouyinProClient,
+        client: DouyinProvider,
         *,
         run_id: str,
         name: str,
@@ -590,7 +696,7 @@ class CollectionTaskOrchestrator:
 
     def _expand_author_videos(
         self,
-        client: MxnzpDouyinProClient,
+        client: DouyinProvider,
         *,
         run_id: str,
         author: dict[str, Any],
@@ -614,7 +720,12 @@ class CollectionTaskOrchestrator:
                 client,
                 run_id=run_id,
                 method_key="user_post",
-                params={"userId": author["sec_uid"], "sortType": sort_type, "cursor": cursor},
+                params={
+                    "userId": author["sec_uid"],
+                    "sortType": sort_type,
+                    "cursor": cursor,
+                    "max_pages": max_pages,
+                },
                 use_cache=use_cache,
             )
             normalized = result.get("normalized") if isinstance(result.get("normalized"), dict) else {}
@@ -660,6 +771,9 @@ class CollectionTaskOrchestrator:
             if not has_next:
                 stop_reason = "no_next_page"
                 break
+            if bool((paging.get("raw") or {}).get("browser_aggregated")):
+                stop_reason = str((paging.get("raw") or {}).get("stop_reason") or "browser_aggregated")
+                break
             if not next_cursor or next_cursor in seen_cursors:
                 stop_reason = "cursor_exhausted"
                 break
@@ -685,8 +799,11 @@ class CollectionTaskOrchestrator:
         min_duration_seconds: int,
         max_duration_seconds: int,
         materialize_top: int,
-        client: MxnzpDouyinProClient | None,
+        client: DouyinProvider | None,
         use_cache: bool,
+        data_provider: str,
+        transcription_provider: str,
+        allow_paid_fallback: bool,
         refresh_existing_understanding: bool,
         understanding_provider: str,
         understanding_model: str,
@@ -703,6 +820,16 @@ class CollectionTaskOrchestrator:
         for video in selected:
             existing = _find_collected_material_by_work_id(self.store, str(video.get("work_id") or ""))
             if existing:
+                if existing.get("status") != "collected":
+                    skipped.append(
+                        {
+                            "work_id": video.get("work_id"),
+                            "title": video.get("title"),
+                            "reason": "existing_unusable_material",
+                            "material_id": existing["id"],
+                        }
+                    )
+                    continue
                 status = "existing_preserved"
                 if refresh_existing_understanding:
                     understanding = build_material_understanding(
@@ -739,7 +866,12 @@ class CollectionTaskOrchestrator:
             if not source_url:
                 skipped.append({"work_id": video.get("work_id"), "title": video.get("title"), "reason": "missing_source_url"})
                 continue
-            client = client or self._build_mxnzp_client(login_cookie=False)
+            client = client or self._build_collection_provider(
+                data_provider=data_provider,
+                transcription_provider=transcription_provider,
+                allow_paid_fallback=allow_paid_fallback,
+                login_cookie=False,
+            )
             extract_result = self._call_mxnzp(
                 client,
                 run_id=run_id,
@@ -757,6 +889,18 @@ class CollectionTaskOrchestrator:
             extract_package = normalized.get("source_package") if isinstance(normalized.get("source_package"), dict) else {}
             _merge_source_package(source_package, extract_package)
             source_package["transcript_text"] = transcript_text
+            eligibility = evaluate_material_eligibility(source_package)
+            source_package["material_eligibility"] = eligibility
+            if not is_material_eligible(eligibility):
+                skipped.append(
+                    {
+                        "work_id": video.get("work_id"),
+                        "title": video.get("title"),
+                        "reason": eligibility.get("reject_reason") or "eligibility_rejected",
+                        "detail": "; ".join(eligibility.get("reasons") or []),
+                    }
+                )
+                continue
             understanding = build_material_understanding(
                 source_package,
                 provider=understanding_provider,
@@ -1135,6 +1279,47 @@ def _next_keywords_from_materials(materials: list[dict[str, Any]]) -> list[str]:
 def _next_authors_from_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
     authors = discover_source_authors_from_records(materials, [])
     return [author for author in authors if author.get("author_sec_uid") or author.get("author_name")]
+
+
+def _role_collection_keywords(role_profile: dict[str, Any] | None, topic: str) -> list[str]:
+    if not role_profile:
+        return []
+    topic_text = str(topic or "")
+    theme_map = role_profile.get("theme_map") or {}
+    collection_targets = theme_map.get("collection_targets") if isinstance(theme_map, dict) else None
+    if isinstance(collection_targets, dict):
+        matched_keywords: list[str] = []
+        for key, target in collection_targets.items():
+            target_text = " ".join([str(key), str(target.get("selection_note") if isinstance(target, dict) else "")])
+            if topic_text and topic_text not in target_text and target_text not in topic_text:
+                continue
+            if isinstance(target, dict):
+                matched_keywords.extend(target.get("preferred_keywords") or [])
+        if matched_keywords:
+            return _unique_strings(matched_keywords)
+    return _role_keywords(role_profile)
+
+
+def _keyword_in_topic_scope(keyword: str, topic: str, role_profile: dict[str, Any] | None) -> bool:
+    normalized = str(keyword or "").strip()
+    if not normalized:
+        return False
+    topic_terms = _topic_scope_terms(topic)
+    if any(term and term in normalized for term in topic_terms):
+        return True
+    scoped_role_keywords = _role_collection_keywords(role_profile, topic)
+    return normalized in scoped_role_keywords
+
+
+def _topic_scope_terms(topic: str) -> list[str]:
+    normalized = str(topic or "").strip()
+    if not normalized:
+        return []
+    terms = [normalized]
+    terms.extend([part for part in normalized.replace("，", " ").replace("、", " ").replace("/", " ").split() if len(part) >= 2])
+    known_terms = ["道家", "修行", "修心", "道德经", "庄子", "财运", "守财", "贵人运"]
+    terms.extend([term for term in known_terms if term in normalized])
+    return _unique_strings(terms)
 
 
 def _role_keywords(role_profile: dict[str, Any] | None) -> list[str]:

@@ -1,0 +1,23 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "annotations": [
+          {
+            "emotion": "neutral",
+            "language": "zh",
+            "type": "audio_info"
+          }
+        ],
+        "content": "旺自己，要先稳住自己的能量。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "chatcmpl-test",
+  "model": "qwen3-asr-flash",
+  "usage": {
+    "seconds": 42
+  }
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 from mcn_ops.store import Store
 
@@ -10,11 +11,8 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
     store.init_db()
 
     assert {
-        "ip_profiles",
         "content_packages",
         "publish_jobs",
-        "android_devices",
-        "app_accounts",
         "publish_run_logs",
         "tracking_snapshots",
         "ip_roles",
@@ -27,12 +25,23 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
         "douyin_author_videos",
         "material_role_matches",
         "material_creations",
+        "creation_tasks",
+        "creation_stage_runs",
+        "creation_material_selections",
+        "creation_drafts",
+        "creation_delivery_packages",
+        "creation_feedback_events",
+        "creation_stage_feedback_events",
+        "risk_term_observations",
+        "creation_learning_updates",
+        "ip_role_versions",
         "mxnzp_call_logs",
         "mxnzp_call_cache",
         "material_understanding_logs",
     }.issubset(set(store.list_tables()))
     with store.connect() as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(collected_materials)").fetchall()}
+        role_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ip_roles)").fetchall()}
     assert {
         "clean_title",
         "source_role_id",
@@ -48,6 +57,60 @@ def test_init_db_creates_expected_tables(tmp_path: Path) -> None:
         "video_url",
         "audio_url",
     }.issubset(columns)
+    assert {
+        "confirmation_status",
+        "confirmed_at",
+        "needs_reconfirm",
+        "profile_version",
+        "role_baseline",
+        "target_audience_json",
+        "fit_themes_json",
+        "style_anchors_json",
+        "persona_packet_json",
+    }.issubset(role_columns)
+
+
+def test_old_ip_roles_schema_migrates_without_data_loss(tmp_path: Path) -> None:
+    db_path = tmp_path / "mcn.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE ip_roles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                positioning TEXT NOT NULL DEFAULT '',
+                target_directions_json TEXT NOT NULL DEFAULT '[]',
+                search_keywords_json TEXT NOT NULL DEFAULT '[]',
+                avoid_directions_json TEXT NOT NULL DEFAULT '[]',
+                preferred_content_json TEXT NOT NULL DEFAULT '[]',
+                forbidden_content_json TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ip_roles(
+                id, name, positioning, target_directions_json, search_keywords_json,
+                avoid_directions_json, preferred_content_json, forbidden_content_json,
+                enabled, created_at, updated_at
+            )
+            VALUES ('role_old', '旧角色', '解释型口播', '[]', '["财运"]', '[]', '[]', '[]', 1, 't1', 't1')
+            """
+        )
+
+    store = Store(db_path)
+    store.init_db()
+    role = store.get_ip_role("role_old")
+
+    assert role is not None
+    assert role["name"] == "旧角色"
+    assert role["search_keywords"] == ["财运"]
+    assert role["confirmation_status"] == "draft"
+    assert role["profile_version"] == 1
+    assert role["persona_packet"] == {}
 
 
 def test_create_content_and_publish_job(tmp_path: Path) -> None:
@@ -118,6 +181,64 @@ def test_role_and_material_promotion(tmp_path: Path) -> None:
     assert creations[0]["content_package_id"] == content_id
 
 
+def test_ip_role_v2_confirm_versions_and_persona_packet(tmp_path: Path) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+    role_id = store.upsert_ip_role(
+        name="见心说",
+        positioning="中年修心口播",
+        search_keywords=["修心", "内耗"],
+        avoid_directions=["承诺改命"],
+        confirmation_status="agent_suggested",
+        role_baseline="温和克制的修心型老师",
+        life_stage="50岁以上",
+        core_temperament="稳定、克制、不表演",
+        speaking_posture="像过来人慢慢提醒",
+        target_audience={"life_stage": "中年", "pain_points": ["内耗", "执念"]},
+        fit_themes=["修心", "放下执念"],
+        avoid_themes=["暴富承诺"],
+        style_anchors={"opening_style": "一句生活化判断开头"},
+        expression_constraints={"allowed_intensity": "medium"},
+        forbidden_expressions=["保证发财"],
+        typical_topics=["人到中年要学会放下"],
+    )
+    role = store.get_ip_role(role_id)
+    assert role is not None
+    assert role["confirmation_status"] == "agent_suggested"
+    assert role["persona_packet"]["target_ip"] == "见心说"
+    assert role["persona_packet"]["style_anchors"]["opening_style"] == "一句生活化判断开头"
+
+    confirmed = store.confirm_ip_role(role_id, change_reason="首次确认")
+    role = confirmed["role"]
+    assert role["confirmation_status"] == "confirmed"
+    assert role["needs_reconfirm"] is False
+    assert role["profile_version"] == 1
+    with store.connect() as conn:
+        versions = conn.execute("SELECT * FROM ip_role_versions WHERE role_id = ?", (role_id,)).fetchall()
+    assert len(versions) == 1
+    assert versions[0]["profile_version"] == 1
+
+    store.upsert_ip_role(
+        name="见心说",
+        positioning="中年修心与关系口播",
+        search_keywords=["修心", "内耗"],
+    )
+    changed = store.get_ip_role(role_id)
+    assert changed is not None
+    assert changed["confirmation_status"] == "needs_reconfirm"
+    assert changed["needs_reconfirm"] is True
+
+    reconfirmed = store.confirm_ip_role(role_id, change_reason="调整定位")
+    assert reconfirmed["profile_version"] == 2
+    packet = store.build_ip_role_persona_packet(role_id)
+    assert packet["target_ip"] == "见心说"
+    assert packet["search_keywords"] == ["修心", "内耗"]
+
+    disabled_role_id = store.upsert_ip_role(name="禁用角色", search_keywords=["测试"], enabled=False)
+    store.confirm_ip_role(disabled_role_id, change_reason="确认但禁用")
+    assert [role["id"] for role in store.list_ip_roles(confirmed_only=True)] == [role_id]
+
+
 def test_material_v2_promoted_columns_and_pending_summary(tmp_path: Path) -> None:
     store = Store(tmp_path / "mcn.sqlite")
     store.init_db()
@@ -139,6 +260,17 @@ def test_material_v2_promoted_columns_and_pending_summary(tmp_path: Path) -> Non
             "transcript_text": "口袋放三样不富人也旺。",
             "source_platform": "douyin",
             "understanding_status": "pending_raw_transcript",
+            "material_eligibility": {
+                "eligibility_status": "accepted",
+                "eligibility_provider": "local-rules",
+                "eligibility_version": "material-eligibility-v1",
+                "reasons": ["具备知识口播底稿价值。"],
+                "content_form": "知识口播",
+                "knowledge_core_score": 0.8,
+                "oral_script_fit_score": 0.7,
+                "ip_fit_score": 0.6,
+                "reject_reason": "",
+            },
         },
         material_understanding={
             "topic_summary": "口袋放三样不富人也旺。",
@@ -169,6 +301,9 @@ def test_material_v2_promoted_columns_and_pending_summary(tmp_path: Path) -> Non
     assert material["summary_text"] is None
     assert material["duration_ms"] == 97801
     assert material["cover_url"] == "https://example.com/cover.jpg"
+    assert material["eligibility_status"] == "accepted"
+    assert material["content_form"] == "知识口播"
+    assert material["knowledge_core_score"] == 0.8
 
     store.update_material_understanding(
         material_id,

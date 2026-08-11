@@ -1,0 +1,7 @@
+{
+  "output": {
+    "task_id": "task-test-123",
+    "task_status": "RUNNING"
+  },
+  "request_id": "request-poll-1"
+}

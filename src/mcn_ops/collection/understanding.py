@@ -91,6 +91,15 @@ def validate_understanding(value: dict[str, Any]) -> None:
 
 
 def evaluate_role_match(material: dict[str, Any], role: dict[str, Any]) -> dict[str, Any]:
+    material_status = str(material.get("status") or "collected")
+    if material_status != "collected":
+        return {
+            "fit_score": 0.0,
+            "decision": "rejected",
+            "reasons": [f"素材状态为 {material_status}，不进入该 IP 的优先适配池。"],
+            "matched_keywords": [],
+            "avoidance_notes": [material_status],
+        }
     haystack = " ".join(
         str(value or "")
         for value in [
