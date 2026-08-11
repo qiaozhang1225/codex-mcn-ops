@@ -41,8 +41,10 @@ mcn material promote --material-id mat_xxxxxxxxxxxx --platform douyin
 Run the reusable high-level collection task entry:
 
 ```bash
-mcn collect task keyword --topic 财运 --target-count 30 --tool-provider mxnzp
-mcn collect task author --name "娜说智慧" --like-floor 10000
+mcn collect task keyword --topic 财运 --target-count 30 \
+  --data-provider direct --transcription-provider aliyun
+mcn collect task author --sec-uid SEC_UID --like-floor 10000 \
+  --data-provider direct --transcription-provider aliyun
 mcn collect task discover-authors --min-appearances 2 --like-floor 10000 --top-authors 10
 
 mcn collect task show --task-id ctask_xxxxxxxxxxxx
@@ -52,7 +54,10 @@ mcn collect task resume --task-id ctask_xxxxxxxxxxxx
 
 The task layer creates `collection_tasks`, links all search/materialization runs through `collection_runs.task_id`, preserves existing materials by `work_id/source_url/title+author`, and runs material understanding by default. Material understanding is treated as the searchable metadata layer for later IP matching and rewrite work.
 
-For real Douyin material collection, set `MXNZP_APP_ID` and `MXNZP_APP_SECRET` in `.env.local`, start with `--target-count 1`, and review the resulting material before expanding collection.
+For real Douyin material collection, keep Ego Lite logged in to Douyin and set
+`DASHSCOPE_API_KEY` in `.env.local`. Start with `--target-count 1`, verify the
+detail and transcript, then expand the batch. No paid data-aggregation provider
+is used.
 
 Create a content package and a safe publish job:
 
@@ -105,18 +110,19 @@ Each adapter currently supplies package names, content validation, audit steps, 
 - SQLite ledger: `data/mcn_ops.sqlite`
 - Run artifacts: `runs/<job_id>/`
 - Local secrets: `.env.local` or platform app login on the phone, never committed
-- MXNZP credentials: `MXNZP_APP_ID`, `MXNZP_APP_SECRET`, optional `DOUYIN_COOKIE`
-- Douyin anonymous cookie probe: `mcn collect douyin-cookie --json`
-- Douyin logged-in cookie flow: `mcn collect douyin-login-cookie --write-env --json`; author `user_post` can also use `--login-cookie` when `DOUYIN_COOKIE` is missing.
+- Douyin session: keep Ego Lite logged in; the browser provider reuses that session and its native runtime signatures.
+- Alibaba Cloud ASR: `DASHSCOPE_API_KEY`; `DASHSCOPE_WORKSPACE_ID` and `DASHSCOPE_REGION` are optional deployment settings.
+- Provider preflight: `mcn collect douyin doctor --provider direct --transcription-provider aliyun --json`
 - Douyin author expansion: `mcn collect author expand --name "娜说智慧" --sort-type 1 --max-pages 0 --json`
 - Douyin author materialization: `mcn collect author materialize --name "娜说智慧" --top 5 --json`
-- High-level keyword collection: `mcn collect task keyword --topic 财运 --target-count 30 --tool-provider mxnzp`
-- High-level author collection: `mcn collect task author --name "娜说智慧" --like-floor 10000`
+- High-level keyword collection: `mcn collect task keyword --topic 财运 --target-count 30 --data-provider direct --transcription-provider aliyun`
+- High-level author collection: `mcn collect task author --sec-uid SEC_UID --like-floor 10000 --data-provider direct --transcription-provider aliyun`
 - High-level database author discovery: `mcn collect task discover-authors --min-appearances 2 --top-authors 10 --like-floor 10000`
 
 ## Local Inspection
 
-Use DB Browser for SQLite to inspect the local ledger when reviewing collected material, raw MXNZP payloads, and publish logs:
+Use DB Browser for SQLite to inspect the local ledger when reviewing collected
+materials, source observations, transcriptions, and publish logs:
 
 ```text
 /Applications/DB Browser for SQLite.app

@@ -12,7 +12,7 @@ The product is not a web app. The first usable version is a repo of executable w
 - Make every publishing action auditable through local logs, screenshots, and SQLite rows.
 - Use real phone apps for publishing instead of paid APIs or private web publishing endpoints.
 - Keep human confirmation before final publish unless explicitly disabled.
-- Reuse the useful MXNZP/SQLite/CLI material collection work from the deprecated project without carrying over its Web center or DeepSeek dependency.
+- Preserve useful SQLite/CLI collection behavior from the deprecated project while replacing its paid data-provider dependency and avoiding its Web center or DeepSeek dependency.
 
 ## Non-goals
 
@@ -49,4 +49,8 @@ The prefilter is not the final content judgment. It exists to reduce wasted API 
 
 V1 is successful when one real content package can be prepared, pushed to a connected Android phone, driven to the final publish confirmation screen for Douyin/Xiaohongshu/WeChat Channels/Kuaishou, captured as proof, and recorded back to SQLite and Feishu payloads.
 
-For material collection, V1 is successful when one command can search Douyin through MXNZP, store candidates and skipped reasons, extract transcript text, write material understanding metadata, match the material to IP roles, and promote a reviewed material into a `content_packages` draft.
+For material collection, V1 is successful when one command can search Douyin
+through the signed-in direct browser provider, verify source detail, transcribe
+through Alibaba Cloud Qwen ASR, store candidates and skipped reasons, write
+material understanding metadata, match the material to IP roles, and promote a
+reviewed material into a `content_packages` draft.

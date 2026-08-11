@@ -478,7 +478,7 @@ CREATE TABLE IF NOT EXISTS creation_learning_updates (
 CREATE TABLE IF NOT EXISTS provider_call_logs (
     id TEXT PRIMARY KEY,
     run_id TEXT,
-    provider TEXT NOT NULL DEFAULT 'mxnzp',
+    provider TEXT NOT NULL DEFAULT 'direct',
     operation TEXT NOT NULL,
     request_fingerprint TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -2251,7 +2251,7 @@ class Store:
             )
         return transcription_id
 
-    # Transitional adapters for callers that are converted in the workflow/CLI waves.
+    # Douyin normalization helpers backed by the provider-neutral source tables.
     def upsert_douyin_author(
         self,
         profile: dict[str, Any],
@@ -3692,89 +3692,6 @@ def _has_legacy_collection_schema(conn: sqlite3.Connection) -> bool:
     )
 
 
-def _backfill_material_v2_columns(conn: sqlite3.Connection) -> None:
-    if not _table_exists(conn, "collected_materials"):
-        return
-    rows = conn.execute("SELECT * FROM collected_materials").fetchall()
-    for row in rows:
-        source_package = _row_json(row, "source_package_json", {})
-        raw = _row_json(row, "raw_json", {})
-        understanding = _row_json(row, "material_understanding_json", {})
-        if not isinstance(source_package, dict):
-            source_package = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        if not isinstance(understanding, dict):
-            understanding = {}
-        source_package = {
-            **source_package,
-            "title": source_package.get("title") or row["title"],
-            "platform_caption": source_package.get("platform_caption") or row["platform_caption"],
-            "transcript_text": source_package.get("transcript_text") or row["transcript_text"],
-        }
-        promoted = _material_promoted_values(source_package, understanding, raw)
-        summary = row["summary_text"]
-        if row["understanding_status"] == "pending_raw_transcript" and _is_transcript_prefix(summary, row["transcript_text"]):
-            summary = None
-        elif promoted["summary_text"]:
-            summary = promoted["summary_text"]
-        conn.execute(
-            """
-            UPDATE collected_materials
-            SET clean_title = COALESCE(NULLIF(clean_title, ''), ?),
-                caption_text = COALESCE(NULLIF(caption_text, ''), ?),
-                hashtags_json = ?,
-                summary_text = ?,
-                hook_text = COALESCE(NULLIF(hook_text, ''), ?),
-                core_claim = COALESCE(NULLIF(core_claim, ''), ?),
-                content_type = COALESCE(NULLIF(content_type, ''), ?),
-                oral_script_pattern = COALESCE(NULLIF(oral_script_pattern, ''), ?),
-                audience = COALESCE(NULLIF(audience, ''), ?),
-                emotion_trigger = COALESCE(NULLIF(emotion_trigger, ''), ?),
-                risk_level = COALESCE(NULLIF(risk_level, ''), ?),
-                content_structure_json = ?,
-                key_points_json = ?,
-                rewrite_angles_json = ?,
-                usable_quotes_json = ?,
-                risk_notes_json = ?,
-                recommended_platforms_json = ?,
-                next_collection_keywords_json = ?,
-                post_time = COALESCE(NULLIF(post_time, ''), ?),
-                duration_ms = COALESCE(duration_ms, ?),
-                cover_url = COALESCE(NULLIF(cover_url, ''), ?),
-                video_url = COALESCE(NULLIF(video_url, ''), ?),
-                audio_url = COALESCE(NULLIF(audio_url, ''), ?)
-            WHERE id = ?
-            """,
-            (
-                promoted["clean_title"],
-                promoted["caption_text"],
-                dumps(promoted["hashtags"]),
-                summary,
-                promoted["hook_text"],
-                promoted["core_claim"],
-                promoted["content_type"],
-                promoted["oral_script_pattern"],
-                promoted["audience"],
-                promoted["emotion_trigger"],
-                promoted["risk_level"],
-                dumps(promoted["content_structure"]),
-                dumps(promoted["key_points"]),
-                dumps(promoted["rewrite_angles"]),
-                dumps(promoted["usable_quotes"]),
-                dumps(promoted["risk_notes"]),
-                dumps(promoted["recommended_platforms"]),
-                dumps(promoted["next_collection_keywords"]),
-                promoted["post_time"],
-                promoted["duration_ms"],
-                promoted["cover_url"],
-                promoted["video_url"],
-                promoted["audio_url"],
-                row["id"],
-            ),
-        )
-
-
 def _material_promoted_values(
     source_package: dict[str, Any],
     understanding: dict[str, Any],
@@ -4008,97 +3925,6 @@ def _collection_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _candidate_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "run_id": row["run_id"],
-        "task_id": row["task_id"],
-        "role_id": row["role_id"],
-        "source_key": row["source_key"],
-        "source_url": row["source_url"],
-        "title": row["title"],
-        "author_name": row["author_name"],
-        "platform_caption": row["platform_caption"],
-        "metrics": _row_json(row, "metrics_json", {}),
-        "source_package": _row_json(row, "source_package_json", {}),
-        "raw": _row_json(row, "raw_json", {}),
-        "status": row["status"],
-        "selection_reason": row["selection_reason"],
-        "skip_reason": row["skip_reason"],
-        "skip_detail": row["skip_detail"],
-        "threshold_mode": row["threshold_mode"],
-        "material_id": row["material_id"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _material_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "run_id": row["run_id"],
-        "task_id": row["task_id"],
-        "role_id": row["role_id"],
-        "source_role_id": row["source_role_id"],
-        "source_url": row["source_url"],
-        "title": row["title"],
-        "clean_title": row["clean_title"],
-        "platform_caption": row["platform_caption"],
-        "caption_text": row["caption_text"],
-        "hashtags": _row_json(row, "hashtags_json", []),
-        "transcript_text": row["transcript_text"],
-        "summary_text": row["summary_text"],
-        "hook_text": row["hook_text"],
-        "core_claim": row["core_claim"],
-        "content_type": row["content_type"],
-        "oral_script_pattern": row["oral_script_pattern"],
-        "audience": row["audience"],
-        "emotion_trigger": row["emotion_trigger"],
-        "risk_level": row["risk_level"],
-        "content_structure": _row_json(row, "content_structure_json", []),
-        "key_points": _row_json(row, "key_points_json", []),
-        "rewrite_angles": _row_json(row, "rewrite_angles_json", []),
-        "usable_quotes": _row_json(row, "usable_quotes_json", []),
-        "risk_notes": _row_json(row, "risk_notes_json", []),
-        "recommended_platforms": _row_json(row, "recommended_platforms_json", []),
-        "next_collection_keywords": _row_json(row, "next_collection_keywords_json", []),
-        "author_name": row["author_name"],
-        "author_sec_uid": row["author_sec_uid"],
-        "author_profile_url": row["author_profile_url"],
-        "author_douyin_id": row["author_douyin_id"],
-        "work_id": row["work_id"],
-        "work_short_url": row["work_short_url"],
-        "source_platform": row["source_platform"],
-        "post_time": row["post_time"],
-        "duration_ms": row["duration_ms"],
-        "cover_url": row["cover_url"],
-        "video_url": row["video_url"],
-        "audio_url": row["audio_url"],
-        "author_identity_confidence": row["author_identity_confidence"],
-        "metrics": _row_json(row, "metrics_json", {}),
-        "material_eligibility": _row_json(row, "material_eligibility_json", {}),
-        "eligibility_status": row["eligibility_status"],
-        "eligibility_provider": row["eligibility_provider"],
-        "eligibility_version": row["eligibility_version"],
-        "eligibility_reasons": _row_json(row, "eligibility_reason_json", []),
-        "content_form": row["content_form"],
-        "knowledge_core_score": row["knowledge_core_score"],
-        "oral_script_fit_score": row["oral_script_fit_score"],
-        "ip_fit_score": row["ip_fit_score"],
-        "reject_reason": row["reject_reason"],
-        "material_understanding": _row_json(row, "material_understanding_json", {}),
-        "understanding_provider": row["understanding_provider"],
-        "understanding_model": row["understanding_model"],
-        "sample_pool_clues": _row_json(row, "sample_pool_clues_json", []),
-        "understanding_status": row["understanding_status"],
-        "source_package": _row_json(row, "source_package_json", {}),
-        "raw": _row_json(row, "raw_json", {}),
-        "status": row["status"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
 def _source_author_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     profile = _row_json(row, "raw_json", {})
     profile.update(
@@ -4194,51 +4020,6 @@ def _source_work_to_douyin_compat(work: dict[str, Any], author_sec_uid: str) -> 
         "raw": {},
         "created_at": work.get("created_at"),
         "updated_at": work.get("updated_at"),
-    }
-
-
-def _douyin_author_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "sec_uid": row["sec_uid"],
-        "uid": row["uid"],
-        "douyin_id": row["douyin_id"],
-        "nickname": row["nickname"],
-        "signature": row["signature"],
-        "avatar_url": row["avatar_url"],
-        "profile_url": row["profile_url"],
-        "ip_location": row["ip_location"],
-        "follower_count": row["follower_count"],
-        "following_count": row["following_count"],
-        "aweme_count": row["aweme_count"],
-        "total_favorited": row["total_favorited"],
-        "source_material_id": row["source_material_id"],
-        "source_work_id": row["source_work_id"],
-        "fetched_at": row["fetched_at"],
-        "raw": _row_json(row, "raw_json", {}),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _douyin_author_video_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "author_sec_uid": row["author_sec_uid"],
-        "work_id": row["work_id"],
-        "source_material_id": row["source_material_id"],
-        "source_url": row["source_url"],
-        "title": row["title"],
-        "platform_caption": row["platform_caption"],
-        "caption_text": row["caption_text"],
-        "hashtags": _row_json(row, "hashtags_json", []),
-        "post_time": row["post_time"],
-        "duration_ms": row["duration_ms"],
-        "cover_url": row["cover_url"],
-        "metrics": _row_json(row, "metrics_json", {}),
-        "source_package": _row_json(row, "source_package_json", {}),
-        "raw": _row_json(row, "raw_json", {}),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
     }
 
 

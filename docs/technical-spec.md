@@ -8,7 +8,8 @@ The system is a Python CLI package with no server process.
 flowchart LR
   User["Operator / Codex"] --> CLI["mcn CLI"]
   CLI --> SQLite["SQLite ledger"]
-  CLI --> MXNZP["MXNZP Douyin API"]
+  CLI --> Douyin["Douyin direct provider"]
+  CLI --> Bailian["Alibaba Cloud Qwen ASR"]
   CLI --> ADB["ADB client"]
   ADB --> Phone["Android phone with logged-in apps"]
   CLI --> Runs["runs/job artifacts"]
@@ -30,8 +31,10 @@ The minimal ledger includes:
 - `collection_runs`
 - `collection_candidates`
 - `collected_materials`
-- `douyin_authors`
-- `douyin_author_videos`
+- `source_authors`
+- `source_works`
+- `source_observations`
+- `material_transcriptions`
 - `material_role_matches`
 - `material_creations`
 - `creation_tasks`
@@ -43,8 +46,9 @@ The minimal ledger includes:
 - `creation_stage_feedback_events`
 - `risk_term_observations`
 - `creation_learning_updates`
-- `mxnzp_call_logs`
-- `mxnzp_call_cache`
+- `provider_call_logs`
+- `provider_call_cache`
+- `schema_migrations`
 - `material_understanding_logs`
 
 JSON columns are used for evolving metadata. Stable publish state stays in explicit status columns.
@@ -53,9 +57,12 @@ Material collection separates three responsibilities:
 
 - `ip_roles`: stores confirmed or draft IP role profiles. It includes positioning, audience, themes, forbidden directions, expression constraints, style anchors, search keywords, and a cached `persona_packet_json` for downstream selection and rewriting.
 - `ip_role_versions`: stores snapshots created by `mcn collect role confirm`. Draft edits do not write versions; confirmed profile changes that touch key strategy fields move the role to `needs_reconfirm`.
-- `collected_materials`: stores the source material itself. `role_id` is kept for compatibility and should be read as the collection/source role; new code should use `source_role_id` for that meaning.
-- `douyin_authors`: stores source author profiles, keyed by Douyin `sec_uid`, with follower count, total favorited, signature, avatar, profile URL, and raw profile JSON.
-- `douyin_author_videos`: stores known videos for an author. It starts with the source material video and can later be expanded through `user_post`.
+- `source_authors`: stores platform-neutral author identities. Douyin `sec_uid` is stored as `platform_author_id`.
+- `source_works`: stores one stable row per platform work and links it to an optional source author.
+- `source_observations`: stores time-varying metrics and provider evidence without overwriting prior observations.
+- `material_transcriptions`: stores transcript identity, provider, model, audio hash, options, and text separately from the material decision.
+- `collected_materials`: stores only collection and understanding decisions, linked through `source_work_id` and `transcription_id`.
+- `collection_candidates`: stores pipeline decisions linked to `source_work_id`; platform metadata is not duplicated.
 - `material_role_matches`: stores many-to-many role-fit judgments. One material can be accepted or rejected for multiple IP roles, with separate scores and reasons.
 - `material_creations`: stores role-specific rewrite usage. This is the source of truth for whether a specific IP role has already created a draft from a specific material.
 
@@ -87,15 +94,15 @@ IP role confirmation status:
 DB Browser for SQLite 3.13.1+ is the preferred GUI for inspecting the local ledger at `data/mcn_ops.sqlite`.
 It is an operator/development tool, not a Python runtime dependency. Use it to review high-volume text and JSON fields such as:
 
-- `collected_materials.transcript_text`
-- `collected_materials.raw_json`
-- `collected_materials.source_package_json`
-- `collection_candidates.raw_json`
-- `mxnzp_call_cache.response_json`
+- `material_transcriptions.transcript_text`
+- `source_observations.metrics_json`
+- `source_observations.payload_json`
+- `provider_call_cache.response_json`
 
 ## CLI
 
 - `mcn init-db`
+- `mcn db migrate-collection-schema-v3`
 - `mcn adb doctor`
 - `mcn adb devices`
 - `mcn content create`
@@ -103,8 +110,7 @@ It is an operator/development tool, not a Python runtime dependency. Use it to r
 - `mcn create knowledge packet`
 - `mcn create feedback add/analyze`
 - `mcn create learning propose/apply`
-- `mcn collect catalog`
-- `mcn collect mxnzp-call`
+- `mcn collect douyin doctor/detail/search-video/user-posts/transcribe`
 - `mcn collect role upsert/list/show/import/export/confirm/packet/match-existing`
 - `mcn collect task keyword/author/discover-authors/show/report/resume`
 - `mcn collect run`
@@ -144,13 +150,13 @@ V1 adapters are conservative. They validate and capture, then mark UI-specific a
 
 ## Material Collection
 
-Collection is CLI-first and has no server process. MXNZP is used only for Douyin data acquisition. Every collection path should run material understanding by default because the promoted understanding columns and `material_understanding_json` are the searchable metadata used later for IP matching and rewrite selection.
+Collection is CLI-first and has no server process. Douyin metadata comes from the direct provider, browser pagination reuses the signed-in Ego session, and transcription uses Alibaba Cloud Qwen ASR. There is no paid data-provider fallback.
 
 The high-level task layer is `mcn collect task ...`:
 
 - `keyword`: collects enough materials for one topic. Completion is based on target material count, not one search run. It can continue through seed keywords, related keywords, role keywords, and saved-material `next_collection_keywords`.
 - `author`: collects viral works from one source author. The default viral threshold is `like_floor=10000`, `sortType=1`, duration window `20-300` seconds, and existing materials are preserved.
-- `discover-authors`: ranks source authors from `collected_materials`, `collection_candidates`, and `douyin_author_videos`, then reuses the author workflow.
+- `discover-authors`: ranks `source_authors` through their linked works and observations, then reuses the author workflow.
 - `show/report/resume`: reads `collection_tasks` and linked `collection_runs` to summarize saved materials, skipped candidates, source authors, understanding status, next recommendations, API calls, and cache hits.
 
 Low-level `collect run`, `collect author expand`, and `collect author materialize` remain stable execution primitives. High-level tasks reuse them conceptually through a workflow module and link work with `collection_runs.task_id`.

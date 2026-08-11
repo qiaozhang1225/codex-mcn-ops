@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 import mcn_ops.cli as cli
 from mcn_ops.collection.douyin.contracts import build_provider_result
@@ -66,43 +67,19 @@ def test_douyin_detail_uses_direct_provider_without_db_init(monkeypatch, tmp_pat
     assert not db_path.exists()
 
 
-def test_douyin_transcribe_passes_explicit_paid_fallback_choice(monkeypatch, capsys) -> None:
-    provider = FakeProvider()
-    captured: dict[str, object] = {}
-
-    def build(name, *, transcription_provider_name, allow_paid_fallback):
-        captured.update(
-            name=name,
-            transcription_provider_name=transcription_provider_name,
-            allow_paid_fallback=allow_paid_fallback,
+def test_douyin_transcribe_rejects_removed_paid_fallback(capsys) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "collect",
+                "douyin",
+                "transcribe",
+                "https://www.douyin.com/video/1234567890123456789",
+                "--allow-paid-fallback",
+            ]
         )
-        return provider
 
-    monkeypatch.setattr(cli, "build_collection_provider", build)
-
-    exit_code = cli.main(
-        [
-            "collect",
-            "douyin",
-            "transcribe",
-            "https://www.douyin.com/video/1234567890123456789",
-            "--provider",
-            "auto",
-            "--transcription-provider",
-            "aliyun",
-            "--allow-paid-fallback",
-            "--json",
-        ]
-    )
-
-    assert exit_code == 0
-    assert captured == {
-        "name": "auto",
-        "transcription_provider_name": "aliyun",
-        "allow_paid_fallback": True,
-    }
-    assert provider.calls[0]["method_key"] == "video_to_text_v2"
-    assert json.loads(capsys.readouterr().out)["normalized"]["text"] == "ok"
+    assert "unrecognized arguments: --allow-paid-fallback" in capsys.readouterr().err
 
 
 def test_douyin_search_video_passes_bounded_browser_traversal(monkeypatch, capsys) -> None:

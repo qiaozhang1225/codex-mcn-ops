@@ -76,6 +76,17 @@ def test_provider_default_does_not_implicitly_enable_paid_asr(monkeypatch) -> No
         provider.call("video_to_text_v2", body={"url": "https://www.douyin.com/video/123"})
 
 
+@pytest.mark.parametrize("name", ["mxnzp", "auto"])
+def test_removed_data_providers_fail_closed(name: str) -> None:
+    with pytest.raises(ProviderConfigError, match="unsupported Douyin provider"):
+        factory.build_data_provider(name)
+
+
+def test_paid_fallback_flag_fails_closed() -> None:
+    with pytest.raises(ProviderConfigError, match="paid provider fallback has been removed"):
+        factory.build_data_provider("direct", allow_paid_fallback=True)
+
+
 def test_registry_passes_browser_page_limits_only_to_browser_provider() -> None:
     data_provider = FakeBrowserData()
     provider = TranscribingDouyinProvider(data_provider=data_provider)

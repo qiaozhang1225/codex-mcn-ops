@@ -5,15 +5,11 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .adb import AdbClient
 from .adapters import list_platforms
-from .collection.api_manifest import catalog_as_dict, load_manifest_from_markdown
-from .collection.douyin_cookie import fetch_douyin_cookie
-from .collection.douyin_login_cookie import login_and_fetch_douyin_cookie, write_env_cookie
 from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.direct.client import cookie_looks_authenticated
 from .collection.douyin.factory import (
@@ -24,8 +20,6 @@ from .collection.douyin.factory import (
 )
 from .collection.douyin.registry import build_douyin_registry
 from .collection.mock_tools import build_mock_source_registry
-from .collection.mxnzp_client import MxnzpConfig, MxnzpDouyinProClient
-from .collection.mxnzp_tools import build_mxnzp_douyin_registry
 from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
 from .collection.tools import parse_json_object
 from .collection.understanding import (
@@ -67,8 +61,8 @@ def json_print(value: Any) -> None:
 
 
 def _add_douyin_provider_args(parser: argparse.ArgumentParser, *, include_transcription: bool = False) -> None:
-    parser.add_argument("--provider", choices=["direct", "mxnzp", "auto"], default="direct")
-    parser.add_argument("--allow-paid-fallback", action="store_true")
+    parser.add_argument("--provider", choices=["direct"], default="direct")
+    parser.set_defaults(allow_paid_fallback=False)
     if include_transcription:
         parser.add_argument("--transcription-provider", choices=["provider", "aliyun", "none"], default="aliyun")
 
@@ -185,38 +179,6 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser = subparsers.add_parser("collect", help="Material collection commands")
     collect_sub = collect_parser.add_subparsers(dest="collect_command", required=True)
 
-    catalog = collect_sub.add_parser("catalog", help="Inspect the local mxnzp API manifest")
-    catalog.add_argument("--json", action="store_true")
-    catalog.add_argument("--exposed-only", action="store_true")
-
-    mxnzp_call = collect_sub.add_parser("mxnzp-call", help="Call one local mxnzp adapter method directly")
-    mxnzp_call.add_argument("method_key")
-    mxnzp_call.add_argument("--params", default="{}")
-    mxnzp_call.add_argument("--body", default="{}")
-    mxnzp_call.add_argument("--no-cache", action="store_true")
-    mxnzp_call.add_argument("--auto-cookie", action="store_true", help="Try to fetch a Douyin homepage cookie for cookie-required methods")
-    mxnzp_call.add_argument("--login-cookie", action="store_true", help="Open a browser login flow when a long Douyin cookie is required")
-    mxnzp_call.add_argument("--allow-short-auto-cookie", action="store_true", help="Send the auto-fetched cookie even when it fails the length heuristic")
-    mxnzp_call.add_argument("--json", action="store_true")
-
-    douyin_cookie = collect_sub.add_parser("douyin-cookie", help="Fetch a Douyin homepage cookie")
-    douyin_cookie.add_argument("--url", default="https://www.douyin.com")
-    douyin_cookie.add_argument("--min-length", type=int, default=100)
-    douyin_cookie.add_argument("--show-cookie", action="store_true")
-    douyin_cookie.add_argument("--json", action="store_true")
-
-    douyin_login_cookie = collect_sub.add_parser("douyin-login-cookie", help="Open browser login and fetch a logged-in Douyin cookie")
-    douyin_login_cookie.add_argument("--browser-path")
-    douyin_login_cookie.add_argument("--profile-dir", default="data/browser-profiles/douyin-cookie")
-    douyin_login_cookie.add_argument("--timeout-seconds", type=float, default=300.0)
-    douyin_login_cookie.add_argument("--poll-seconds", type=float, default=3.0)
-    douyin_login_cookie.add_argument("--min-length", type=int, default=100)
-    douyin_login_cookie.add_argument("--write-env", action="store_true")
-    douyin_login_cookie.add_argument("--env-path", default=".env.local")
-    douyin_login_cookie.add_argument("--show-cookie", action="store_true")
-    douyin_login_cookie.add_argument("--close-browser", action="store_true")
-    douyin_login_cookie.add_argument("--json", action="store_true")
-
     douyin = collect_sub.add_parser("douyin", help="Use provider-neutral Douyin data and transcription commands")
     douyin_sub = douyin.add_subparsers(dest="douyin_command", required=True)
     douyin_doctor = douyin_sub.add_parser("doctor", help="Check Direct Douyin and transcription configuration")
@@ -271,11 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "mxnzp", "direct", "auto"],
+        choices=["mock", "direct"],
         default="direct",
     )
     task_keyword.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
-    task_keyword.add_argument("--allow-paid-fallback", action="store_true")
+    task_keyword.set_defaults(allow_paid_fallback=False)
     task_keyword.add_argument("--like-floor", type=int, default=10000)
     task_keyword.add_argument("--min-duration-seconds", type=int, default=20)
     task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
@@ -295,15 +257,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_author.add_argument("--max-pages", type=int, default=0, help="Use 0 to continue until the provider reports no next page")
     task_author.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
     task_author.add_argument("--skip-expand", action="store_true")
-    task_author.add_argument("--login-cookie", action="store_true")
     task_author.add_argument("--refresh-existing-understanding", action="store_true")
     task_author.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
     task_author.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_author.add_argument("--no-cache", action="store_true")
     task_author.add_argument("--json", action="store_true")
-    task_author.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    task_author.add_argument("--data-provider", choices=["direct"], default="direct")
     task_author.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
-    task_author.add_argument("--allow-paid-fallback", action="store_true")
+    task_author.set_defaults(allow_paid_fallback=False)
 
     task_discover = task_sub.add_parser("discover-authors", help="Discover source authors from the database and collect their viral works")
     task_discover.add_argument("--min-appearances", type=int, default=2)
@@ -315,15 +276,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_discover.add_argument("--max-pages", type=int, default=0)
     task_discover.add_argument("--sort-type", type=int, choices=[0, 1], default=1)
     task_discover.add_argument("--skip-expand", action="store_true")
-    task_discover.add_argument("--login-cookie", action="store_true")
     task_discover.add_argument("--no-cache", action="store_true")
     task_discover.add_argument("--dry-run", action="store_true")
     task_discover.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
     task_discover.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_discover.add_argument("--json", action="store_true")
-    task_discover.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    task_discover.add_argument("--data-provider", choices=["direct"], default="direct")
     task_discover.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
-    task_discover.add_argument("--allow-paid-fallback", action="store_true")
+    task_discover.set_defaults(allow_paid_fallback=False)
 
     task_show = task_sub.add_parser("show", help="Show a collection task summary")
     task_show.add_argument("--task-id", required=True)
@@ -358,11 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
     author_expand.add_argument("--max-duration-seconds", type=int, default=300)
     author_expand.add_argument("--top", type=int, default=20)
     author_expand.add_argument("--stop-after-nonviral-pages", type=int, default=2, help="Use 0 to disable early stop")
-    author_expand.add_argument("--login-cookie", action="store_true")
     author_expand.add_argument("--no-cache", action="store_true")
     author_expand.add_argument("--json", action="store_true")
-    author_expand.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
-    author_expand.add_argument("--allow-paid-fallback", action="store_true")
+    author_expand.add_argument("--data-provider", choices=["direct"], default="direct")
+    author_expand.set_defaults(allow_paid_fallback=False)
     author_materialize = author_sub.add_parser(
         "materialize",
         help="Transcribe ranked author videos into collected materials and run material understanding",
@@ -380,9 +339,9 @@ def build_parser() -> argparse.ArgumentParser:
     author_materialize.add_argument("--refresh-existing-understanding", action="store_true")
     author_materialize.add_argument("--no-cache", action="store_true")
     author_materialize.add_argument("--json", action="store_true")
-    author_materialize.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
+    author_materialize.add_argument("--data-provider", choices=["direct"], default="direct")
     author_materialize.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
-    author_materialize.add_argument("--allow-paid-fallback", action="store_true")
+    author_materialize.set_defaults(allow_paid_fallback=False)
 
     role = collect_sub.add_parser("role", help="Manage IP role profiles")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -435,11 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "mxnzp", "direct", "auto"],
+        choices=["mock", "direct"],
         default="direct",
     )
     collect_run.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
-    collect_run.add_argument("--allow-paid-fallback", action="store_true")
+    collect_run.set_defaults(allow_paid_fallback=False)
     collect_run.add_argument("--max-search-pages", type=int, default=3)
     collect_run.add_argument("--page-size", type=int, default=5)
     collect_run.add_argument("--role-id")
@@ -842,86 +801,6 @@ def handle_publish(args: argparse.Namespace, store: Store) -> int:
 
 
 def handle_collect(args: argparse.Namespace, store: Store) -> int:
-    if args.collect_command == "catalog":
-        methods = load_manifest_from_markdown()
-        if args.exposed_only:
-            methods = [method for method in methods if method.model_exposed]
-        payload = catalog_as_dict(methods)
-        if args.json:
-            json_print(payload)
-        else:
-            for method in payload["methods"]:
-                print(f"{method['key']}\t{method['http_method']}\t{method['group']}\t{method['title']}")
-        return 0
-
-    if args.collect_command == "mxnzp-call":
-        config = MxnzpConfig.from_env()
-        client = MxnzpDouyinProClient(config)
-        params = parse_json_object(args.params)
-        body = parse_json_object(args.body)
-        needs_cookie = args.method_key == "user_post" and "cookie" not in params and "cookie" not in body and not config.douyin_cookie
-        if args.login_cookie and needs_cookie:
-            if not args.json:
-                print("请在打开的浏览器窗口登录抖音；登录成功后本命令会自动检测长 cookie。", file=sys.stderr)
-            login_result = login_and_fetch_douyin_cookie()
-            if not login_result.cookie_valid:
-                raise ValueError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
-            params["cookie"] = login_result.cookie
-        elif args.auto_cookie and args.method_key == "user_post" and "cookie" not in params and "cookie" not in body:
-            cookie_result = fetch_douyin_cookie()
-            if not cookie_result.cookie:
-                raise ValueError(f"failed to fetch Douyin cookie: {cookie_result.error or 'empty cookie'}")
-            if not cookie_result.cookie_valid and not args.allow_short_auto_cookie:
-                raise ValueError(
-                    "auto-fetched Douyin cookie is too short to look logged in; "
-                    "provide DOUYIN_COOKIE or retry with --allow-short-auto-cookie for diagnostics"
-                )
-            params["cookie"] = cookie_result.cookie
-        payload = client.call(
-            args.method_key,
-            params=params,
-            body=body,
-            use_cache=not args.no_cache,
-        )
-        json_print(payload)
-        return 0
-
-    if args.collect_command == "douyin-cookie":
-        result = fetch_douyin_cookie(url=args.url, min_cookie_length=args.min_length)
-        payload = result.to_dict(include_cookie=args.show_cookie)
-        if args.json:
-            json_print(payload)
-        else:
-            if args.show_cookie and result.cookie:
-                print(result.cookie)
-            else:
-                print(json.dumps(payload, ensure_ascii=False))
-        return 0
-
-    if args.collect_command == "douyin-login-cookie":
-        if not args.json:
-            print("请在打开的浏览器窗口登录抖音；登录成功后本命令会自动检测长 cookie。", file=sys.stderr)
-        result = login_and_fetch_douyin_cookie(
-            browser_path=args.browser_path,
-            profile_dir=args.profile_dir,
-            timeout_seconds=args.timeout_seconds,
-            poll_seconds=args.poll_seconds,
-            min_cookie_length=args.min_length,
-            close_browser=args.close_browser,
-        )
-        if args.write_env and result.cookie_valid:
-            env_path = write_env_cookie(result.cookie, env_path=args.env_path)
-            result = replace(result, written_env_path=str(env_path))
-        payload = result.to_dict(include_cookie=args.show_cookie)
-        if args.json:
-            json_print(payload)
-        else:
-            if args.show_cookie and result.cookie:
-                print(result.cookie)
-            else:
-                print(json.dumps(payload, ensure_ascii=False))
-        return 0 if result.cookie_valid else 1
-
     if args.collect_command == "douyin":
         return handle_collect_douyin(args)
 
@@ -1052,9 +931,7 @@ def handle_collect_douyin(args: argparse.Namespace) -> int:
             DoctorCheck(
                 "douyin_auth",
                 lambda: {
-                    "ok": browser_session
-                    or cookie_looks_authenticated(os.environ.get("DOUYIN_COOKIE"))
-                    or args.provider == "mxnzp",
+                    "ok": browser_session or cookie_looks_authenticated(os.environ.get("DOUYIN_COOKIE")),
                     "code": (
                         "ego_browser_session"
                         if browser_session
@@ -1192,7 +1069,6 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             max_pages=args.max_pages,
             sort_type=args.sort_type,
             skip_expand=args.skip_expand,
-            login_cookie=args.login_cookie,
             no_cache=args.no_cache,
             refresh_existing_understanding=args.refresh_existing_understanding,
             understanding_provider=args.understanding_provider,
@@ -1213,7 +1089,6 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             max_pages=args.max_pages,
             sort_type=args.sort_type,
             skip_expand=args.skip_expand,
-            login_cookie=args.login_cookie,
             no_cache=args.no_cache,
             dry_run=args.dry_run,
             understanding_provider=args.understanding_provider,
@@ -1304,13 +1179,6 @@ def handle_collect_author(args: argparse.Namespace, store: Store) -> int:
     if args.author_command == "expand":
         author = _resolve_douyin_author(store, sec_uid=args.sec_uid, name=args.name)
         load_local_env()
-        if args.login_cookie and not os.environ.get("DOUYIN_COOKIE", "").strip():
-            if not args.json:
-                print("请在打开的浏览器窗口登录抖音；登录成功后本命令会自动检测长 cookie。", file=sys.stderr)
-            login_result = login_and_fetch_douyin_cookie()
-            if not login_result.cookie_valid:
-                raise ValueError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
-            os.environ["DOUYIN_COOKIE"] = login_result.cookie
         client = build_data_provider(args.data_provider, allow_paid_fallback=args.allow_paid_fallback)
         cursor = args.cursor or ""
         page_limit = args.max_pages if args.max_pages > 0 else 1000
@@ -1603,7 +1471,7 @@ def _author_video_from_normalized_item(item: dict[str, Any], source_package: dic
 def _source_package_from_author_video(author: dict[str, Any], video: dict[str, Any]) -> dict[str, Any]:
     metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
     return {
-        "source_type": "mxnzp_douyin_author",
+        "source_type": "direct_douyin_author",
         "source_platform": "douyin",
         "source_link": video.get("source_url"),
         "title": video.get("title"),
@@ -2060,7 +1928,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _collect_command_needs_db_init(args: argparse.Namespace) -> bool:
-    if getattr(args, "collect_command", None) in {"catalog", "mxnzp-call", "douyin-cookie", "douyin-login-cookie", "douyin"}:
+    if getattr(args, "collect_command", None) == "douyin":
         return False
     if getattr(args, "collect_command", None) == "author" and getattr(args, "author_command", None) in {"list", "videos"}:
         return False
@@ -2088,7 +1956,7 @@ def _build_collection_tools(
     transcription_provider: str = "aliyun",
     allow_paid_fallback: bool = False,
 ):
-    if provider in {"mxnzp", "direct", "auto"}:
+    if provider == "direct":
         resolved = build_collection_provider(
             provider,
             transcription_provider_name=transcription_provider,

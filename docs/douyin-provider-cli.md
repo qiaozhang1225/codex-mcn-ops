@@ -7,22 +7,18 @@ audio directly to Alibaba Cloud Model Studio for transcription.
 
 - `direct`: use the signed-in `ego-browser` session for video search and detail, then call
   Alibaba Cloud directly for ASR. No paid data aggregation API.
-- `mxnzp`: preserve the existing paid provider for compatibility.
-- `auto`: try `direct` first. MXNZP is disabled unless
-  `--allow-paid-fallback` is explicitly supplied.
 - `aliyun`: use `qwen3-asr-flash` for audio up to 5 minutes and 10 MB, otherwise
   use asynchronous `qwen3-asr-flash-filetrans`.
 
 Direct Douyin access is inherently less stable than a commercial aggregation
 API. Empty bodies, CAPTCHA pages, expired cookies, and endpoint changes are
-reported as typed errors. They do not silently trigger a paid fallback.
+reported as typed errors. They fail closed without a paid data-provider fallback.
 
 ## Configuration
 
 Put local secrets in `.env.local`:
 
 ```dotenv
-DOUYIN_COOKIE="..."
 DOUYIN_DIRECT_MODE="browser"
 DASHSCOPE_API_KEY="..."
 DASHSCOPE_WORKSPACE_ID="..."
@@ -48,10 +44,9 @@ The ASR cache key includes the normalized audio SHA-256, provider, model, and
 recognition options. Therefore a second CLI process can reuse the transcript
 without another paid request.
 
-Long asynchronous task IDs and any uploaded media URL are stored in the same
-SQLite file. A polling timeout keeps both records so a later CLI process can
-resume the existing task instead of submitting another billed job. Uploaded
-media is cleaned only after an explicit terminal result.
+Long asynchronous task IDs are stored in the ASR cache so a later CLI process
+can resume polling instead of submitting another billed job. Credentials and
+signed media URLs are not persisted.
 
 ## Commands
 
@@ -71,16 +66,13 @@ mcn collect douyin user-posts --sec-uid '...' --provider direct \
 mcn collect douyin transcribe 'https://www.douyin.com/video/...' \
   --provider direct --transcription-provider aliyun --json
 
-# Explicitly permit the legacy paid provider only for eligible direct failures.
-mcn collect douyin detail 'https://www.douyin.com/video/...' \
-  --provider auto --allow-paid-fallback --json
 ```
 
-The high-level collection workflows also accept `direct` and `auto`:
+The high-level collection workflows use `direct + aliyun` by default:
 
 ```bash
 mcn collect task keyword --topic '亲子关系' --target-count 10 \
-  --tool-provider direct --transcription-provider aliyun --json
+  --data-provider direct --transcription-provider aliyun --json
 
 mcn collect task author --sec-uid '...' --data-provider direct \
   --transcription-provider aliyun --json
@@ -92,8 +84,7 @@ mcn collect task author --sec-uid '...' --data-provider direct \
    sampling reuse that session and do not inject `.env.local` cookies into ego.
 2. Run `doctor` before a batch.
 3. Test one known video before expanding to search or author pagination.
-4. Enable `--allow-paid-fallback` only for a run with an approved MXNZP budget.
-5. Compare a small transcript sample against the source audio before production
+4. Compare a small transcript sample against the source audio before production
    ingestion.
 
 Browser-backed keyword search and author works support bounded pagination with
@@ -111,8 +102,7 @@ configured page cap while `has_next=true` fails closed.
 
 Direct HTTP pagination is diagnostic-only and currently triggers Douyin risk
 control with the available local static signer. Production pagination must use
-the browser-backed native signing path, and must not switch to MXNZP without
-explicit paid approval.
+the browser-backed native signing path. There is no runtime paid-provider route.
 
 The default CLI does not configure an object-storage uploader. Public Douyin
 audio URLs can be submitted directly to file transcription; long local files or
@@ -123,7 +113,7 @@ private-bucket lifecycle policy are configured and live-tested.
 `DOUYIN_DIRECT_MODE=browser` is the default because current Douyin Web detail
 requests depend on browser-generated runtime signatures. `http` remains an
 explicit diagnostic mode, but is not the production detail path. A verification
-page fails with a typed risk-control error and never silently calls MXNZP.
+page fails with a typed risk-control error.
 
 Alibaba Cloud Model Studio documents both the synchronous OpenAI-compatible
 Qwen3-ASR request and the asynchronous submit/poll flow for file transcription.

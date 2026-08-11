@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from ..store import Store
-from .douyin_login_cookie import login_and_fetch_douyin_cookie
 from .eligibility import evaluate_material_eligibility, is_material_eligible
 from .mock_tools import build_mock_source_registry
 from .douyin.contracts import DouyinProvider
-from .douyin.factory import build_collection_provider, load_local_env
+from .douyin.factory import build_collection_provider
 from .douyin.registry import build_douyin_registry
 from .runner import (
     CollectionConfig,
@@ -200,7 +198,6 @@ class CollectionTaskOrchestrator:
         max_pages: int = 0,
         sort_type: int = 1,
         skip_expand: bool = False,
-        login_cookie: bool = False,
         no_cache: bool = False,
         refresh_existing_understanding: bool = False,
         understanding_provider: str = TARGET_UNDERSTANDING_PROVIDER,
@@ -272,7 +269,6 @@ class CollectionTaskOrchestrator:
                     data_provider=data_provider,
                     transcription_provider=transcription_provider,
                     allow_paid_fallback=allow_paid_fallback,
-                    login_cookie=login_cookie,
                 )
                 expand_summary = self._expand_author_videos(
                     client,
@@ -357,7 +353,6 @@ class CollectionTaskOrchestrator:
         max_pages: int = 0,
         sort_type: int = 1,
         skip_expand: bool = False,
-        login_cookie: bool = False,
         no_cache: bool = False,
         dry_run: bool = False,
         understanding_provider: str = TARGET_UNDERSTANDING_PROVIDER,
@@ -415,7 +410,6 @@ class CollectionTaskOrchestrator:
                     max_pages=max_pages,
                     sort_type=sort_type,
                     skip_expand=skip_expand,
-                    login_cookie=login_cookie,
                     no_cache=no_cache,
                     understanding_provider=understanding_provider,
                     understanding_model=understanding_model,
@@ -579,14 +573,7 @@ class CollectionTaskOrchestrator:
         data_provider: str,
         transcription_provider: str,
         allow_paid_fallback: bool,
-        login_cookie: bool,
     ) -> DouyinProvider:
-        load_local_env()
-        if login_cookie and not os.environ.get("DOUYIN_COOKIE", "").strip():
-            login_result = login_and_fetch_douyin_cookie()
-            if not login_result.cookie_valid:
-                raise RuntimeError(login_result.error or "failed to fetch a valid logged-in Douyin cookie")
-            os.environ["DOUYIN_COOKIE"] = login_result.cookie
         return build_collection_provider(
             data_provider,
             transcription_provider_name=transcription_provider,
@@ -859,7 +846,6 @@ class CollectionTaskOrchestrator:
                 data_provider=data_provider,
                 transcription_provider=transcription_provider,
                 allow_paid_fallback=allow_paid_fallback,
-                login_cookie=False,
             )
             try:
                 detail_result = self._call_provider(

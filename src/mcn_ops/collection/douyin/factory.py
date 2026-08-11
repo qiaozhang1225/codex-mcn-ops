@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ..mxnzp_client import MxnzpConfig, MxnzpDouyinProClient
 from ..transcription.aliyun import AliyunTranscriptionConfig, AliyunTranscriptionProvider
 from ..transcription.service import DouyinTranscriptionService
 from ..transcription.sqlite_cache import SqliteTranscriptionCache
@@ -11,7 +10,6 @@ from .browser_session import BrowserSessionConfig, BrowserSessionDouyinClient
 from .contracts import DouyinProvider, TranscriptionProvider
 from .direct import DirectDouyinClient, DirectDouyinConfig
 from .errors import ProviderConfigError
-from .router import ProviderRouter
 
 
 class TranscribingDouyinProvider:
@@ -72,21 +70,11 @@ def build_data_provider(
     allow_paid_fallback: bool = False,
 ) -> DouyinProvider:
     load_local_env()
+    if allow_paid_fallback:
+        raise ProviderConfigError("paid provider fallback has been removed")
     provider_name = name.strip().lower()
     if provider_name == "direct":
         return _build_direct_provider()
-    if provider_name == "mxnzp":
-        return MxnzpDouyinProClient(MxnzpConfig.from_env())
-    if provider_name == "auto":
-        direct = _build_direct_provider()
-        mxnzp = None
-        if allow_paid_fallback:
-            mxnzp = MxnzpDouyinProClient(MxnzpConfig.from_env())
-        return ProviderRouter(
-            direct=direct,
-            mxnzp=mxnzp,
-            allow_paid_fallback=allow_paid_fallback,
-        )
     raise ProviderConfigError(f"unsupported Douyin provider: {name}")
 
 
@@ -112,7 +100,7 @@ def build_transcription_provider(
 def build_collection_provider(
     data_provider_name: str,
     *,
-    transcription_provider_name: str = "provider",
+    transcription_provider_name: str = "aliyun",
     allow_paid_fallback: bool = False,
 ) -> DouyinProvider:
     data_provider = build_data_provider(
