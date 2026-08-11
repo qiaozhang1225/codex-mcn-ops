@@ -56,6 +56,7 @@ from .creation import (
     run_creation_stage,
 )
 from .feishu import build_publish_job_payload, write_payload
+from .migrations import migrate_collection_schema_v3
 from .publisher import PublishRunner
 from .report import build_daily_report
 from .store import DEFAULT_DB_PATH, Store, loads
@@ -79,6 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init-db", help="Initialize the SQLite ledger")
+
+    db_parser = subparsers.add_parser("db", help="Database validation and explicit migrations")
+    db_sub = db_parser.add_subparsers(dest="db_command", required=True)
+    db_migrate_v3 = db_sub.add_parser(
+        "migrate-collection-schema-v3",
+        help="Rebuild the collection schema in a validated database copy",
+    )
+    db_migrate_v3.add_argument("--destination")
+    db_migrate_v3.add_argument("--replace", action="store_true")
+    db_migrate_v3.add_argument("--recovery-path")
+    db_migrate_v3.add_argument("--json", action="store_true")
 
     adb_parser = subparsers.add_parser("adb", help="ADB device utilities")
     adb_sub = adb_parser.add_subparsers(dest="adb_command", required=True)
@@ -255,8 +267,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_keyword.add_argument("--related-keyword", action="append", default=[])
     task_keyword.add_argument("--role-id")
     task_keyword.add_argument("--role-name")
-    task_keyword.add_argument("--tool-provider", choices=["mock", "mxnzp", "direct", "auto"], default="mock")
-    task_keyword.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_keyword.add_argument(
+        "--data-provider",
+        "--tool-provider",
+        dest="data_provider",
+        choices=["mock", "mxnzp", "direct", "auto"],
+        default="direct",
+    )
+    task_keyword.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
     task_keyword.add_argument("--allow-paid-fallback", action="store_true")
     task_keyword.add_argument("--like-floor", type=int, default=10000)
     task_keyword.add_argument("--min-duration-seconds", type=int, default=20)
@@ -284,7 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_author.add_argument("--no-cache", action="store_true")
     task_author.add_argument("--json", action="store_true")
     task_author.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
-    task_author.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_author.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
     task_author.add_argument("--allow-paid-fallback", action="store_true")
 
     task_discover = task_sub.add_parser("discover-authors", help="Discover source authors from the database and collect their viral works")
@@ -304,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_discover.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_discover.add_argument("--json", action="store_true")
     task_discover.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
-    task_discover.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    task_discover.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
     task_discover.add_argument("--allow-paid-fallback", action="store_true")
 
     task_show = task_sub.add_parser("show", help="Show a collection task summary")
@@ -363,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     author_materialize.add_argument("--no-cache", action="store_true")
     author_materialize.add_argument("--json", action="store_true")
     author_materialize.add_argument("--data-provider", choices=["mxnzp", "direct", "auto"], default="direct")
-    author_materialize.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    author_materialize.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
     author_materialize.add_argument("--allow-paid-fallback", action="store_true")
 
     role = collect_sub.add_parser("role", help="Manage IP role profiles")
@@ -413,8 +431,14 @@ def build_parser() -> argparse.ArgumentParser:
     collect_run.add_argument("--super-like-threshold", type=int, default=100000)
     collect_run.add_argument("--min-duration-seconds", type=int, default=20)
     collect_run.add_argument("--max-duration-seconds", type=int, default=300)
-    collect_run.add_argument("--tool-provider", choices=["mock", "mxnzp", "direct", "auto"], default="mock")
-    collect_run.add_argument("--transcription-provider", choices=["provider", "aliyun"], default="provider")
+    collect_run.add_argument(
+        "--data-provider",
+        "--tool-provider",
+        dest="data_provider",
+        choices=["mock", "mxnzp", "direct", "auto"],
+        default="direct",
+    )
+    collect_run.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
     collect_run.add_argument("--allow-paid-fallback", action="store_true")
     collect_run.add_argument("--max-search-pages", type=int, default=3)
     collect_run.add_argument("--page-size", type=int, default=5)
@@ -913,7 +937,7 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
     if args.collect_command == "run":
         role_profile = store.get_ip_role(args.role_id) if args.role_id else None
         tools = _build_collection_tools(
-            args.tool_provider,
+            args.data_provider,
             transcription_provider=args.transcription_provider,
             allow_paid_fallback=args.allow_paid_fallback,
         )
@@ -926,7 +950,7 @@ def handle_collect(args: argparse.Namespace, store: Store) -> int:
                 super_like_threshold=args.super_like_threshold,
                 min_duration_seconds=args.min_duration_seconds,
                 max_duration_seconds=args.max_duration_seconds,
-                tool_provider=args.tool_provider,
+                tool_provider=args.data_provider,
                 max_search_pages=args.max_search_pages,
                 page_size=args.page_size,
                 role_id=args.role_id,
@@ -1140,7 +1164,7 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             topic=args.topic,
             target_count=args.target_count,
             policy=_collection_policy_from_args(args),
-            tool_provider=args.tool_provider,
+            tool_provider=args.data_provider,
             transcription_provider=args.transcription_provider,
             allow_paid_fallback=args.allow_paid_fallback,
             keywords=args.keyword,
@@ -1989,6 +2013,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init-db":
             return handle_init_db(store)
+        if args.command == "db":
+            if args.db_command != "migrate-collection-schema-v3":
+                raise ValueError(args.db_command)
+            report = migrate_collection_schema_v3(
+                Path(args.db_path),
+                Path(args.destination) if args.destination else None,
+                replace=args.replace,
+                recovery_path=Path(args.recovery_path) if args.recovery_path else None,
+            )
+            if args.json:
+                json_print(report)
+            else:
+                print(json.dumps(report, ensure_ascii=False))
+            return 0
         if args.command == "adb":
             return handle_adb(args)
         if args.command == "content":
@@ -2047,7 +2085,7 @@ def _infer_creation_from_content(store: Store, content_id: str) -> dict[str, str
 def _build_collection_tools(
     provider: str,
     *,
-    transcription_provider: str = "provider",
+    transcription_provider: str = "aliyun",
     allow_paid_fallback: bool = False,
 ):
     if provider in {"mxnzp", "direct", "auto"}:

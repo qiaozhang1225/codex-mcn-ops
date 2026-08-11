@@ -19,9 +19,86 @@ from mcn_ops.migrations.collection_schema_v3 import (
 from mcn_ops.store import SCHEMA
 
 
+LEGACY_COLLECTION_SCHEMA_FOR_TEST = """
+CREATE TABLE douyin_authors (
+    sec_uid TEXT PRIMARY KEY,
+    uid TEXT,
+    douyin_id TEXT,
+    nickname TEXT NOT NULL,
+    signature TEXT,
+    avatar_url TEXT,
+    profile_url TEXT,
+    ip_location TEXT,
+    follower_count INTEGER,
+    following_count INTEGER,
+    aweme_count INTEGER,
+    total_favorited INTEGER,
+    source_material_id TEXT,
+    source_work_id TEXT,
+    fetched_at TEXT NOT NULL,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE douyin_author_videos (
+    id TEXT PRIMARY KEY,
+    author_sec_uid TEXT NOT NULL,
+    work_id TEXT NOT NULL,
+    source_material_id TEXT,
+    source_url TEXT,
+    title TEXT,
+    platform_caption TEXT,
+    caption_text TEXT,
+    hashtags_json TEXT NOT NULL DEFAULT '[]',
+    post_time TEXT,
+    duration_ms INTEGER,
+    cover_url TEXT,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    source_package_json TEXT NOT NULL DEFAULT '{}',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(author_sec_uid, work_id)
+);
+CREATE TABLE mxnzp_call_logs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    provider TEXT NOT NULL DEFAULT 'mxnzp',
+    tool_name TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    duration_ms INTEGER NOT NULL,
+    cache_hit INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE mxnzp_call_cache (
+    request_fingerprint TEXT PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'mxnzp',
+    tool_name TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
 def _make_legacy_db(path: Path, *, unresolved: bool = False) -> None:
     with sqlite3.connect(path) as conn:
         conn.executescript(SCHEMA)
+        conn.executescript(
+            """
+            DROP TABLE material_transcriptions;
+            DROP TABLE source_observations;
+            DROP TABLE source_works;
+            DROP TABLE source_authors;
+            DROP TABLE provider_call_logs;
+            DROP TABLE provider_call_cache;
+            DROP TABLE schema_migrations;
+            """
+        )
+        conn.executescript(LEGACY_COLLECTION_SCHEMA_FOR_TEST)
         conn.execute(
             """
             INSERT INTO collection_runs(
