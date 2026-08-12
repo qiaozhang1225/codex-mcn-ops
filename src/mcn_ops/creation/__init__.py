@@ -14,6 +14,7 @@ from .workflow import (
     generate_learning_update_proposals,
     run_creation_stage,
 )
+from .stage_io import prepare_creation_stage, submit_creation_stage
 
 __all__ = [
     "CREATION_STAGES",
@@ -28,4 +29,6 @@ __all__ = [
     "format_creation_task_report_markdown",
     "generate_learning_update_proposals",
     "run_creation_stage",
+    "prepare_creation_stage",
+    "submit_creation_stage",
 ]

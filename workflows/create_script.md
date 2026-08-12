@@ -2,128 +2,109 @@
 
 ## Intent
 
-Generate publish-ready five-part oral script copy from accepted collected materials, a confirmed IP persona, and the evolving Markdown creation knowledge pack.
+Generate publish-ready oral script copy from accepted materials, a confirmed IP persona, common and domain rules, IP professional knowledge, and the evolving creation knowledge pack.
 
-This workflow does not replace material collection. It starts after material understanding and role matching have produced a usable source-material pool.
+This workflow starts after material collection, transcription, understanding, and eligibility review have produced a usable source pool.
 
 ## Inputs
 
 - confirmed `ip_roles` profile and `persona_packet_json`
 - `collected_materials.status='collected'`
 - `collected_materials.eligibility_status='accepted'`
-- promoted material understanding columns
-- global creation knowledge files under `knowledge/creation/`
-- IP-specific creation knowledge files under `knowledge/ip/<role_slug>/`
-- target topic, goal, platform, and target material count
+- promoted material understanding and complete transcript text
+- global rules under `knowledge/creation/`
+- common and selected domain rules under `knowledge/domains/`
+- IP files under `knowledge/ip/<role_slug>/`
+- target topic, goal, platform, and material count
 
-## Stages
+## Formal Agent Workflow
 
-Run and confirm stages in order:
+Create a task and validate the IP knowledge pack:
 
 ```bash
 mcn create task new \
   --role-id role_xxxxxxxxxxxx \
   --topic 财运 \
-  --goal "生成一条知识型五段式口播" \
+  --goal "生成一条知识型口播" \
   --platform douyin \
-  --target-count 3
+  --target-count 1
 
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage material_selection
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage material_selection
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage creation_brief
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage creation_brief
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage rewrite_draft
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage rewrite_draft
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage hook_enhancement
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage hook_enhancement
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage risk_cleanup
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage risk_cleanup
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage publish_format
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage publish_format
-
-mcn create task export --task-id createtask_xxxxxxxxxxxx --output data/creation-task.md
+mcn create knowledge validate --role-id role_xxxxxxxxxxxx --json
 ```
 
-Use `mcn create task retry --stage ... --note "..."` when a stage needs revision. Retry keeps the previous version and writes a new `creation_stage_runs.version`.
+For each stage, prepare a packet, let Codex produce one JSON result matching `response_template`, submit it, inspect both validation reports, and confirm only a passing result:
+
+```bash
+mcn create stage prepare \
+  --task-id createtask_xxxxxxxxxxxx \
+  --stage material_selection \
+  --output /tmp/material-selection-packet.json
+
+mcn create stage submit \
+  --task-id createtask_xxxxxxxxxxxx \
+  --stage material_selection \
+  --input /tmp/material-selection-result.json \
+  --json
+
+mcn create task confirm \
+  --task-id createtask_xxxxxxxxxxxx \
+  --stage material_selection
+```
+
+Run stages in order:
+
+1. `material_selection`
+2. `creation_brief`
+3. `rewrite_draft`
+4. `hook_enhancement`
+5. `risk_cleanup`
+6. `publish_format`
+7. `delivery`
+
+A corrected submission writes a new `creation_stage_runs.version` and preserves the previous result. `mcn create task run` is a deterministic `rules-fallback` path for regression tests and emergency drafts; it is not formal `codex-agent` output.
 
 ## Material Selection
 
-`material_selection` reads only accepted formal materials. It does not select broad candidates, rejected materials, missing transcript rows, or materials already used by the same IP role unless `--allow-reuse-material` is set at task creation.
+Preparation is read-only. It ranks eligible candidates and includes complete transcript text without persisting a selection. Submission records:
 
-Selection ranking uses:
+- source content task and hook mechanism;
+- speaker position and thickness judgment;
+- `formal_rewrite_base` or `topic_clue`;
+- `aligned`, `acceptable_variance`, `repairable_conflict`, or `hard_conflict`;
+- exact conflicting claim, disposition, weaknesses, and maximum salvage boundary.
 
-- role-match score from `material_role_matches`
-- topic hit in promoted material understanding fields
-- role keywords and fit themes
-- knowledge-core score
+`topic_clue` and `hard_conflict` cannot advance as standard adaptation. A repairable conflict must preserve the source task, hook mechanism, and evidence path after local correction.
 
-After selecting materials, the stage also writes source analysis:
+## Creation Modes And Professional Support
 
-- original or corrected source hook
-- viral reasoning
-- authority frame
-- must-keep source elements
-- discard elements
-- ASR corrections such as `挂失 -> 卦师`
+`creation_brief` selects:
 
-`rewrite_draft` must use this analysis. A draft is marked `needs_retry` when the source content task or propagation mechanism is lost without reason, an incompatible speaker perspective is fabricated, the task-specific length guardrail is broken without justification, or the body no longer fulfils the opening.
+- `adaptation`: the source provides the main claim, evidence path, and structure;
+- `half_original`: IP knowledge supplies a material part of the argument;
+- `original`: the source is not the drafting spine.
+
+Professional support uses `none`, `guardrail_only`, or `one_support_point`. Standard adaptation may cite at most one professional card. Every added professional claim must carry a valid knowledge card ID.
 
 ## Knowledge Packet
 
-Audit the exact context with:
+Audit context with:
 
 ```bash
 mcn create knowledge packet --task-id createtask_xxxxxxxxxxxx --json
 ```
 
-The packet includes persona, global playbooks, IP playbooks, selected material understanding, and the current task brief. It does not include full transcripts by default.
+Stage packets contain only the knowledge required for that stage: persona, global playbooks, common and selected domain playbooks, IP playbook, professional cards, recent memory, feedback, selected material understanding, upstream outputs, task brief, and output contract. Full transcripts are included for selection, brief, and rewrite stages.
 
-The packet also includes rewrite requirements, source analysis, and recent stage feedback. This is what keeps human correction notes available during retry without putting the full raw transcript into every prompt.
+## Output And Learning
 
-For `rewrite_draft`, `knowledge/creation/global-rewrite-playbook.md` is the cross-IP methodology. It preserves content task, propagation mechanism, speaker credibility, internal logic, and stage boundaries without prescribing a fixed script structure. IP-specific playbooks should contain only genuine role differences.
+`publish_format` creates a `content_packages` draft, `material_creations` links, and a `creation_delivery_packages` record. `final_copy` must equal the confirmed risk-cleaned body.
 
-## Output
-
-`publish_format` creates:
-
-- a `content_packages` draft
-- `material_creations` rows linking selected materials to this IP and content package
-- a `creation_delivery_packages` row with the five-part publish structure
-
-## Feedback Learning
-
-After publication, add lightweight feedback:
+Record pre-publish and post-publish feedback separately. Generate learning proposals, but apply them only after explicit review:
 
 ```bash
-mcn create feedback add \
-  --content-id cpkg_xxxxxxxxxxxx \
-  --platform douyin \
-  --metrics-json '{"likes":1200,"comments":35,"shares":18}' \
-  --human-note "开头有效，但财运表达略重"
+mcn create feedback add --task-id createtask_xxx --role-id role_xxx --stage rewrite_draft --platform douyin --judgment rejected --human-note "开头变弱"
+mcn create learning propose --role-id role_xxx
+mcn create learning apply --proposal-id clearn_xxx
 ```
 
-Before publication, add stage feedback when a draft or hook needs revision:
-
-```bash
-mcn create feedback add \
-  --task-id createtask_xxxxxxxxxxxx \
-  --role-id role_xxxxxxxxxxxx \
-  --stage rewrite_draft \
-  --platform douyin \
-  --judgment rejected \
-  --human-note "开头变弱、字数太长、太像讲大道理"
-```
-
-Generate but do not automatically apply learning:
-
-```bash
-mcn create learning propose --role-id role_xxxxxxxxxxxx
-mcn create learning apply --proposal-id clearn_xxxxxxxxxxxx
-```
-
-This keeps SQLite as the event/audit source and Markdown as the human-readable creation knowledge source.
+SQLite remains the audit source; Markdown and professional cards remain the human-readable knowledge source.

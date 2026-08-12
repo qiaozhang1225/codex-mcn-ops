@@ -80,7 +80,9 @@ Creation separates process state from final publish content:
 - `risk_term_observations`: high-risk replacements, edge-term observations, and word-level experiments.
 - `creation_learning_updates`: proposed Markdown knowledge-pack updates. They stay `pending` until explicitly applied.
 
-Creation tasks use `material_selection` to produce source analysis before rewriting. Source analysis extracts the original hook, viral reasoning, authority frame, keep/discard elements, and ASR corrections. `rewrite_draft` must read that analysis, the global creation playbook, the target IP persona packet, the IP-specific playbook, task requirements, and stage feedback. Douyin short oral drafts default to 250-350 Chinese characters unless the task or IP profile overrides the range.
+Formal creation uses a two-step agent interface. `create stage prepare` builds a read-only context packet with stage knowledge, complete source text where required, and a response contract. Codex performs semantic judgment or writing, then `create stage submit` validates and persists the result. The deterministic `create task run` path records `rules-fallback/deterministic-v1` and is not formal agent output.
+
+`material_selection` records source task, propagation mechanism, thickness, professional alignment, disposition, and salvage boundary. `topic_clue` and `hard_conflict` cannot advance as standard adaptation. `rewrite_draft` must return source mapping and trace every added professional claim to a card ID.
 
 IP role confirmation status:
 
@@ -249,7 +251,11 @@ Creation context is assembled from:
 - `knowledge/creation/global-rewrite-playbook.md`
 - `knowledge/creation/global-risk-lexicon.md`
 - `knowledge/creation/hook-playbook.md`
+- `knowledge/domains/common/playbook.md`
+- `knowledge/domains/<domain_pack>/playbook.md`
+- `knowledge/ip/<role_slug>/role-profile.json`
 - `knowledge/ip/<role_slug>/creation-playbook.md`
+- `knowledge/ip/<role_slug>/professional-knowledge.yaml`
 - `knowledge/ip/<role_slug>/feedback-learnings.md`
 - `knowledge/ip/<role_slug>/recent-creation-memory.md`
 - promoted material understanding fields for selected materials

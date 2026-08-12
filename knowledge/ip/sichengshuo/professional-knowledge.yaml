@@ -1,0 +1,46 @@
+[
+  {
+    "id": "sicheng_professional_concept_001",
+    "claim": "玄学专业知识拆解应以具体概念及其内部关系为知识对象，而不是只借一个术语讲泛人生道理。",
+    "functions": ["classification_boundary", "content_support"],
+    "applicable_scenes": ["四柱概念", "神煞", "十神", "五行关系"],
+    "not_applicable_when": ["源素材本身是现实处境和人际判断"],
+    "evidence_level": "ip_stable_position",
+    "usable_support": ["用一个普通观众可核对的单点解释复杂概念"],
+    "risk_note": "不把专业概念改写成确定性命运承诺。",
+    "sources": ["思丞说 Creation Playbook"]
+  },
+  {
+    "id": "sicheng_tianyi_guiren_002",
+    "claim": "天乙贵人属于玄学专业知识拆解，不等同于泛现实贵人人际建议。",
+    "functions": ["classification_boundary", "conflict_guardrail"],
+    "applicable_scenes": ["天乙贵人", "神煞", "四柱专业知识"],
+    "not_applicable_when": ["讨论现实中如何获得帮助"],
+    "evidence_level": "ip_stable_position",
+    "usable_support": ["区分专业概念的核对逻辑与现实人际行动"],
+    "risk_note": "不承诺因为存在某个神煞就必然遇到贵人。",
+    "sources": ["思丞说 Creation Playbook"]
+  },
+  {
+    "id": "sicheng_metaphysics_to_reality_003",
+    "claim": "玄学词汇可以保留领域意义，但正文应让观众看见它与现实处境和选择的联系。",
+    "functions": ["explanation_support", "audience_translation"],
+    "applicable_scenes": ["财运", "事业", "磁场", "贵人", "命理"],
+    "not_applicable_when": ["解释专业概念时现实类比会歪曲概念"],
+    "evidence_level": "ip_stable_position",
+    "usable_support": ["连接机会、判断、关系、行动和现实损失"],
+    "risk_note": "不能把每条专业内容都改成通用生活清单。",
+    "sources": ["思丞说 Creation Playbook"]
+  },
+  {
+    "id": "sicheng_no_outcome_guarantee_004",
+    "claim": "可以讨论财运、事业、命理和磁场，但不能保证发财、改命、转运或即时见效。",
+    "functions": ["risk_boundary", "claim_qualification"],
+    "applicable_scenes": ["结果承诺", "咨询转化", "强钩子"],
+    "not_applicable_when": [],
+    "evidence_level": "platform_and_ip_boundary",
+    "usable_support": ["把确定结果改为条件、趋势或可观察行动"],
+    "risk_note": "风险清理应局部处理承诺，不删除整条内容的立场和张力。",
+    "sources": ["思丞说 Creation Playbook", "Traditional Culture And Metaphysics Domain Playbook"]
+  }
+]

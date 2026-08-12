@@ -766,6 +766,35 @@ def test_cli_create_task_selects_material_and_builds_packet(tmp_path: Path, caps
     )
     task_id = _read_json(capsys)["task"]["id"]
 
+    packet_path = tmp_path / "material-selection-packet.json"
+    assert (
+        main(
+            [
+                "--db-path",
+                str(db_path),
+                "create",
+                "stage",
+                "prepare",
+                "--task-id",
+                task_id,
+                "--stage",
+                "material_selection",
+                "--knowledge-root",
+                str(tmp_path / "knowledge"),
+                "--output",
+                str(packet_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    prepared = _read_json(capsys)
+    assert prepared["file"] == str(packet_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["candidate_materials"][0]["id"] == material_id
+    assert packet["candidate_materials"][0]["transcript_text"].startswith("一个人发财前")
+    assert store.list_creation_material_selections(task_id) == []
+
     assert (
         main(
             [

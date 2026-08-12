@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 from ..store import Store
+from .knowledge import load_professional_knowledge, load_role_knowledge_config
 
 
 DEFAULT_CREATION_PROVIDER = "codex-agent"
 DEFAULT_CREATION_MODEL = "gpt-5.5"
+RULES_FALLBACK_PROVIDER = "rules-fallback"
+RULES_FALLBACK_MODEL = "deterministic-v1"
 DRAFT_LOCAL_CREATION_STATUS = "draft_local_creation"
 CREATION_METHODOLOGY_VERSION = "creation-methodology-v2"
 CREATION_STAGE_CONTRACT_VERSION = "creation-stage-contract-v1"
@@ -35,11 +39,11 @@ VIEWER_COPY_OUTPUT_KEYS = {
 }
 
 STAGE_KNOWLEDGE_KEYS = {
-    "material_selection": ["material_selection_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
-    "creation_brief": ["creation_brief_playbook", "global_rewrite_playbook", "ip_creation_playbook", "ip_recent_creation_memory", "ip_feedback_learnings"],
-    "rewrite_draft": ["global_rewrite_playbook", "ip_creation_playbook", "ip_recent_creation_memory", "ip_feedback_learnings"],
+    "material_selection": ["material_selection_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_role_profile", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory"],
+    "creation_brief": ["creation_brief_playbook", "global_rewrite_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory", "ip_feedback_learnings"],
+    "rewrite_draft": ["global_rewrite_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory", "ip_feedback_learnings"],
     "hook_enhancement": ["hook_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
-    "risk_cleanup": ["global_risk_lexicon", "risk_cleanup_playbook", "ip_feedback_learnings"],
+    "risk_cleanup": ["global_risk_lexicon", "risk_cleanup_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_professional_knowledge", "ip_feedback_learnings"],
     "publish_format": ["publish_format_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
     "delivery": ["publish_format_playbook"],
 }
@@ -350,14 +354,16 @@ def run_creation_stage(
     else:
         output, markdown = _run_delivery(store, task)
     upstream_stage_run_ids = _upstream_stage_run_ids(store, task_id, stage_key)
+    output["creation_mode"] = "rules_fallback_v1"
+    output["formal_agent_output"] = False
     output = _attach_stage_contract(store, task, stage_key, output, upstream_stage_run_ids)
     status = str(output.get("status") or "needs_confirmation")
     stage_run_id = store.insert_creation_stage_run(
         task_id=task_id,
         stage_key=stage_key,
         status=status,
-        provider=str(task.get("provider") or DEFAULT_CREATION_PROVIDER),
-        model=str(task.get("model") or DEFAULT_CREATION_MODEL),
+        provider=RULES_FALLBACK_PROVIDER,
+        model=RULES_FALLBACK_MODEL,
         input_data={
             "task_id": task_id,
             "stage_key": stage_key,
@@ -410,6 +416,8 @@ def build_creation_context_packet(
     role = _confirmed_role(store, str(task["role_id"]))
     all_knowledge_files = ensure_knowledge_pack(knowledge_root, role)
     knowledge_files = _knowledge_files_for_stage(all_knowledge_files, stage_key)
+    knowledge_config = load_role_knowledge_config(knowledge_root, role)
+    professional_cards = load_professional_knowledge(Path(all_knowledge_files["ip_professional_knowledge"]))
     selected = _selected_materials(store, task_id)
     selection_output = _latest_output(store, task_id, "material_selection")
     source_analysis = selection_output.get("source_analysis") or {}
@@ -438,6 +446,12 @@ def build_creation_context_packet(
         "persona_packet": role.get("persona_packet") or {},
         "knowledge_files": knowledge_files,
         "knowledge": {key: Path(path).read_text(encoding="utf-8") for key, path in knowledge_files.items()},
+        "knowledge_config": {
+            "role_slug": knowledge_config["role_slug"],
+            "domain_pack": knowledge_config["domain_pack"],
+            "professional_alignment_enabled": knowledge_config["professional_alignment_enabled"],
+        },
+        "professional_knowledge_cards": professional_cards,
         "selected_materials": materials,
         "source_analysis": source_analysis,
         "brief": _latest_output(store, task_id, "creation_brief").get("brief") or {},
@@ -590,7 +604,13 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
     elif stage_key == "rewrite_draft":
         draft_text = str(output.get("draft_text") or (output.get("draft") or {}).get("draft_text") or "")
         opening = ((output.get("quality_checks") or {}).get("opening_preservation") or {})
-        checks["opening_preserved"] = {"passed": bool(opening.get("passed")), "mode": opening.get("mode")}
+        if output.get("creation_mode") == "codex_stage_submission_v1":
+            checks["opening_preserved"] = {
+                "passed": output.get("source_hook_mechanism_preserved") is True,
+                "mode": "agent_source_mapping",
+            }
+        else:
+            checks["opening_preserved"] = {"passed": bool(opening.get("passed")), "mode": opening.get("mode")}
         checks["no_cleanup_outputs"] = {
             "passed": not any(key in output for key in ["high_risk_replacements", "risk_replacement_scope"]),
             "forbidden_keys": [key for key in ["high_risk_replacements", "risk_replacement_scope"] if key in output],
@@ -599,8 +619,16 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
         checks["risk_replacement_not_done"] = {"passed": not leaked, "leaked_replacements": leaked}
     elif stage_key == "hook_enhancement":
         hook_validation = output.get("validation") or {}
+        formal_submission = output.get("creation_mode") == "codex_stage_submission_v1"
         checks["minimal_hook_diff"] = {
-            "passed": bool(hook_validation.get("passed")) and output.get("hook_diff_type") != "replaced",
+            "passed": (
+                output.get("mechanism_preserved") is True
+                and (
+                    output.get("hook_diff_type") != "replaced"
+                    or (formal_submission and bool(str(output.get("incompatibility_reason") or "").strip()))
+                )
+                and (formal_submission or bool(hook_validation.get("passed")))
+            ),
             "hook_diff_type": output.get("hook_diff_type"),
             "mechanism_preserved": output.get("mechanism_preserved"),
         }
@@ -618,10 +646,12 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
             "final_copy_hash": _content_hash(final_copy) if final_copy else "",
             "risk_cleaned_hash": _content_hash(cleaned_body) if cleaned_body else "",
         }
-        checks["has_publish_fields"] = {
-            "passed": all(package.get(key) for key in ["cover_title_4", "video_title_18", "description_100", "pinned_comment", "final_copy"]),
-            "missing": [key for key in ["cover_title_4", "video_title_18", "description_100", "pinned_comment", "final_copy"] if not package.get(key)],
-        }
+        description_key = "video_description" if "video_description" in package else "description_100"
+        required_nonempty = ["cover_title_4", "video_title_18", description_key, "final_copy"]
+        missing = [key for key in required_nonempty if not package.get(key)]
+        if "pinned_comment" not in package:
+            missing.append("pinned_comment")
+        checks["has_publish_fields"] = {"passed": not missing, "missing": missing}
     else:
         checks["delivery_only"] = {"passed": "delivery_markdown" in output}
     passed = all(check.get("passed") for check in checks.values())
@@ -719,7 +749,9 @@ def apply_learning_update(store: Store, update_id: str) -> dict[str, Any]:
 
 
 def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
-    role_slug = _role_slug(role)
+    knowledge_config = load_role_knowledge_config(root, role)
+    role_slug = knowledge_config["role_slug"]
+    domain_pack = knowledge_config["domain_pack"]
     files = {
         "material_selection_playbook": root / "creation" / "material-selection-playbook.md",
         "creation_brief_playbook": root / "creation" / "creation-brief-playbook.md",
@@ -728,7 +760,11 @@ def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
         "risk_cleanup_playbook": root / "creation" / "risk-cleanup-playbook.md",
         "hook_playbook": root / "creation" / "hook-playbook.md",
         "publish_format_playbook": root / "creation" / "publish-format-playbook.md",
+        "domain_common_playbook": root / "domains" / "common" / "playbook.md",
+        "domain_specific_playbook": root / "domains" / domain_pack / "playbook.md",
+        "ip_role_profile": root / "ip" / role_slug / "role-profile.json",
         "ip_creation_playbook": root / "ip" / role_slug / "creation-playbook.md",
+        "ip_professional_knowledge": root / "ip" / role_slug / "professional-knowledge.yaml",
         "ip_feedback_learnings": root / "ip" / role_slug / "feedback-learnings.md",
         "ip_recent_creation_memory": root / "ip" / role_slug / "recent-creation-memory.md",
     }
@@ -740,7 +776,11 @@ def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
         "risk_cleanup_playbook": "# Risk Cleanup Playbook\n\n- 只处理超高风险表达，且只替换命中的短语。\n- 不重写整句，不改变钩子机制，不把风险软化成解释性降温。\n- 原文案携带的财运、命运、贵人、磁场、能量、福报等语境词默认记录观察。\n- 如果风险词位于开头，只替换风险短语，保留原开头的主体、数量钩子、节奏和情绪力度。\n- 风险表达同时承载核心态度时，先用主体、对象、条件或场景限定其含义；只有限定后仍不可发布，才删除立场本身。\n",
         "hook_playbook": "# Hook Playbook\n\n- 保护原钩子的传播任务和强度，不以改动幅度衡量二创质量。\n- 原说话者与目标 IP 兼容时优先保留；不兼容时做 `perspective_translation`，重建可信入口而不是照搬身份。\n- 反感、异议或反常识可能就是留人机制，不要在开头主动消解。\n- 通过 strength parity 检查冲突、具体性、受众入口、态度强度和继续观看理由。\n- 当留人机制是鲜明立场时，不能用警示、信息差或中性后果替换。\n- 本阶段不重写正文，也不承担风险清理。\n",
         "publish_format_playbook": "# Publish Format Playbook\n\n- 只根据 risk cleanup 后正文生成发布包装。\n- 输出四字封面标题、十八字视频标题、视频描述、置顶评论、最终可复制文案和正文字数。\n- 最终可复制文案必须等于 risk cleanup 后正文；不得在发布包装阶段重写正文逻辑。\n",
+        "domain_common_playbook": "# Common Domain Playbook\n\n- Separate observed source facts, IP opinion, professional experience, and externally verified fact.\n- Do not invent identity, cases, credentials, evidence, or guaranteed outcomes.\n- Preserve source propagation value only inside publishable and professionally defensible boundaries.\n",
+        "domain_specific_playbook": "# Domain Playbook\n\n- No domain-specific rules have been configured. Apply the common domain playbook and IP boundaries.\n",
+        "ip_role_profile": json.dumps({"name": role.get("name") or role_slug, "domain_pack": domain_pack, "professional_alignment_enabled": False}, ensure_ascii=False, indent=2) + "\n",
         "ip_creation_playbook": f"# {role.get('name') or role_slug} Creation Playbook\n\n- 只记录相对于全局规则真正不同的角色定位、受众张力、专业解释方式和禁区。\n- 不固化开头句式、正文组件、案例结构或 CTA 模板。\n",
+        "ip_professional_knowledge": "[]\n",
         "ip_feedback_learnings": f"# {role.get('name') or role_slug} Feedback Learnings\n\n- 发布后的作品层和词汇层反馈写在这里。\n",
         "ip_recent_creation_memory": f"# {role.get('name') or role_slug} Recent Creation Memory\n\n- 记录近期已写主题、论据和结构，避免重复。\n",
     }

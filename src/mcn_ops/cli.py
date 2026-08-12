@@ -47,8 +47,11 @@ from .creation import (
     export_creation_task_markdown,
     format_creation_task_report_markdown,
     generate_learning_update_proposals,
+    prepare_creation_stage,
     run_creation_stage,
+    submit_creation_stage,
 )
+from .creation.knowledge import validate_role_knowledge
 from .feishu import build_publish_job_payload, write_payload
 from .migrations import migrate_collection_schema_v3, migrate_material_inventory_v1
 from .publisher import PublishRunner
@@ -146,6 +149,24 @@ def build_parser() -> argparse.ArgumentParser:
     create_task_export.add_argument("--output")
     create_task_export.add_argument("--json", action="store_true")
 
+    create_stage = create_sub.add_parser("stage", help="Prepare or submit one agent-driven creation stage")
+    create_stage_sub = create_stage.add_subparsers(dest="create_stage_command", required=True)
+    create_stage_prepare = create_stage_sub.add_parser("prepare", help="Build the full context packet and output contract for one stage")
+    create_stage_prepare.add_argument("--task-id", required=True)
+    create_stage_prepare.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_stage_prepare.add_argument("--knowledge-root", default="knowledge")
+    create_stage_prepare.add_argument("--candidate-limit", type=int, default=20)
+    create_stage_prepare.add_argument("--output")
+    create_stage_prepare.add_argument("--json", action="store_true")
+    create_stage_submit = create_stage_sub.add_parser("submit", help="Validate and persist one agent-produced stage result")
+    create_stage_submit.add_argument("--task-id", required=True)
+    create_stage_submit.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_stage_submit.add_argument("--knowledge-root", default="knowledge")
+    create_stage_submit.add_argument("--input", required=True)
+    create_stage_submit.add_argument("--note", default="")
+    create_stage_submit.add_argument("--candidate-limit", type=int, default=20)
+    create_stage_submit.add_argument("--json", action="store_true")
+
     create_feedback = create_sub.add_parser("feedback", help="Record and analyze creation feedback")
     create_feedback_sub = create_feedback.add_subparsers(dest="create_feedback_command", required=True)
     create_feedback_add = create_feedback_sub.add_parser("add", help="Add one lightweight publish or stage feedback event")
@@ -180,6 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
     create_knowledge_packet.add_argument("--knowledge-root", default="knowledge")
     create_knowledge_packet.add_argument("--include-transcript", action="store_true")
     create_knowledge_packet.add_argument("--json", action="store_true")
+    create_knowledge_validate = create_knowledge_sub.add_parser("validate", help="Validate one IP's domain and professional knowledge pack")
+    create_knowledge_validate.add_argument("--role-id", required=True)
+    create_knowledge_validate.add_argument("--knowledge-root", default="knowledge")
+    create_knowledge_validate.add_argument("--json", action="store_true")
 
     collect_parser = subparsers.add_parser("collect", help="Material collection commands")
     collect_sub = collect_parser.add_subparsers(dest="collect_command", required=True)
@@ -657,6 +682,48 @@ def handle_create(args: argparse.Namespace, store: Store) -> int:
                 print(markdown, end="")
             return 0
 
+    if args.create_command == "stage":
+        if args.create_stage_command == "prepare":
+            packet = prepare_creation_stage(
+                store,
+                args.task_id,
+                stage_key=args.stage,
+                knowledge_root=Path(args.knowledge_root),
+                candidate_limit=args.candidate_limit,
+            )
+            if args.output:
+                output = Path(args.output)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                payload: Any = {"file": str(output), "task_id": args.task_id, "stage": args.stage}
+            else:
+                payload = packet
+            if args.json or args.output:
+                json_print(payload)
+            else:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.create_stage_command == "submit":
+            input_path = Path(args.input)
+            result = json.loads(input_path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                raise ValueError("stage submission file must contain one JSON object")
+            submitted = submit_creation_stage(
+                store,
+                args.task_id,
+                stage_key=args.stage,
+                result=result,
+                knowledge_root=Path(args.knowledge_root),
+                note=args.note,
+                candidate_limit=args.candidate_limit,
+            )
+            if args.json:
+                json_print(submitted)
+            else:
+                print(submitted["stage_run"]["id"])
+            return 0
+
     if args.create_command == "feedback":
         if args.create_feedback_command == "add":
             metrics = parse_json_object(args.metrics_json)
@@ -751,6 +818,17 @@ def handle_create(args: argparse.Namespace, store: Store) -> int:
                 json_print(packet)
             else:
                 print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.create_knowledge_command == "validate":
+            role = store.get_ip_role(args.role_id)
+            if not role:
+                raise KeyError(f"role not found: {args.role_id}")
+            report = validate_role_knowledge(Path(args.knowledge_root), role)
+            if args.json:
+                json_print(report)
+            else:
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
 
     raise ValueError(args.create_command)

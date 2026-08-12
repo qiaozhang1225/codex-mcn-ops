@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-mcn-ops.local/schemas/creation/stage-submission.schema.json",
+  "title": "Agent-driven creation stage submission",
+  "oneOf": [
+    { "$ref": "#/$defs/materialSelection" },
+    { "$ref": "#/$defs/creationBrief" },
+    { "$ref": "#/$defs/rewriteDraft" },
+    { "$ref": "#/$defs/hookEnhancement" },
+    { "$ref": "#/$defs/riskCleanup" },
+    { "$ref": "#/$defs/publishFormat" },
+    { "$ref": "#/$defs/delivery" }
+  ],
+  "$defs": {
+    "materialSelection": {
+      "type": "object",
+      "required": ["materials"],
+      "properties": {
+        "materials": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["material_id", "material_class", "source_content_task", "source_hook_mechanism", "speaker_position", "thickness_judgment", "professional_alignment", "professional_disposition", "salvage_boundary", "selection_rationale"],
+            "properties": {
+              "material_id": { "type": "string", "minLength": 1 },
+              "material_class": { "enum": ["formal_rewrite_base", "topic_clue"] },
+              "professional_alignment": { "enum": ["aligned", "acceptable_variance", "repairable_conflict", "hard_conflict"] },
+              "professional_disposition": { "enum": ["keep", "qualify", "replace_claim", "reclassify", "reject"] }
+            }
+          }
+        }
+      }
+    },
+    "creationBrief": {
+      "type": "object",
+      "required": ["adaptation_mode", "main_claim", "retention_mechanism", "must_keep_elements", "body_logic_plan", "professional_support_mode", "support_card_ids", "support_function", "target_gap", "risk_policy"],
+      "properties": {
+        "adaptation_mode": { "enum": ["adaptation", "half_original", "original"] },
+        "professional_support_mode": { "enum": ["none", "guardrail_only", "one_support_point"] },
+        "support_card_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rewriteDraft": {
+      "type": "object",
+      "required": ["draft_text", "source_content_task_preserved", "source_hook_mechanism_preserved", "source_evidence_path_preserved", "speaker_translation_valid", "new_claims", "source_mapping"]
+    },
+    "hookEnhancement": {
+      "type": "object",
+      "required": ["selected_hook", "body", "hook_diff_type", "mechanism_preserved"]
+    },
+    "riskCleanup": {
+      "type": "object",
+      "required": ["cleaned_body", "claim_risks", "risk_replacement_scope", "overall_risk"]
+    },
+    "publishFormat": {
+      "type": "object",
+      "required": ["publish_package"],
+      "properties": {
+        "publish_package": {
+          "type": "object",
+          "required": ["cover_title_4", "video_title_18", "video_description", "pinned_comment", "final_copy"]
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["delivery_markdown"]
+    }
+  }
+}
