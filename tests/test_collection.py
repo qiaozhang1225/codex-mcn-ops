@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from mcn_ops.collection.douyin.contracts import build_provider_result
@@ -301,14 +302,17 @@ def test_keyword_detail_verification_backfills_and_reports_traversal(tmp_path: P
 
     def transcribe(arguments):
         work_id = arguments["url"].rsplit("/", 1)[-1]
+        assert arguments["source_package"]["work_id"] == work_id
         calls.append(("asr", work_id))
         return build_provider_result(
             provider="aliyun",
             method_key="video_to_text_v2",
             normalized={
                 "text": "财运不是仪式，而是理解守财边界、行动方式和长期关系。",
+                "model": "qwen-test",
                 "source_package": {"transcript_text": "财运不是仪式，而是理解守财边界、行动方式和长期关系。"},
             },
+            usage={"audio_seconds": 12.5, "estimated_cost_cny": 0.00125, "model": "qwen-test"},
         )
 
     for name, handler in [
@@ -347,6 +351,21 @@ def test_keyword_detail_verification_backfills_and_reports_traversal(tmp_path: P
     }
     assert "mxnzp_call_summary" not in result.to_dict()
     assert result.to_dict()["collection_call_summary"]["total_calls"] == 4
+    material = store.get_collected_material(result.saved_material_ids[0])
+    assert material is not None
+    assert material["transcription_provider"] == "aliyun"
+    assert material["transcription_model"] == "qwen-test"
+    assert material["transcription_result"]["estimated_cost"] == 0.00125
+    with store.connect() as conn:
+        transcription = conn.execute(
+            "SELECT provider, model, provider_payload_json FROM material_transcriptions WHERE id = ?",
+            (material["transcription_id"],),
+        ).fetchone()
+    assert transcription["provider"] == "aliyun"
+    assert transcription["model"] == "qwen-test"
+    payload = json.loads(transcription["provider_payload_json"])
+    assert payload["audio_seconds"] == 12.5
+    assert payload["estimated_cost"] == 0.00125
 
 
 def test_mock_collection_run_writes_materials(tmp_path: Path) -> None:

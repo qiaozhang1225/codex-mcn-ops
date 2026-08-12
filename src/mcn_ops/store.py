@@ -4,11 +4,14 @@ import json
 import hashlib
 import re
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from .migrations.material_inventory_v1 import ensure_material_inventory_schema
 
 DEFAULT_DB_PATH = Path("data/mcn_ops.sqlite")
 
@@ -608,6 +611,8 @@ MATERIAL_V2_COLUMNS: dict[str, str] = {
 
 
 IP_ROLE_CONFIRMATION_STATUSES = {"draft", "agent_suggested", "confirmed", "needs_reconfirm"}
+MATERIAL_INVENTORY_CLASSES = {"formal_rewrite_base", "topic_clue"}
+MATERIAL_INVENTORY_REVIEW_STATUSES = {"pending", "reviewed", "rejected"}
 
 IP_ROLE_V2_COLUMNS: dict[str, str] = {
     "confirmation_status": "TEXT NOT NULL DEFAULT 'draft'",
@@ -674,6 +679,7 @@ class Store:
             conn.close()
 
     def init_db(self) -> Path:
+        initialize_inventory_schema = not self.db_path.exists() or self.db_path.stat().st_size == 0
         with self.connect() as conn:
             if _has_legacy_collection_schema(conn):
                 raise RuntimeError(
@@ -683,6 +689,8 @@ class Store:
             _migrate_ip_role_v2(conn)
             _migrate_schema_v2(conn)
             _migrate_creation_schema(conn)
+            if initialize_inventory_schema:
+                ensure_material_inventory_schema(conn)
         return self.db_path
 
     def create_content_package(
@@ -1341,6 +1349,11 @@ class Store:
         if transcript:
             transcription_provider = str(source_package.get("transcription_provider") or provider or "runtime")
             transcription_model = str(source_package.get("transcription_model") or "unknown")
+            transcription_result = (
+                source_package.get("transcription_result")
+                if isinstance(source_package.get("transcription_result"), dict)
+                else {}
+            )
             text_hash = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
             identity_key = f"runtime:{source_work_id}:{transcription_provider}:{transcription_model}:{text_hash}"
             transcription_id = self.insert_material_transcription(
@@ -1351,7 +1364,16 @@ class Store:
                 identity_key=identity_key,
                 transcript_text=transcript,
                 audio_sha256=source_package.get("audio_sha256"),
-                raw_result=source_package.get("transcription_result") or {},
+                status=str(transcription_result.get("status") or "success"),
+                audio_seconds=_optional_float(transcription_result.get("audio_seconds")),
+                estimated_cost=_optional_float(transcription_result.get("estimated_cost")),
+                cache_hit=bool(transcription_result.get("cache_hit")),
+                provider_job_id=transcription_result.get("provider_job_id"),
+                raw_result=(
+                    transcription_result.get("raw_result")
+                    if isinstance(transcription_result.get("raw_result"), dict)
+                    else {}
+                ),
             )
         return source_work_id, observation_id, transcription_id
 
@@ -1414,6 +1436,9 @@ class Store:
             "author_profile_url": author["profile_url"] if author else None,
             "author_douyin_id": author["account_id"] if author and work["platform"] == "douyin" else None,
             "transcript_text": transcription["transcript_text"] if transcription else "",
+            "transcription_provider": transcription["provider"] if transcription else None,
+            "transcription_model": transcription["model"] if transcription else None,
+            "transcription_result": _row_json(transcription, "provider_payload_json", {}) if transcription else {},
         }
 
     def upsert_collection_candidate(
@@ -1659,6 +1684,9 @@ class Store:
             "caption_text": package.get("caption_text"),
             "hashtags": package.get("hashtags") or [],
             "transcript_text": package.get("transcript_text") or "",
+            "transcription_provider": package.get("transcription_provider"),
+            "transcription_model": package.get("transcription_model"),
+            "transcription_result": package.get("transcription_result") or {},
             "summary_text": row["summary_text"],
             "hook_text": row["hook_text"],
             "core_claim": row["core_claim"],
@@ -2567,6 +2595,508 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [_material_creation_row_to_dict(row) for row in rows]
+
+    def classify_material_inventory(
+        self,
+        *,
+        material_id: str,
+        role_id: str,
+        topic_direction: str,
+        content_mechanism: str,
+        material_class: str,
+        review_status: str,
+        decision_source: str,
+        classification_reasons: list[str],
+        knowledge_subtype: str | None = None,
+        reviewer: str | None = None,
+        is_primary: bool = False,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            _require_material_inventory_schema(conn)
+            classification_id = self._classify_material_inventory_conn(
+                conn,
+                material_id=material_id,
+                role_id=role_id,
+                topic_direction=topic_direction,
+                content_mechanism=content_mechanism,
+                material_class=material_class,
+                is_primary=is_primary,
+                review_status=review_status,
+                decision_source=decision_source,
+                classification_reasons=classification_reasons,
+                knowledge_subtype=knowledge_subtype,
+                reviewer=reviewer,
+            )
+            row = conn.execute(
+                "SELECT * FROM material_inventory_classifications WHERE id = ?",
+                (classification_id,),
+            ).fetchone()
+        return _material_inventory_classification_row_to_dict(row)
+
+    def import_material_inventory(
+        self,
+        *,
+        role_id: str,
+        classifications: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(classifications, list) or not classifications:
+            raise ValueError("classifications must be a non-empty list")
+        imported_ids: list[str] = []
+        with self.connect() as conn:
+            _require_material_inventory_schema(conn)
+            for index, item in enumerate(classifications):
+                if not isinstance(item, dict):
+                    raise ValueError(f"classification at index {index} must be an object")
+                required_fields = (
+                    "material_id",
+                    "topic_direction",
+                    "content_mechanism",
+                    "material_class",
+                    "review_status",
+                    "decision_source",
+                    "classification_reasons",
+                )
+                missing_fields = [field for field in required_fields if field not in item]
+                if missing_fields:
+                    raise ValueError(
+                        f"classification at index {index} is missing {', '.join(missing_fields)}"
+                    )
+                item_role_id = str(item.get("role_id") or role_id).strip()
+                if item_role_id != role_id:
+                    raise ValueError(f"classification at index {index} has a different role_id")
+                imported_ids.append(
+                    self._classify_material_inventory_conn(
+                        conn,
+                        material_id=item["material_id"],
+                        role_id=role_id,
+                        topic_direction=item["topic_direction"],
+                        content_mechanism=item["content_mechanism"],
+                        knowledge_subtype=item.get("knowledge_subtype"),
+                        material_class=item["material_class"],
+                        is_primary=item.get("is_primary", False),
+                        review_status=item["review_status"],
+                        reviewer=item.get("reviewer"),
+                        decision_source=item["decision_source"],
+                        classification_reasons=item["classification_reasons"],
+                    )
+                )
+            rows = conn.execute(
+                f"SELECT * FROM material_inventory_classifications WHERE id IN ({','.join('?' for _ in imported_ids)})",
+                tuple(imported_ids),
+            ).fetchall()
+        by_id = {row["id"]: _material_inventory_classification_row_to_dict(row) for row in rows}
+        return [by_id[classification_id] for classification_id in imported_ids]
+
+    def list_material_inventory(
+        self,
+        *,
+        role_id: str,
+        topic_direction: str | None = None,
+        material_class: str | None = None,
+        review_status: str | None = None,
+        include_used: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not self.get_ip_role(role_id):
+            raise KeyError(f"role not found: {role_id}")
+        where = ["mic.role_id = ?"]
+        params: list[Any] = [role_id]
+        if topic_direction is not None:
+            where.append("mic.topic_direction = ?")
+            params.append(_normalize_inventory_text(topic_direction, "topic_direction"))
+        if material_class is not None:
+            where.append("mic.material_class = ?")
+            params.append(_inventory_choice(material_class, MATERIAL_INVENTORY_CLASSES, "material_class"))
+        if review_status is not None:
+            where.append("mic.review_status = ?")
+            params.append(_inventory_choice(review_status, MATERIAL_INVENTORY_REVIEW_STATUSES, "review_status"))
+        if not include_used:
+            where.append(
+                "NOT EXISTS (SELECT 1 FROM material_creations mc WHERE mc.material_id = mic.material_id AND mc.role_id = mic.role_id)"
+            )
+        query = f"""
+            SELECT mic.*, cm.source_work_id, cm.clean_title, cm.status AS material_status,
+                   cm.eligibility_status, cm.transcription_id,
+                   mt.transcript_text, sw.platform, sw.platform_work_id,
+                   EXISTS(
+                       SELECT 1 FROM material_role_matches mrm
+                       WHERE mrm.material_id = mic.material_id
+                         AND mrm.role_id = mic.role_id
+                         AND mrm.decision = 'accepted'
+                   ) AS accepted_role_match
+            FROM material_inventory_classifications mic
+            JOIN collected_materials cm ON cm.id = mic.material_id
+            LEFT JOIN material_transcriptions mt ON mt.id = cm.transcription_id
+            JOIN source_works sw ON sw.id = cm.source_work_id
+            WHERE {' AND '.join(where)}
+            ORDER BY mic.topic_direction, mic.material_class, mic.updated_at DESC, mic.id
+        """
+        with self.connect() as conn:
+            _require_material_inventory_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+            material_ids = sorted({str(row["material_id"]) for row in rows})
+            creations: dict[str, list[dict[str, Any]]] = {material_id: [] for material_id in material_ids}
+            if material_ids:
+                creation_rows = conn.execute(
+                    f"SELECT * FROM material_creations WHERE role_id = ? AND material_id IN ({','.join('?' for _ in material_ids)}) ORDER BY created_at, id",
+                    (role_id, *material_ids),
+                ).fetchall()
+                for creation_row in creation_rows:
+                    creations[str(creation_row["material_id"])].append(_material_creation_row_to_dict(creation_row))
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = _material_inventory_classification_row_to_dict(row)
+            references = creations.get(item["material_id"], [])
+            item.update(
+                source_work_id=row["source_work_id"],
+                source_platform=row["platform"],
+                platform_work_id=row["platform_work_id"],
+                material_title=row["clean_title"],
+                material_status=row["material_status"],
+                eligibility_status=row["eligibility_status"],
+                accepted_role_match=bool(row["accepted_role_match"]),
+                used=bool(references),
+                creation_references=references,
+            )
+            item["formal_usable"] = (
+                item["material_class"] == "formal_rewrite_base"
+                and item["review_status"] == "reviewed"
+                and item["material_status"] == "collected"
+                and item["eligibility_status"] == "accepted"
+                and item["accepted_role_match"]
+                and bool(str(row["transcript_text"] or "").strip())
+            )
+            result.append(item)
+        return result
+
+    def list_pending_material_inventory(
+        self,
+        *,
+        role_id: str,
+        include_used: bool = False,
+        include_pending: bool = False,
+        include_rejected: bool = False,
+        task_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        role = self.get_ip_role(role_id)
+        if not role:
+            raise KeyError(f"role not found: {role_id}")
+        if role["confirmation_status"] != "confirmed" or role["needs_reconfirm"]:
+            raise ValueError(f"role must be confirmed before inventory review: {role_id}")
+
+        where = [
+            "cm.status = 'collected'",
+            "cm.eligibility_status = 'accepted'",
+            "length(trim(mt.transcript_text)) > 0",
+            "EXISTS (SELECT 1 FROM material_role_matches mrm WHERE mrm.material_id = cm.id AND mrm.role_id = ? AND mrm.decision = 'accepted')",
+            "NOT EXISTS (SELECT 1 FROM collected_materials cm_reviewed JOIN material_inventory_classifications mic_reviewed ON mic_reviewed.material_id = cm_reviewed.id WHERE cm_reviewed.source_work_id = cm.source_work_id AND mic_reviewed.role_id = ? AND mic_reviewed.review_status = 'reviewed')",
+        ]
+        params: list[Any] = [role_id, role_id]
+        allowed_existing: list[str] = []
+        if include_pending:
+            allowed_existing.append("'pending'")
+        if include_rejected:
+            allowed_existing.append("'rejected'")
+        if allowed_existing:
+            where.append(
+                "(NOT EXISTS (SELECT 1 FROM collected_materials cm_any JOIN material_inventory_classifications mic_any ON mic_any.material_id = cm_any.id WHERE cm_any.source_work_id = cm.source_work_id AND mic_any.role_id = ?) "
+                "OR EXISTS (SELECT 1 FROM collected_materials cm_allowed JOIN material_inventory_classifications mic_allowed ON mic_allowed.material_id = cm_allowed.id WHERE cm_allowed.source_work_id = cm.source_work_id AND mic_allowed.role_id = ? AND mic_allowed.review_status IN ("
+                + ",".join(allowed_existing)
+                + ")))"
+            )
+            params.extend([role_id, role_id])
+        else:
+            where.append(
+                "NOT EXISTS (SELECT 1 FROM collected_materials cm_any JOIN material_inventory_classifications mic_any ON mic_any.material_id = cm_any.id WHERE cm_any.source_work_id = cm.source_work_id AND mic_any.role_id = ?)"
+            )
+            params.append(role_id)
+        if not include_used:
+            where.append(
+                "NOT EXISTS (SELECT 1 FROM collected_materials cm_used JOIN material_creations mc ON mc.material_id = cm_used.id WHERE cm_used.source_work_id = cm.source_work_id AND mc.role_id = ?)"
+            )
+            params.append(role_id)
+        if task_id is not None:
+            where.append("cm.task_id = ?")
+            params.append(_normalize_inventory_text(task_id, "task_id"))
+        if run_id is not None:
+            where.append("cm.run_id = ?")
+            params.append(_normalize_inventory_text(run_id, "run_id"))
+
+        query = f"""
+            SELECT cm.id AS material_id, cm.source_work_id, cm.run_id, cm.task_id,
+                   cm.clean_title, cm.summary_text, cm.created_at AS material_created_at,
+                   mt.id AS transcription_id, mt.transcript_text, mt.provider AS transcription_provider,
+                   mt.model AS transcription_model, sw.platform, sw.platform_work_id,
+                   sw.source_url AS canonical_url, sw.caption_text,
+                   (SELECT MAX(mrm.fit_score) FROM material_role_matches mrm
+                    WHERE mrm.material_id = cm.id AND mrm.role_id = ? AND mrm.decision = 'accepted') AS fit_score
+            FROM collected_materials cm
+            JOIN material_transcriptions mt ON mt.id = cm.transcription_id
+            JOIN source_works sw ON sw.id = cm.source_work_id
+            WHERE {' AND '.join(where)}
+            ORDER BY fit_score DESC, cm.created_at, cm.id
+        """
+        with self.connect() as conn:
+            _require_material_inventory_schema(conn)
+            rows = conn.execute(query, (role_id, *params)).fetchall()
+            source_work_ids = [str(row["source_work_id"]) for row in rows]
+            classifications_by_work: dict[str, list[dict[str, Any]]] = {
+                source_work_id: [] for source_work_id in source_work_ids
+            }
+            if source_work_ids:
+                classification_rows = conn.execute(
+                    f"""
+                    SELECT mic.*, cm.source_work_id
+                    FROM material_inventory_classifications mic
+                    JOIN collected_materials cm ON cm.id = mic.material_id
+                    WHERE mic.role_id = ? AND cm.source_work_id IN ({','.join('?' for _ in source_work_ids)})
+                    ORDER BY mic.created_at, mic.id
+                    """,
+                    (role_id, *source_work_ids),
+                ).fetchall()
+                for classification_row in classification_rows:
+                    classifications_by_work[str(classification_row["source_work_id"])].append(
+                        _material_inventory_classification_row_to_dict(classification_row)
+                    )
+
+        result: list[dict[str, Any]] = []
+        seen_source_works: set[str] = set()
+        for row in rows:
+            source_work_id = str(row["source_work_id"])
+            if source_work_id in seen_source_works:
+                continue
+            seen_source_works.add(source_work_id)
+            result.append(
+                {
+                    "material_id": row["material_id"],
+                    "source_work_id": source_work_id,
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "title": row["clean_title"],
+                    "summary_text": row["summary_text"],
+                    "platform": row["platform"],
+                    "platform_work_id": row["platform_work_id"],
+                    "canonical_url": row["canonical_url"],
+                    "caption_text": row["caption_text"],
+                    "transcription_id": row["transcription_id"],
+                    "transcript_text": row["transcript_text"],
+                    "transcription_provider": row["transcription_provider"],
+                    "transcription_model": row["transcription_model"],
+                    "accepted_role_match_fit_score": row["fit_score"],
+                    "existing_classifications": classifications_by_work.get(source_work_id, []),
+                    "material_created_at": row["material_created_at"],
+                }
+            )
+        return result
+
+    def summarize_material_inventory(
+        self,
+        *,
+        role_id: str,
+        video_allocation: dict[str, int] | None = None,
+        formal_base_targets: dict[str, int] | None = None,
+        batch_key: str | None = None,
+        include_used: bool = False,
+    ) -> dict[str, Any]:
+        normalized_video_allocation = _normalize_inventory_allocation(video_allocation or {})
+        normalized_formal_targets = _normalize_inventory_allocation(formal_base_targets or {})
+        rows = self.list_material_inventory(role_id=role_id, include_used=True)
+        topic_names = sorted(
+            {row["topic_direction"] for row in rows}
+            | set(normalized_video_allocation)
+            | set(normalized_formal_targets)
+        )
+        topics_by_material: dict[str, set[str]] = {}
+        for row in rows:
+            topics_by_material.setdefault(row["material_id"], set()).add(row["topic_direction"])
+        overlap_ids = {material_id for material_id, topics in topics_by_material.items() if len(topics) > 1}
+
+        def summarize(items: list[dict[str, Any]], required_count: int | None = None) -> dict[str, Any]:
+            material_ids = {item["material_id"] for item in items}
+            source_work_ids = {item["source_work_id"] for item in items}
+            formal_ids = {
+                item["material_id"]
+                for item in items
+                if item["material_class"] == "formal_rewrite_base" and item["review_status"] == "reviewed"
+            }
+            reviewed_formal_ids = {
+                item["material_id"]
+                for item in items
+                if item["material_class"] == "formal_rewrite_base" and item["review_status"] == "reviewed"
+            }
+            clue_ids = {
+                item["material_id"]
+                for item in items
+                if item["material_class"] == "topic_clue" and item["review_status"] == "reviewed"
+            }
+            rejected_ids = {item["material_id"] for item in items if item["review_status"] == "rejected"}
+            used_ids = {item["material_id"] for item in items if item["used"]}
+            usable_formal_items = [
+                item for item in items if item["formal_usable"] and item["is_primary"]
+            ]
+            usable_formal_ids = {item["material_id"] for item in usable_formal_items}
+            usable_formal_source_ids = {item["source_work_id"] for item in usable_formal_items}
+            used_source_ids = {item["source_work_id"] for item in items if item["used"]}
+            unused_formal_source_ids = usable_formal_source_ids - used_source_ids
+            available_source_ids = usable_formal_source_ids if include_used else unused_formal_source_ids
+            result = {
+                "total_classified_materials": len(material_ids),
+                "distinct_source_works": len(source_work_ids),
+                "formal_rewrite_bases": len(formal_ids),
+                "reviewed_formal_bases": len(reviewed_formal_ids),
+                "primary_reviewed_formal_bases": len(usable_formal_source_ids),
+                "topic_clues": len(clue_ids),
+                "rejected_materials": len(rejected_ids),
+                "unused_formal_rewrite_bases": len(unused_formal_source_ids),
+                "used_formal_rewrite_bases": len(usable_formal_source_ids & used_source_ids),
+                "used_materials": len(used_ids),
+                "cross_topic_overlaps": len(material_ids & overlap_ids),
+                "available_formal_rewrite_bases": len(available_source_ids),
+            }
+            if required_count is not None:
+                result.update(
+                    target_formal_base_count=required_count,
+                    shortage=max(required_count - len(available_source_ids), 0),
+                    surplus=max(len(available_source_ids) - required_count, 0),
+                )
+            return result
+
+        topics = []
+        for topic in topic_names:
+            topic_rows = [row for row in rows if row["topic_direction"] == topic]
+            topic_summary = summarize(
+                topic_rows,
+                normalized_formal_targets.get(topic) if topic in normalized_formal_targets else None,
+            )
+            topics.append(
+                {
+                    "topic_direction": topic,
+                    "planned_video_count": normalized_video_allocation.get(topic, 0),
+                    **topic_summary,
+                }
+            )
+        return {
+            "role_id": role_id,
+            "batch_key": batch_key,
+            "include_used": include_used,
+            "planned_video_total": sum(normalized_video_allocation.values()),
+            "target_formal_base_total": sum(normalized_formal_targets.values()),
+            "totals": summarize(rows),
+            "cross_topic_overlap_materials": [
+                {"material_id": material_id, "topic_directions": sorted(topics_by_material[material_id])}
+                for material_id in sorted(overlap_ids)
+            ],
+            "topics": topics,
+        }
+
+    def _classify_material_inventory_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        material_id: Any,
+        role_id: Any,
+        topic_direction: Any,
+        content_mechanism: Any,
+        material_class: Any,
+        is_primary: Any,
+        review_status: Any,
+        decision_source: Any,
+        classification_reasons: Any,
+        knowledge_subtype: Any = None,
+        reviewer: Any = None,
+    ) -> str:
+        material_id = _normalize_inventory_text(material_id, "material_id")
+        role_id = _normalize_inventory_text(role_id, "role_id")
+        topic_direction = _normalize_inventory_text(topic_direction, "topic_direction")
+        content_mechanism = _normalize_inventory_text(content_mechanism, "content_mechanism")
+        knowledge_subtype = _normalize_inventory_optional_text(knowledge_subtype, "knowledge_subtype")
+        reviewer = _normalize_inventory_optional_text(reviewer, "reviewer")
+        decision_source = _normalize_inventory_text(decision_source, "decision_source")
+        material_class = _inventory_choice(material_class, MATERIAL_INVENTORY_CLASSES, "material_class")
+        is_primary = _normalize_inventory_bool(is_primary, "is_primary")
+        review_status = _inventory_choice(review_status, MATERIAL_INVENTORY_REVIEW_STATUSES, "review_status")
+        reasons = _inventory_reasons(classification_reasons)
+
+        role = conn.execute("SELECT * FROM ip_roles WHERE id = ?", (role_id,)).fetchone()
+        if role is None:
+            raise KeyError(f"role not found: {role_id}")
+        if role["confirmation_status"] != "confirmed" or bool(role["needs_reconfirm"]):
+            raise ValueError(f"role must be confirmed before inventory classification: {role_id}")
+        material = conn.execute(
+            """
+            SELECT cm.*, mt.transcript_text
+            FROM collected_materials cm
+            LEFT JOIN material_transcriptions mt ON mt.id = cm.transcription_id
+            WHERE cm.id = ?
+            """,
+            (material_id,),
+        ).fetchone()
+        if material is None:
+            raise KeyError(f"material not found: {material_id}")
+        if material_class == "formal_rewrite_base" and review_status == "reviewed":
+            accepted_match = conn.execute(
+                """
+                SELECT 1 FROM material_role_matches
+                WHERE material_id = ? AND role_id = ? AND decision = 'accepted'
+                LIMIT 1
+                """,
+                (material_id, role_id),
+            ).fetchone()
+            if (
+                material["status"] != "collected"
+                or material["eligibility_status"] != "accepted"
+                or not str(material["transcript_text"] or "").strip()
+                or accepted_match is None
+            ):
+                raise ValueError(
+                    f"material is not eligible as a reviewed formal rewrite base for role {role_id}: {material_id}"
+                )
+
+        existing = conn.execute(
+            """
+            SELECT id, created_at FROM material_inventory_classifications
+            WHERE material_id = ? AND role_id = ? AND topic_direction = ?
+            """,
+            (material_id, role_id, topic_direction),
+        ).fetchone()
+        classification_id = existing["id"] if existing else new_id("minv")
+        timestamp = now_iso()
+        conn.execute(
+            """
+            INSERT INTO material_inventory_classifications(
+                id, material_id, role_id, topic_direction, content_mechanism,
+                knowledge_subtype, material_class, is_primary, review_status, reviewer,
+                decision_source, classification_reasons_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(material_id, role_id, topic_direction) DO UPDATE SET
+                content_mechanism = excluded.content_mechanism,
+                knowledge_subtype = excluded.knowledge_subtype,
+                material_class = excluded.material_class,
+                is_primary = excluded.is_primary,
+                review_status = excluded.review_status,
+                reviewer = excluded.reviewer,
+                decision_source = excluded.decision_source,
+                classification_reasons_json = excluded.classification_reasons_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                classification_id,
+                material_id,
+                role_id,
+                topic_direction,
+                content_mechanism,
+                knowledge_subtype,
+                material_class,
+                int(is_primary),
+                review_status,
+                reviewer,
+                decision_source,
+                dumps(reasons),
+                existing["created_at"] if existing else timestamp,
+                timestamp,
+            ),
+        )
+        return classification_id
 
     def create_creation_task(
         self,
@@ -4052,6 +4582,92 @@ def _material_creation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _material_inventory_classification_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "material_id": row["material_id"],
+        "role_id": row["role_id"],
+        "topic_direction": row["topic_direction"],
+        "content_mechanism": row["content_mechanism"],
+        "knowledge_subtype": row["knowledge_subtype"],
+        "material_class": row["material_class"],
+        "is_primary": bool(row["is_primary"]),
+        "review_status": row["review_status"],
+        "reviewer": row["reviewer"],
+        "decision_source": row["decision_source"],
+        "classification_reasons": _row_json(row, "classification_reasons_json", []),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _require_material_inventory_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'material_inventory_classifications'"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "material inventory schema is not installed; run `mcn db migrate-material-inventory-v1` explicitly"
+        )
+
+
+def _normalize_inventory_text(value: Any, field: str) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    if len(text) > 120:
+        raise ValueError(f"{field} must be 120 characters or fewer")
+    if any(ord(char) < 32 for char in text):
+        raise ValueError(f"{field} contains control characters")
+    return text
+
+
+def _normalize_inventory_optional_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return _normalize_inventory_text(value, field)
+
+
+def _normalize_inventory_bool(value: Any, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{field} must be a boolean")
+
+
+def _inventory_choice(value: Any, allowed: set[str], field: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized not in allowed:
+        raise ValueError(f"invalid {field}: {value}")
+    return normalized
+
+
+def _inventory_reasons(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("classification_reasons must be a list")
+    reasons = [_normalize_inventory_text(item, "classification_reason") for item in value]
+    reasons = _dedupe_strings(reasons)
+    if not reasons:
+        raise ValueError("classification_reasons must not be empty")
+    return reasons
+
+
+def _normalize_inventory_allocation(value: dict[str, int]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError("allocation must be a JSON object mapping topic directions to counts")
+    normalized: dict[str, int] = {}
+    for topic, count in value.items():
+        normalized_topic = _normalize_inventory_text(topic, "topic_direction")
+        if normalized_topic in normalized:
+            raise ValueError(f"duplicate normalized allocation topic: {normalized_topic}")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"allocation for {normalized_topic} must be a non-negative integer")
+        normalized[normalized_topic] = count
+    return normalized
 
 
 def _creation_task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

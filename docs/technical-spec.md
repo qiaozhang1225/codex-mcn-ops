@@ -36,6 +36,7 @@ The minimal ledger includes:
 - `source_observations`
 - `material_transcriptions`
 - `material_role_matches`
+- `material_inventory_classifications`
 - `material_creations`
 - `creation_tasks`
 - `creation_stage_runs`
@@ -64,6 +65,7 @@ Material collection separates three responsibilities:
 - `collected_materials`: stores only collection and understanding decisions, linked through `source_work_id` and `transcription_id`.
 - `collection_candidates`: stores pipeline decisions linked to `source_work_id`; platform metadata is not duplicated.
 - `material_role_matches`: stores many-to-many role-fit judgments. One material can be accepted or rejected for multiple IP roles, with separate scores and reasons.
+- `material_inventory_classifications`: stores reviewed IP-role batch taxonomy. It records topic direction, content mechanism, optional knowledge subtype, formal-base versus topic-clue class, one primary allocation topic, review provenance, and reasons. It does not infer classifications from role matches.
 - `material_creations`: stores role-specific rewrite usage. This is the source of truth for whether a specific IP role has already created a draft from a specific material.
 
 Creation separates process state from final publish content:
@@ -103,6 +105,7 @@ It is an operator/development tool, not a Python runtime dependency. Use it to r
 
 - `mcn init-db`
 - `mcn db migrate-collection-schema-v3`
+- `mcn db migrate-material-inventory-v1`
 - `mcn adb doctor`
 - `mcn adb devices`
 - `mcn content create`
@@ -117,7 +120,8 @@ It is an operator/development tool, not a Python runtime dependency. Use it to r
 - `mcn collect understand`
 - `mcn collect match`
 - `mcn collect report`
-- `mcn material list/show/promote`
+- `mcn material list/show/promote/creations`
+- `mcn material inventory classify/import/list/pending/summary`
 - `mcn publish prepare`
 - `mcn publish push-assets`
 - `mcn publish run`
@@ -199,6 +203,16 @@ Hard-reject examples include concrete ritual actions such as water/spit/breathin
 The fixed material understanding JSON fields are `topic_summary`, `hook`, `core_claim`, `content_structure`, `key_points`, `content_type`, `oral_script_pattern`, `audience`, `emotion_trigger`, `risk_level`, `rewrite_angles`, `risk_notes`, `usable_quotes`, `recommended_platforms`, `role_fit_notes`, and `next_collection_keywords`.
 
 `mcn collect understand` writes or refreshes material understanding and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. High-level task reports expose `metadata_ready_count`, `draft_local_count`, and pending understanding counts so collection output can be audited before二创. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.
+
+The inventory layer is deliberately narrower than role matching. A reviewed row is unique by `(material_id, role_id, topic_direction)`, with a partial unique index allowing at most one `is_primary=true` row per material and role. Topic values remain data owned by the IP/batch, not global schema constants. A reviewed `formal_rewrite_base` requires an active collected material, accepted eligibility, a non-empty transcription, and an accepted role match; a `topic_clue` can retain useful direction evidence without claiming enough substance for adaptation. `mcn material inventory pending` lists distinct, accepted source works still requiring review. Listing excludes rows already referenced by `material_creations` for that role unless `--include-used` is explicit. Summary reports secondary-topic overlap but fills quotas only from distinct source works represented by reviewed primary formal bases. Allocation JSON separates `video_allocation` from `formal_base_targets` and may declare a batch-specific `expected_video_total`.
+
+Existing schema-v3 databases require the explicit additive migration:
+
+```bash
+mcn --db-path data/mcn_ops.sqlite db migrate-material-inventory-v1 --json
+```
+
+The migration creates only the normalized inventory table and indexes, records its version in `schema_migrations`, and performs a foreign-key check in one transaction. It does not backfill role matches or replace the database.
 
 ## Creation Workflow
 

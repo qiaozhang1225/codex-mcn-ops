@@ -50,7 +50,7 @@ from .creation import (
     run_creation_stage,
 )
 from .feishu import build_publish_job_payload, write_payload
-from .migrations import migrate_collection_schema_v3
+from .migrations import migrate_collection_schema_v3, migrate_material_inventory_v1
 from .publisher import PublishRunner
 from .report import build_daily_report
 from .store import DEFAULT_DB_PATH, Store, loads
@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     db_migrate_v3.add_argument("--replace", action="store_true")
     db_migrate_v3.add_argument("--recovery-path")
     db_migrate_v3.add_argument("--json", action="store_true")
+    db_migrate_inventory = db_sub.add_parser(
+        "migrate-material-inventory-v1",
+        help="Add the reviewed IP-role material inventory schema to an existing v3 database",
+    )
+    db_migrate_inventory.add_argument("--json", action="store_true")
 
     adb_parser = subparsers.add_parser("adb", help="ADB device utilities")
     adb_sub = adb_parser.add_subparsers(dest="adb_command", required=True)
@@ -452,6 +457,45 @@ def build_parser() -> argparse.ArgumentParser:
     material_promote.add_argument("--body")
     material_promote.add_argument("--hashtag", action="append", default=[])
     material_promote.add_argument("--json", action="store_true")
+    material_inventory = material_sub.add_parser("inventory", help="Manage reviewed IP-role material inventory")
+    material_inventory_sub = material_inventory.add_subparsers(dest="inventory_command", required=True)
+    inventory_classify = material_inventory_sub.add_parser("classify", help="Classify one material for one confirmed IP role")
+    inventory_classify.add_argument("--material-id", required=True)
+    inventory_classify.add_argument("--role-id", required=True)
+    inventory_classify.add_argument("--topic-direction", required=True)
+    inventory_classify.add_argument("--content-mechanism", required=True)
+    inventory_classify.add_argument("--knowledge-subtype")
+    inventory_classify.add_argument("--material-class", required=True, choices=["formal_rewrite_base", "topic_clue"])
+    inventory_classify.add_argument("--primary", action="store_true", help="Use this topic as the material's only primary allocation topic")
+    inventory_classify.add_argument("--review-status", required=True, choices=["pending", "reviewed", "rejected"])
+    inventory_classify.add_argument("--reviewer")
+    inventory_classify.add_argument("--decision-source", required=True)
+    inventory_classify.add_argument("--reason", action="append", required=True)
+    inventory_classify.add_argument("--json", action="store_true")
+    inventory_import = material_inventory_sub.add_parser("import", help="Transactionally import reviewed classifications from JSON")
+    inventory_import.add_argument("--role-id", required=True)
+    inventory_import.add_argument("--file", required=True)
+    inventory_import.add_argument("--json", action="store_true")
+    inventory_list = material_inventory_sub.add_parser("list", help="List classified materials for one role")
+    inventory_list.add_argument("--role-id", required=True)
+    inventory_list.add_argument("--topic-direction")
+    inventory_list.add_argument("--material-class", choices=["formal_rewrite_base", "topic_clue"])
+    inventory_list.add_argument("--review-status", choices=["pending", "reviewed", "rejected"])
+    inventory_list.add_argument("--include-used", action="store_true")
+    inventory_list.add_argument("--json", action="store_true")
+    inventory_pending = material_inventory_sub.add_parser("pending", help="List distinct accepted source works still awaiting inventory review")
+    inventory_pending.add_argument("--role-id", required=True)
+    inventory_pending.add_argument("--include-used", action="store_true")
+    inventory_pending.add_argument("--include-pending", action="store_true")
+    inventory_pending.add_argument("--include-rejected", action="store_true")
+    inventory_pending.add_argument("--task-id")
+    inventory_pending.add_argument("--run-id")
+    inventory_pending.add_argument("--json", action="store_true")
+    inventory_summary = material_inventory_sub.add_parser("summary", help="Summarize usable inventory and allocation shortages")
+    inventory_summary.add_argument("--role-id", required=True)
+    inventory_summary.add_argument("--allocation-file")
+    inventory_summary.add_argument("--include-used", action="store_true")
+    inventory_summary.add_argument("--json", action="store_true")
 
     publish_parser = subparsers.add_parser("publish", help="Publish workflow commands")
     publish_sub = publish_parser.add_subparsers(dest="publish_command", required=True)
@@ -1856,7 +1900,169 @@ def handle_material(args: argparse.Namespace, store: Store) -> int:
             print(content_id)
         return 0
 
+    if args.material_command == "inventory":
+        if args.inventory_command == "classify":
+            classification = store.classify_material_inventory(
+                material_id=args.material_id,
+                role_id=args.role_id,
+                topic_direction=args.topic_direction,
+                content_mechanism=args.content_mechanism,
+                knowledge_subtype=args.knowledge_subtype,
+                material_class=args.material_class,
+                is_primary=args.primary,
+                review_status=args.review_status,
+                reviewer=args.reviewer,
+                decision_source=args.decision_source,
+                classification_reasons=args.reason,
+            )
+            if args.json:
+                json_print(classification)
+            else:
+                print(classification["id"])
+            return 0
+
+        if args.inventory_command == "import":
+            payload = _read_json_object_or_list(Path(args.file))
+            if isinstance(payload, dict):
+                payload_role_id = payload.get("role_id")
+                if payload_role_id is not None and str(payload_role_id) != args.role_id:
+                    raise ValueError("import file role_id does not match --role-id")
+                classifications = payload.get("classifications")
+            else:
+                classifications = payload
+            imported = store.import_material_inventory(role_id=args.role_id, classifications=classifications)
+            result = {"role_id": args.role_id, "imported_count": len(imported), "classifications": imported}
+            if args.json:
+                json_print(result)
+            else:
+                print(f"imported {len(imported)} classifications")
+            return 0
+
+        if args.inventory_command == "list":
+            inventory = store.list_material_inventory(
+                role_id=args.role_id,
+                topic_direction=args.topic_direction,
+                material_class=args.material_class,
+                review_status=args.review_status,
+                include_used=args.include_used,
+            )
+            if args.json:
+                json_print({"role_id": args.role_id, "inventory": inventory})
+            else:
+                for item in inventory:
+                    print(
+                        f"{item['material_id']}\t{item['topic_direction']}\t{item['material_class']}\t"
+                        f"{item['review_status']}\tused={str(item['used']).lower()}\t{item.get('material_title') or ''}"
+                    )
+            return 0
+
+        if args.inventory_command == "pending":
+            pending = store.list_pending_material_inventory(
+                role_id=args.role_id,
+                include_used=args.include_used,
+                include_pending=args.include_pending,
+                include_rejected=args.include_rejected,
+                task_id=args.task_id,
+                run_id=args.run_id,
+            )
+            result = {
+                "role_id": args.role_id,
+                "pending_count": len(pending),
+                "distinct_source_works": len({item["source_work_id"] for item in pending}),
+                "materials": pending,
+            }
+            if args.json:
+                json_print(result)
+            else:
+                for item in pending:
+                    print(
+                        f"{item['material_id']}\t{item['source_work_id']}\t"
+                        f"fit={item.get('accepted_role_match_fit_score') or ''}\t{item.get('title') or ''}"
+                    )
+            return 0
+
+        if args.inventory_command == "summary":
+            allocation = {
+                "batch_key": None,
+                "video_allocation": {},
+                "formal_base_targets": {},
+            }
+            if args.allocation_file:
+                payload = _read_json_object_or_list(Path(args.allocation_file))
+                allocation = _parse_inventory_allocation(payload, role_id=args.role_id)
+            summary = store.summarize_material_inventory(
+                role_id=args.role_id,
+                video_allocation=allocation["video_allocation"],
+                formal_base_targets=allocation["formal_base_targets"],
+                batch_key=allocation["batch_key"],
+                include_used=args.include_used,
+            )
+            if args.json:
+                json_print(summary)
+            else:
+                for topic in summary["topics"]:
+                    required = topic.get("target_formal_base_count", "-")
+                    shortage = topic.get("shortage", "-")
+                    print(
+                        f"{topic['topic_direction']}\tvideos={topic['planned_video_count']}\t"
+                        f"available={topic['available_formal_rewrite_bases']}\t"
+                        f"required={required}\tshortage={shortage}"
+                    )
+            return 0
+
+        raise ValueError(args.inventory_command)
+
     raise ValueError(args.material_command)
+
+
+def _read_json_object_or_list(path: Path) -> Any:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON file: {path}: {exc.msg}") from exc
+
+
+def _parse_inventory_allocation(payload: Any, *, role_id: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("allocation file must contain a JSON object")
+    payload_role_id = str(payload.get("role_id") or "").strip()
+    if not payload_role_id:
+        raise ValueError("allocation file must contain role_id")
+    if payload_role_id != role_id:
+        raise ValueError("allocation file role_id does not match --role-id")
+    batch_key = str(payload.get("batch_key") or "").strip()
+    if not batch_key:
+        raise ValueError("allocation file must contain batch_key")
+    video_allocation = payload.get("video_allocation")
+    formal_base_targets = payload.get("formal_base_targets")
+    if not isinstance(video_allocation, dict) or not video_allocation:
+        raise ValueError("allocation file video_allocation must be a non-empty object")
+    if not isinstance(formal_base_targets, dict) or not formal_base_targets:
+        raise ValueError("allocation file formal_base_targets must be a non-empty object")
+    if set(video_allocation) != set(formal_base_targets):
+        raise ValueError("video_allocation and formal_base_targets must contain the same topic directions")
+    expected_video_total = payload.get("expected_video_total")
+    if expected_video_total is not None:
+        if isinstance(expected_video_total, bool) or not isinstance(expected_video_total, int) or expected_video_total < 0:
+            raise ValueError("expected_video_total must be a non-negative integer")
+        invalid_counts = [
+            topic
+            for topic, count in video_allocation.items()
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0
+        ]
+        if invalid_counts:
+            raise ValueError("video_allocation counts must be non-negative integers")
+        if sum(video_allocation.values()) != expected_video_total:
+            raise ValueError(
+                f"video_allocation total must equal expected_video_total ({expected_video_total})"
+            )
+    return {
+        "batch_key": batch_key,
+        "video_allocation": video_allocation,
+        "formal_base_targets": formal_base_targets,
+    }
 
 
 def handle_report(args: argparse.Namespace, store: Store) -> int:
@@ -1882,14 +2088,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init-db":
             return handle_init_db(store)
         if args.command == "db":
-            if args.db_command != "migrate-collection-schema-v3":
+            if args.db_command == "migrate-collection-schema-v3":
+                report = migrate_collection_schema_v3(
+                    Path(args.db_path),
+                    Path(args.destination) if args.destination else None,
+                    replace=args.replace,
+                    recovery_path=Path(args.recovery_path) if args.recovery_path else None,
+                )
+            elif args.db_command == "migrate-material-inventory-v1":
+                report = migrate_material_inventory_v1(Path(args.db_path))
+            else:
                 raise ValueError(args.db_command)
-            report = migrate_collection_schema_v3(
-                Path(args.db_path),
-                Path(args.destination) if args.destination else None,
-                replace=args.replace,
-                recovery_path=Path(args.recovery_path) if args.recovery_path else None,
-            )
             if args.json:
                 json_print(report)
             else:

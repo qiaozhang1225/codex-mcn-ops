@@ -550,6 +550,66 @@ class CollectionTaskOrchestrator:
         source_authors = discover_source_authors_from_records(saved_materials, candidates)
         if not source_authors and isinstance((task.get("parsed") or {}).get("authors"), list):
             source_authors = list((task.get("parsed") or {}).get("authors") or [])
+        parsed = task.get("parsed") if isinstance(task.get("parsed"), dict) else {}
+        role_ids = _unique_strings(
+            [
+                str(parsed.get("role_id") or ""),
+                *[
+                    str(item.get("role_id") or "")
+                    for item in self.store.collection_task_summary(task_id).get("roles", [])
+                ],
+            ]
+        )
+        pending_by_role: list[dict[str, Any]] = []
+        inventory_schema_ready = True
+        for role_id in role_ids:
+            try:
+                pending = self.store.list_pending_material_inventory(role_id=role_id, task_id=task_id)
+            except RuntimeError as exc:
+                if "migrate-material-inventory-v1" not in str(exc):
+                    raise
+                inventory_schema_ready = False
+                pending = []
+            pending_by_role.append(
+                {
+                    "role_id": role_id,
+                    "pending_count": len(pending),
+                    "material_ids": [item["material_id"] for item in pending],
+                    "next_inventory_command": (
+                        f"mcn material inventory pending --role-id {role_id} --task-id {task_id} --json"
+                    ),
+                }
+            )
+        call_summary = self.store.task_call_summary(task_id)
+        asr_calls = [
+            item
+            for item in call_summary["by_tool"]
+            if item.get("provider") == "aliyun"
+            or item.get("tool_name") in {"douyin_extract_video_text", "video_to_text_v2"}
+        ]
+        asr_results = [
+            material.get("transcription_result")
+            for material in created_materials
+            if isinstance(material.get("transcription_result"), dict)
+        ]
+        estimated_costs = [
+            float(result["estimated_cost"])
+            for result in asr_results
+            if result.get("estimated_cost") not in (None, "")
+        ]
+        accepted_role_match_ids = {
+            match["material_id"]
+            for role_id in role_ids
+            for match in self.store.list_material_role_matches(role_id=role_id, task_id=task_id)
+            if match["decision"] == "accepted"
+        }
+        traversal = []
+        for run in runs:
+            summary = run.get("summary") if isinstance(run.get("summary"), dict) else {}
+            contract = summary.get("traversal")
+            if not isinstance(contract, dict):
+                contract = summary.get("expand") if isinstance(summary.get("expand"), dict) else {}
+            traversal.append({"run_id": run["id"], **contract})
         return {
             "task": task,
             "runs": runs,
@@ -560,11 +620,52 @@ class CollectionTaskOrchestrator:
             "remaining_count": max(_target_count(task) - len(saved_materials), 0) if _target_count(task) else 0,
             "saved_materials": saved_materials,
             "skipped_candidates": skipped,
+            "newly_discovered_source_works": len(
+                {material.get("source_work_id") for material in created_materials if material.get("source_work_id")}
+            ),
+            "reused_source_works": len(
+                {material.get("source_work_id") for material in existing_reused if material.get("source_work_id")}
+            ),
+            "successful_transcriptions": len(
+                {material["id"] for material in created_materials if str(material.get("transcript_text") or "").strip()}
+            ),
+            "rejected_candidate_count": len(skipped),
+            "accepted_formal_material_count": len(
+                {
+                    material["id"]
+                    for material in created_materials
+                    if material.get("status") == "collected" and material.get("eligibility_status") == "accepted"
+                }
+            ),
+            "accepted_role_match_count": len(accepted_role_match_ids),
+            "inventory_handoff": {
+                "schema_ready": inventory_schema_ready,
+                "pending_review_count": sum(item["pending_count"] for item in pending_by_role),
+                "roles": pending_by_role,
+                "automatic_formal_classification": False,
+            },
+            "traversal_completeness": traversal,
+            "asr_summary": {
+                "calls": sum(int(item["count"]) for item in asr_calls),
+                "cache_hits": sum(int(item["cache_hits"]) for item in asr_calls),
+                "non_cache_requests": sum(
+                    max(int(item["count"]) - int(item["cache_hits"]), 0)
+                    for item in asr_calls
+                    if item.get("status") == "ok"
+                ),
+                "paid_requests": sum(
+                    1
+                    for result in asr_results
+                    if result.get("status") == "success" and not bool(result.get("cache_hit"))
+                ),
+                "estimated_cost": round(sum(estimated_costs), 8) if estimated_costs else None,
+                "currency": "CNY" if estimated_costs else None,
+            },
             "source_authors_discovered": source_authors,
             "understanding_summary": _understanding_summary(saved_materials),
             "next_recommended_keywords": _next_keywords_from_materials(saved_materials),
             "next_recommended_authors": _next_authors_from_materials(saved_materials),
-            "collection_call_summary": self.store.task_call_summary(task_id),
+            "collection_call_summary": call_summary,
         }
 
     def _build_collection_provider(
@@ -1015,6 +1116,7 @@ def format_task_show(report: dict[str, Any]) -> str:
             f"scope={task['target_scope']} topic={task.get('topic') or ''}",
             f"saved={report['saved_count']} created={report['created_material_count']} reused={report['existing_reused_count']} remaining={report['remaining_count']}",
             f"runs={len(report['runs'])} skipped={len(report['skipped_candidates'])} api_calls={report['collection_call_summary']['total_calls']} cache_hits={report['collection_call_summary']['cache_hits']}",
+            f"inventory_pending={report['inventory_handoff']['pending_review_count']} automatic_formal_classification=false",
             f"understanding metadata_ready={understanding['metadata_ready_count']} codex_default={understanding['final_codex_count']} rules_draft={understanding['draft_local_count']} pending_material={understanding['pending_material_understanding_count']}",
         ]
     )
@@ -1033,6 +1135,11 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
         f"- created_material_count: {report['created_material_count']}",
         f"- existing_reused_count: {report['existing_reused_count']}",
         f"- remaining_count: {report['remaining_count']}",
+        f"- newly_discovered_source_works: {report['newly_discovered_source_works']}",
+        f"- reused_source_works: {report['reused_source_works']}",
+        f"- successful_transcriptions: {report['successful_transcriptions']}",
+        f"- accepted_formal_material_count: {report['accepted_formal_material_count']}",
+        f"- accepted_role_match_count: {report['accepted_role_match_count']}",
         "",
         "## Understanding",
         "",
@@ -1058,6 +1165,15 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
     for candidate in report["skipped_candidates"][:50]:
         lines.append(
             f"- {candidate.get('status')} | {candidate.get('skip_reason') or ''} | {candidate.get('title') or ''}"
+        )
+    lines.extend(["", "## Inventory Handoff", ""])
+    handoff = report["inventory_handoff"]
+    lines.append(f"- schema_ready: {str(handoff['schema_ready']).lower()}")
+    lines.append(f"- pending_review_count: {handoff['pending_review_count']}")
+    lines.append("- automatic_formal_classification: false")
+    for role in handoff["roles"]:
+        lines.append(
+            f"- role={role['role_id']} pending={role['pending_count']} next=`{role['next_inventory_command']}`"
         )
     lines.extend(["", "## Source Authors Discovered", ""])
     for author in report["source_authors_discovered"][:30]:

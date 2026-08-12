@@ -10,7 +10,13 @@ from typing import Any
 from ..store import Store
 from .eligibility import evaluate_material_eligibility, is_material_eligible
 from .tools import ToolExecutionError, ToolRegistry
-from .understanding import DEFAULT_UNDERSTANDING_MODEL, DEFAULT_UNDERSTANDING_PROVIDER, build_material_understanding, validate_understanding
+from .understanding import (
+    DEFAULT_UNDERSTANDING_MODEL,
+    DEFAULT_UNDERSTANDING_PROVIDER,
+    build_material_understanding,
+    evaluate_role_match,
+    validate_understanding,
+)
 
 
 @dataclass
@@ -257,6 +263,7 @@ class TopicCollectionRunner:
                         )
                         continue
                     material_id = str(existing["id"])
+                    self._match_material_to_role(material_id, existing, config)
                     saved_material_ids.append(material_id)
                     existing_reused_material_ids.append(material_id)
                     self.store.upsert_collection_candidate(
@@ -342,6 +349,10 @@ class TopicCollectionRunner:
                     status="ok",
                     output=material_understanding,
                 )
+                persisted_material = self.store.get_collected_material(material_id)
+                if persisted_material is None:
+                    raise RuntimeError(f"material was not readable after persistence: {material_id}")
+                self._match_material_to_role(material_id, persisted_material, config)
                 understanding_success_count += 1
                 saved_material_ids.append(material_id)
                 candidate["source_package"] = source_package
@@ -388,6 +399,26 @@ class TopicCollectionRunner:
             }
             self.store.finish_collection_run(run_id, "failed", summary, error=str(exc))
             raise
+
+    def _match_material_to_role(
+        self,
+        material_id: str,
+        material: dict[str, Any],
+        config: CollectionConfig,
+    ) -> None:
+        if not config.role_id or not config.role_profile:
+            return
+        match = evaluate_role_match(material, config.role_profile)
+        self.store.insert_material_role_match(
+            material_id=material_id,
+            role_id=config.role_id,
+            task_id=config.task_id,
+            fit_score=float(match["fit_score"]),
+            decision=str(match["decision"]),
+            reasons=list(match.get("reasons") or []),
+            matched_keywords=list(match.get("matched_keywords") or []),
+            avoidance_notes=list(match.get("avoidance_notes") or []),
+        )
 
     def _candidate_with_context(self, candidate: dict[str, Any], config: CollectionConfig) -> dict[str, Any]:
         source_package = candidate.setdefault("source_package", {})
@@ -532,7 +563,10 @@ class TopicCollectionRunner:
         if self.tools.has("douyin_extract_video_text"):
             if not source_link:
                 raise ToolExecutionError("Candidate has no source link for video_to_text.")
-            result = executor.run("douyin_extract_video_text", {"url": source_link})
+            result = executor.run(
+                "douyin_extract_video_text",
+                {"url": source_link, "source_package": source_package},
+            )
             normalized = result.get("normalized") or {}
             text = str(normalized.get("text") or normalized.get("source_package", {}).get("transcript_text") or "")
             return text, result
@@ -969,6 +1003,21 @@ def enrich_source_package(
             continue
         if enriched.get(key) in (None, "", []):
             enriched[key] = value
+    usage = extract_result.get("usage") if isinstance(extract_result.get("usage"), dict) else {}
+    model = str((normalized_extract or {}).get("model") or usage.get("model") or "").strip()
+    provider = str(extract_result.get("provider") or "").strip()
+    if provider:
+        enriched["transcription_provider"] = provider
+    if model:
+        enriched["transcription_model"] = model
+    enriched["transcription_result"] = {
+        "status": "success" if extract_result.get("ok", True) else "error",
+        "audio_seconds": usage.get("audio_seconds") or usage.get("billable_seconds"),
+        "estimated_cost": usage.get("estimated_cost_cny"),
+        "cache_hit": bool(extract_result.get("cache_hit")),
+        "provider_job_id": extract_result.get("provider_job_id"),
+        "raw_result": extract_result.get("raw") if isinstance(extract_result.get("raw"), dict) else {},
+    }
     enriched["transcript_text"] = transcript_text
     enriched["sample_pool_clues"] = [
         clue for clue in repeated_author_clues if clue.get("author_name") == enriched.get("author_name")

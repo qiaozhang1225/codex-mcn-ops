@@ -15,10 +15,12 @@
 
 ## External Services
 
-- MXNZP credentials for real Douyin collection:
-  - `MXNZP_APP_ID`
-  - `MXNZP_APP_SECRET`
-  - optional `DOUYIN_COOKIE`
+- Ego Lite with an authenticated Douyin browser session for public discovery
+  and browser-backed pagination.
+- Alibaba Cloud Model Studio credentials for Qwen ASR:
+  - `DASHSCOPE_API_KEY`
+  - optional `DASHSCOPE_WORKSPACE_ID`
+  - optional `DASHSCOPE_REGION` (defaults to `cn-beijing`)
 
 ## Python Package Dependencies
 

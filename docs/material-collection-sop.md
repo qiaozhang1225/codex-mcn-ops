@@ -139,7 +139,41 @@ One source material can match multiple IP roles through `material_role_matches`.
 Role-specific reuse is recorded in `material_creations`; the source role is not
 the only role allowed to use the material.
 
+Reviewed batch classification is a separate decision stored in
+`material_inventory_classifications`. Do not infer that an accepted role match
+is a formal rewrite base. Import reviewed classifications transactionally, then
+check unused supply against the current allocation:
+
+```bash
+mcn material inventory pending --role-id role_xxx --json
+mcn material inventory import \
+  --role-id role_xxx --file reviewed-inventory.json --json
+mcn material inventory summary \
+  --role-id role_xxx --allocation-file allocation.json --json
+```
+
+The default list and summary exclude material already referenced by
+`material_creations` for that role. Use `--include-used` only for an intentional
+reuse audit.
+
+A material can keep secondary topic classifications for retrieval, but at most
+one row per material and role can be `is_primary=true`. Allocation supply counts
+only distinct source works represented by reviewed primary formal bases with an
+accepted role match. The allocation file keeps `video_allocation` separate from
+`formal_base_targets`; an optional `expected_video_total` validates that batch's
+video plan without introducing a global fixed total.
+
 ## Database Migration
+
+The material inventory layer is an explicit additive migration for an existing
+schema-v3 database:
+
+```bash
+mcn --db-path data/mcn_ops.sqlite \
+  db migrate-material-inventory-v1 --json
+```
+
+It creates no classifications and does not infer them from role matches.
 
 Dry-run validation never replaces the source database:
 

@@ -270,7 +270,7 @@ def test_cli_collect_task_keyword_requires_confirmed_role(tmp_path: Path, capsys
                 "--name",
                 "草稿角色",
                 "--search-keyword",
-                "知识型口播",
+                "知识型账号",
                 "--json",
             ]
         )
@@ -334,6 +334,16 @@ def test_cli_collect_task_keyword_requires_confirmed_role(tmp_path: Path, capsys
     )
     payload = _read_json(capsys)
     assert payload["saved_count"] == 1
+    assert payload["newly_discovered_source_works"] == 1
+    assert payload["successful_transcriptions"] == 1
+    assert payload["accepted_formal_material_count"] == 1
+    assert payload["accepted_role_match_count"] == 1
+    assert payload["inventory_handoff"]["pending_review_count"] == 1
+    assert payload["inventory_handoff"]["automatic_formal_classification"] is False
+    assert "material inventory pending" in payload["inventory_handoff"]["roles"][0]["next_inventory_command"]
+    store = Store(db_path)
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM material_inventory_classifications").fetchone()[0] == 0
 
 
 def test_cli_collect_task_keyword_reaches_target_and_reports_codex_understanding(tmp_path: Path, capsys) -> None:
