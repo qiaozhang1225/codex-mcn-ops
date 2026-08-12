@@ -405,6 +405,7 @@ class CollectionSchemaV3Migrator:
             "unresolved": [],
             "checks": {},
         }
+        migration_record_created = False
         try:
             self._backup_read_only(destination)
             with sqlite3.connect(destination) as conn:
@@ -423,17 +424,25 @@ class CollectionSchemaV3Migrator:
                         (COLLECTION_SCHEMA_V3, _now(), json.dumps(report, ensure_ascii=False, sort_keys=True)),
                     )
                     conn.commit()
+                    migration_record_created = True
                     report["status"] = "validated"
 
             if replace:
                 recovery = Path(recovery_path).expanduser().resolve()
-                self._atomic_replace(destination, recovery)
                 report["status"] = "replaced"
                 report["recovery"] = str(recovery)
                 report["destination"] = str(self.source_path)
+                report["completed_at"] = _now()
+                if migration_record_created:
+                    self._update_migration_report(destination, report)
+                self._atomic_replace(destination, recovery)
             elif owned_temp:
                 report["status"] = "validated_dry_run" if report["status"] == "validated" else report["status"]
-            report["completed_at"] = _now()
+                report["completed_at"] = _now()
+            else:
+                report["completed_at"] = _now()
+                if migration_record_created:
+                    self._update_migration_report(destination, report)
             return report
         except Exception as exc:
             report["status"] = "failed"
@@ -884,6 +893,15 @@ class CollectionSchemaV3Migrator:
         except Exception:
             os.replace(recovery, self.source_path)
             raise
+
+    @staticmethod
+    def _update_migration_report(database: Path, report: Mapping[str, Any]) -> None:
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "UPDATE schema_migrations SET report_json = ? WHERE version = ?",
+                (json.dumps(dict(report), ensure_ascii=False, sort_keys=True), COLLECTION_SCHEMA_V3),
+            )
+            conn.commit()
 
 
 def _count_where(conn: sqlite3.Connection, table: str, where: str) -> int:

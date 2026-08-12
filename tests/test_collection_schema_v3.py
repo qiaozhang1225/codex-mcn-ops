@@ -282,7 +282,10 @@ def test_migration_rebuilds_collection_schema_and_reconciles(tmp_path: Path) -> 
             "SELECT report_json FROM schema_migrations WHERE version = ?", (COLLECTION_SCHEMA_V3,)
         ).fetchone()
         assert stored is not None
-        assert json.loads(stored[0])["checks"]["passed"] is True
+        stored_report = json.loads(stored[0])
+        assert stored_report["checks"]["passed"] is True
+        assert stored_report["status"] == "validated"
+        assert stored_report["completed_at"] == report["completed_at"]
 
 
 def test_unresolved_work_identity_fails_without_touching_source(tmp_path: Path) -> None:
@@ -351,5 +354,13 @@ def test_atomic_replacement_is_explicit_and_retains_recovery(tmp_path: Path) -> 
     assert recovery.is_file()
     with sqlite3.connect(source) as current:
         assert not (_tables(current) & LEGACY_TABLES)
+        stored_report = json.loads(
+            current.execute(
+                "SELECT report_json FROM schema_migrations WHERE version = ?", (COLLECTION_SCHEMA_V3,)
+            ).fetchone()[0]
+        )
+        assert stored_report["status"] == "replaced"
+        assert stored_report["recovery"] == str(recovery.resolve())
+        assert stored_report["completed_at"] == report["completed_at"]
     with sqlite3.connect(recovery) as old:
         assert LEGACY_TABLES <= _tables(old)
