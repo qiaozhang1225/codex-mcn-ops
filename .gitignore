@@ -13,6 +13,7 @@ tmp/
 # Local runtime state
 data/*.sqlite
 data/*.sqlite-*
+data/backups/
 data/browser-profiles/
 runs/*
 !runs/.gitkeep
@@ -21,3 +22,4 @@ runs/*
 .env
 .env.local
 local.*
+lark-auth-*.png
