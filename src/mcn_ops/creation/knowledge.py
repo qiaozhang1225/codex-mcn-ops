@@ -75,6 +75,10 @@ def validate_role_knowledge(root: Path, role: dict[str, Any]) -> dict[str, Any]:
     required_paths = [
         root / "creation" / "material-selection-playbook.md",
         root / "creation" / "global-rewrite-playbook.md",
+        root / "creation" / "script-writer-playbook.md",
+        root / "creation" / "quality-review-playbook.md",
+        root / "creation" / "five-affliction-quality-review.md",
+        root / "creation" / "risk-review-playbook.md",
         Path(config["profile_path"]),
         ip_root / "creation-playbook.md",
         common_path,

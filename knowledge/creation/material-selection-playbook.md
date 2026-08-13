@@ -35,7 +35,7 @@ Separate **formal rewrite bases** from **topic clues**:
 
 - viral metrics, audience fit, and topic coverage make a source worth studying, but do not prove adaptation viability;
 - a formal rewrite base must already contain enough argument, evidence, or scene value to reach the target through compression and translation;
-- a topic clue may inspire later search, but must not enter `rewrite_draft` as the sole source;
+- a topic clue may inspire later search, but must not enter `script_writing` as the sole adaptation source;
 - “requires substantial reconstruction” is a rejection or reclassification signal, not permission to invent the missing article.
 
 Selection must preserve known weaknesses instead of ignoring them after acceptance. Record why the source was considered, what would be lost or invented during adaptation, and the maximum safe salvage boundary. If that boundary cannot produce the task goal, reselect.

@@ -1,110 +1,83 @@
-# Workflow: Create Script
+# Content Creation Workflow v3
 
-## Intent
+Use one session with three linear roles. Do not create persistent role agents. Script Writer is the only role allowed to modify viewer-facing copy.
 
-Generate publish-ready oral script copy from accepted materials, a confirmed IP persona, common and domain rules, IP professional knowledge, and the evolving creation knowledge pack.
+## Stage chain
 
-This workflow starts after material collection, transcription, understanding, and eligibility review have produced a usable source pool.
+Adaptation and half-original work:
 
-## Inputs
+```text
+material_selection → creation_brief → script_writing → quality_review → risk_review → publish_format → delivery
+```
 
-- confirmed `ip_roles` profile and `persona_packet_json`
-- `collected_materials.status='collected'`
-- `collected_materials.eligibility_status='accepted'`
-- promoted material understanding and complete transcript text
-- global rules under `knowledge/creation/`
-- common and selected domain rules under `knowledge/domains/`
-- IP files under `knowledge/ip/<role_slug>/`
-- target topic, goal, platform, and material count
+Original work starts at `creation_brief`.
 
-## Formal Agent Workflow
-
-Create a task and validate the IP knowledge pack:
+## Task
 
 ```bash
 mcn create task new \
   --role-id role_xxxxxxxxxxxx \
-  --topic 财运 \
-  --goal "生成一条知识型口播" \
+  --topic "topic" \
+  --goal "goal" \
   --platform douyin \
-  --target-count 1
-
-mcn create knowledge validate --role-id role_xxxxxxxxxxxx --json
+  --target-count 1 \
+  --creation-mode adaptation
 ```
 
-For each stage, prepare a packet, let Codex produce one JSON result matching `response_template`, submit it, inspect both validation reports, and confirm only a passing result:
+Use `half_original` when IP knowledge supplies a material part of the main argument. Use `original` when no source remains the drafting spine.
+
+## Formal stage execution
+
+For every stage, prepare a packet, produce one JSON result, submit it, inspect both validation reports, and confirm only a structurally valid result.
 
 ```bash
-mcn create stage prepare \
-  --task-id createtask_xxxxxxxxxxxx \
-  --stage material_selection \
-  --output /tmp/material-selection-packet.json
-
-mcn create stage submit \
-  --task-id createtask_xxxxxxxxxxxx \
-  --stage material_selection \
-  --input /tmp/material-selection-result.json \
-  --json
-
-mcn create task confirm \
-  --task-id createtask_xxxxxxxxxxxx \
-  --stage material_selection
+mcn create stage prepare --task-id TASK_ID --stage STAGE --knowledge-root knowledge --output /tmp/packet.json --json
+mcn create stage submit --task-id TASK_ID --stage STAGE --knowledge-root knowledge --input /tmp/result.json --json
+mcn create task confirm --task-id TASK_ID --stage STAGE --json
 ```
 
-Run stages in order:
+Do not use `mcn create task run` for `script_writing`, `quality_review`, or `risk_review`.
 
-1. `material_selection`
-2. `creation_brief`
-3. `rewrite_draft`
-4. `hook_enhancement`
-5. `risk_cleanup`
-6. `publish_format`
-7. `delivery`
+## Script Writer
 
-A corrected submission writes a new `creation_stage_runs.version` and preserves the previous result. `mcn create task run` is a deterministic `rules-fallback` path for regression tests and emergency drafts; it is not formal `codex-agent` output.
+Load the prepared source, brief, IP, domain, professional knowledge, current script, and pending revision request. Produce a complete script. On revision, bind to the base script and review run, obey the declared scope, preserve exact protected spans, and declare changes that mechanically reconstruct the new body.
 
-## Material Selection
+Writing modes:
 
-Preparation is read-only. It ranks eligible candidates and includes complete transcript text without persisting a selection. Submission records:
+- `initial_draft`;
+- `opening_only`;
+- `opening_and_bridge`;
+- `localized_body_revision`;
+- `risk_localized_revision`;
+- `full_rewrite`.
 
-- source content task and hook mechanism;
-- speaker position and thickness judgment;
-- `formal_rewrite_base` or `topic_clue`;
-- `aligned`, `acceptable_variance`, `repairable_conflict`, or `hard_conflict`;
-- exact conflicting claim, disposition, weaknesses, and maximum salvage boundary.
+## Quality Review
 
-`topic_clue` and `hard_conflict` cannot advance as standard adaptation. A repairable conflict must preserve the source task, hook mechanism, and evidence path after local correction.
+Do not output copy. Review content task, viewer value, source mechanism, IP voice, speaker credibility, reasoning, oral integrity, opening attention, and body payoff.
 
-## Creation Modes And Professional Support
+Review `贪、瞋、痴、慢、疑` separately with `strong`, `weak`, `absent`, or `artificial`. Strong and weak statuses require exact opening evidence; strong requires exact body payoff evidence. Five natural strong drivers are the highest target. A pass normally requires at least three strong drivers, no artificial driver, one coherent contract, and complete payoff. Never add unsupported stimulation to reach five.
 
-`creation_brief` selects:
+Return `pass`, `revise`, or `return_upstream`. A non-pass result must give a bounded revision request and exact protected spans.
 
-- `adaptation`: the source provides the main claim, evidence path, and structure;
-- `half_original`: IP knowledge supplies a material part of the argument;
-- `original`: the source is not the drafting spine.
+## Risk Review
 
-Professional support uses `none`, `guardrail_only`, or `one_support_point`. Standard adaptation may cite at most one professional card. Every added professional claim must carry a valid knowledge card ID.
+Do not output cleaned copy. Review the latest quality-approved body for diagnosis, single-cause claims, universalization, fabricated identity or evidence, professional conflict, regulated claims, certainty, outcome promises, and platform risk.
 
-## Knowledge Packet
+Return `pass`, `revise`, `return_upstream`, or `reject`. Every issue must quote an exact span and give the maximum repair boundary. Repairs return to Script Writer.
 
-Audit context with:
+## Revision routing
 
-```bash
-mcn create knowledge packet --task-id createtask_xxxxxxxxxxxx --json
+```text
+Quality revise → Script Writer → Quality Review
+Risk revise → Script Writer → Quality Review → Risk Review
 ```
 
-Stage packets contain only the knowledge required for that stage: persona, global playbooks, common and selected domain playbooks, IP playbook, professional cards, recent memory, feedback, selected material understanding, upstream outputs, task brief, and output contract. Full transcripts are included for selection, brief, and rewrite stages.
+Every review binds to the Script Writer stage run ID and body hash. A new body invalidates all earlier review passes.
 
-## Output And Learning
+## Publish gate
 
-`publish_format` creates a `content_packages` draft, `material_creations` links, and a `creation_delivery_packages` record. `final_copy` must equal the confirmed risk-cleaned body.
+`publish_format.final_copy` must exactly equal the latest Script Writer body passed by both Quality Review and Risk Review. Delivery formats confirmed artifacts only and never rewrites the body.
 
-Record pre-publish and post-publish feedback separately. Generate learning proposals, but apply them only after explicit review:
+## Legacy
 
-```bash
-mcn create feedback add --task-id createtask_xxx --role-id role_xxx --stage rewrite_draft --platform douyin --judgment rejected --human-note "开头变弱"
-mcn create learning propose --role-id role_xxx
-mcn create learning apply --proposal-id clearn_xxx
-```
-
-SQLite remains the audit source; Markdown and professional cards remain the human-readable knowledge source.
+Methodology-v2 stages `rewrite_draft`, `hook_enhancement`, and `risk_cleanup` remain available for historical task reading and export. Do not use them for new tasks.

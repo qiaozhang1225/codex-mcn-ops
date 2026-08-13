@@ -7,7 +7,7 @@ from typing import Any
 from ..store import Store
 from .contracts import response_template, stage_contract, validate_stage_submission
 from .workflow import (
-    CREATION_STAGES,
+    ALL_CREATION_STAGES,
     CREATION_STAGE_CONTRACT_VERSION,
     DEFAULT_CREATION_MODEL,
     DEFAULT_CREATION_PROVIDER,
@@ -17,15 +17,17 @@ from .workflow import (
     _explicit_selected_material_ids,
     _material_packet,
     _material_search_text,
+    _latest_confirmed_script_run,
     _persist_stage_artifacts,
     _selection_reason,
     _task,
+    _stage_sequence_for_task,
     _upstream_stage_run_ids,
     build_creation_context_packet,
 )
 
 
-FORMAL_STAGE_MODE = "codex_stage_submission_v1"
+FORMAL_STAGE_MODE = "codex_stage_submission_v2"
 def prepare_creation_stage(
     store: Store,
     task_id: str,
@@ -34,11 +36,11 @@ def prepare_creation_stage(
     knowledge_root: Path,
     candidate_limit: int = 20,
 ) -> dict[str, Any]:
-    if stage_key not in CREATION_STAGES:
+    if stage_key not in ALL_CREATION_STAGES:
         raise ValueError(f"unknown creation stage: {stage_key}")
     task = _task(store, task_id)
     _assert_previous_stage_confirmed(store, task_id, stage_key)
-    include_transcript = stage_key in {"material_selection", "creation_brief", "rewrite_draft"}
+    include_transcript = stage_key in {"material_selection", "creation_brief", "rewrite_draft", "script_writing"}
     packet = build_creation_context_packet(
         store,
         task_id,
@@ -49,6 +51,9 @@ def prepare_creation_stage(
     if stage_key == "material_selection":
         packet["candidate_materials"] = _candidate_materials(store, task, limit=candidate_limit)
     packet["upstream_outputs"] = _upstream_outputs(store, task_id, stage_key)
+    packet.update(_current_v3_context(store, task_id))
+    if stage_key == "script_writing":
+        packet["script_revision_context"] = _script_revision_context(store, task_id)
     packet["output_contract"] = stage_contract(stage_key)
     packet["response_template"] = response_template(stage_key)
     packet["submission_rules"] = [
@@ -56,6 +61,7 @@ def prepare_creation_stage(
         "Use only claims supported by the source packet or cited professional knowledge cards.",
         "Preserve the source content task and propagation mechanism before applying IP or domain constraints.",
         "Do not advance a topic clue or hard professional conflict as a formal rewrite base.",
+        "Only Script Writer may create or modify viewer-facing copy; review stages are read-only.",
     ]
     packet["prepared_for"] = {
         "provider": str(task.get("provider") or DEFAULT_CREATION_PROVIDER),
@@ -89,7 +95,9 @@ def submit_creation_stage(
         "gate_failures": validation.gate_failures,
     }
     output["status"] = "needs_confirmation" if validation.passed else "needs_retry"
-    output["creation_mode"] = FORMAL_STAGE_MODE
+    output["submission_mode"] = FORMAL_STAGE_MODE
+    if stage_key != "script_writing":
+        output["creation_mode"] = FORMAL_STAGE_MODE
     if stage_key == "material_selection":
         _persist_material_decisions(store, task, result, packet)
     if stage_key == "publish_format" and validation.passed:
@@ -175,9 +183,10 @@ def _candidate_materials(store: Store, task: dict[str, Any], *, limit: int) -> l
 
 
 def _upstream_outputs(store: Store, task_id: str, stage_key: str) -> dict[str, Any]:
-    current_index = CREATION_STAGES.index(stage_key)
+    stages = _stage_sequence_for_task(store, task_id, stage_key)
+    current_index = stages.index(stage_key)
     outputs: dict[str, Any] = {}
-    for key in CREATION_STAGES[:current_index]:
+    for key in stages[:current_index]:
         stage = store.latest_creation_stage_run(task_id, key)
         if stage:
             outputs[key] = dict(stage.get("output") or {})
@@ -217,7 +226,72 @@ def _normalize_stage_output(stage_key: str, result: dict[str, Any], packet: dict
                 "new_claims": result.get("new_claims") or [],
             },
         }
+    if stage_key == "script_writing":
+        return dict(result)
     return dict(result)
+
+
+def _current_v3_context(store: Store, task_id: str) -> dict[str, Any]:
+    script_run = _latest_confirmed_script_run(store, task_id)
+    script_output = dict(script_run.get("output") or {}) if script_run else {}
+    current_script = (
+        {
+            "stage_run_id": script_run["id"],
+            "version": script_run["version"],
+            "body_hash": script_output.get("body_hash") or "",
+            "body": script_output.get("body") or "",
+            "opening": script_output.get("opening") or "",
+            "body_contract": script_output.get("body_contract") or "",
+            "writing_mode": script_output.get("writing_mode") or "",
+        }
+        if script_run
+        else {}
+    )
+    quality_run = store.latest_creation_stage_run(task_id, "quality_review")
+    risk_run = store.latest_creation_stage_run(task_id, "risk_review")
+    return {
+        "current_script": current_script,
+        "current_quality_review": dict(quality_run.get("output") or {}) if quality_run and quality_run.get("status") == "confirmed" else {},
+        "current_risk_review": dict(risk_run.get("output") or {}) if risk_run and risk_run.get("status") == "confirmed" else {},
+    }
+
+
+def _script_revision_context(store: Store, task_id: str) -> dict[str, Any]:
+    script_run = _latest_confirmed_script_run(store, task_id)
+    if not script_run:
+        return {}
+    script_output = dict(script_run.get("output") or {})
+    candidates = []
+    for stage_key in ["quality_review", "risk_review"]:
+        for run in store.list_creation_stage_runs(task_id, stage_key=stage_key):
+            output = dict(run.get("output") or {})
+            if (
+                run.get("status") == "confirmed"
+                and output.get("verdict") in {"revise", "return_upstream", "reject"}
+                and output.get("reviewed_script_run_id") == script_run.get("id")
+                and output.get("reviewed_body_hash") == script_output.get("body_hash")
+            ):
+                candidates.append(run)
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("version") or 0), str(item.get("id") or "")))
+    review_run = candidates[-1]
+    review_output = dict(review_run.get("output") or {})
+    if review_output.get("verdict") == "reject":
+        raise ValueError("the latest review rejected this script or source; create a new task or replace the source")
+    if review_output.get("verdict") == "return_upstream":
+        briefs = [run for run in store.list_creation_stage_runs(task_id, stage_key="creation_brief") if run.get("status") == "confirmed"]
+        latest_brief = briefs[-1] if briefs else None
+        if not latest_brief or str(latest_brief.get("created_at") or "") <= str(review_run.get("created_at") or ""):
+            raise ValueError("return_upstream requires a newer confirmed creation_brief before Script Writer runs again")
+    return {
+        "base_script_run_id": script_run["id"],
+        "base_body_hash": script_output.get("body_hash") or "",
+        "base_body": script_output.get("body") or "",
+        "revision_request_stage_run_id": review_run["id"],
+        "revision_request_source": review_run["stage_key"],
+        "revision_request": review_output.get("revision_request") or {},
+    }
 
 
 def _persist_material_decisions(store: Store, task: dict[str, Any], result: dict[str, Any], packet: dict[str, Any]) -> None:
@@ -286,6 +360,8 @@ def _stage_markdown(stage_key: str, output: dict[str, Any]) -> str:
         return "# Rewrite Draft\n\n" + str(output.get("draft_text") or "")
     if stage_key == "risk_cleanup":
         return "# Risk Cleanup\n\n" + str(output.get("cleaned_body") or "")
+    if stage_key == "script_writing":
+        return "# Script Writer\n\n" + str(output.get("body") or "")
     if stage_key == "delivery":
         return str(output.get("delivery_markdown") or "")
     return f"# {stage_key.replace('_', ' ').title()}\n\n```json\n{json.dumps(output, ensure_ascii=False, indent=2)}\n```\n"

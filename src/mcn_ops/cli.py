@@ -36,7 +36,7 @@ from .collection.workflows import (
     format_task_show,
 )
 from .creation import (
-    CREATION_STAGES,
+    ALL_CREATION_STAGES,
     DEFAULT_CREATION_MODEL,
     DEFAULT_CREATION_PROVIDER,
     apply_learning_update,
@@ -124,19 +124,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_task_new.add_argument("--provider", default=DEFAULT_CREATION_PROVIDER)
     create_task_new.add_argument("--model", default=DEFAULT_CREATION_MODEL)
     create_task_new.add_argument("--allow-reuse-material", action="store_true")
+    create_task_new.add_argument("--creation-mode", choices=["adaptation", "half_original", "original"], default="adaptation")
     create_task_new.add_argument("--json", action="store_true")
     create_task_run = create_task_sub.add_parser("run", help="Run one creation task stage")
     create_task_run.add_argument("--task-id", required=True)
-    create_task_run.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_run.add_argument("--stage", required=True, choices=ALL_CREATION_STAGES)
     create_task_run.add_argument("--knowledge-root", default="knowledge")
     create_task_run.add_argument("--json", action="store_true")
     create_task_confirm = create_task_sub.add_parser("confirm", help="Confirm one creation task stage")
     create_task_confirm.add_argument("--task-id", required=True)
-    create_task_confirm.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_confirm.add_argument("--stage", required=True, choices=ALL_CREATION_STAGES)
     create_task_confirm.add_argument("--json", action="store_true")
     create_task_retry = create_task_sub.add_parser("retry", help="Retry one creation task stage with a note")
     create_task_retry.add_argument("--task-id", required=True)
-    create_task_retry.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_task_retry.add_argument("--stage", required=True, choices=ALL_CREATION_STAGES)
     create_task_retry.add_argument("--note", required=True)
     create_task_retry.add_argument("--knowledge-root", default="knowledge")
     create_task_retry.add_argument("--json", action="store_true")
@@ -153,14 +154,14 @@ def build_parser() -> argparse.ArgumentParser:
     create_stage_sub = create_stage.add_subparsers(dest="create_stage_command", required=True)
     create_stage_prepare = create_stage_sub.add_parser("prepare", help="Build the full context packet and output contract for one stage")
     create_stage_prepare.add_argument("--task-id", required=True)
-    create_stage_prepare.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_stage_prepare.add_argument("--stage", required=True, choices=ALL_CREATION_STAGES)
     create_stage_prepare.add_argument("--knowledge-root", default="knowledge")
     create_stage_prepare.add_argument("--candidate-limit", type=int, default=20)
     create_stage_prepare.add_argument("--output")
     create_stage_prepare.add_argument("--json", action="store_true")
     create_stage_submit = create_stage_sub.add_parser("submit", help="Validate and persist one agent-produced stage result")
     create_stage_submit.add_argument("--task-id", required=True)
-    create_stage_submit.add_argument("--stage", required=True, choices=CREATION_STAGES)
+    create_stage_submit.add_argument("--stage", required=True, choices=ALL_CREATION_STAGES)
     create_stage_submit.add_argument("--knowledge-root", default="knowledge")
     create_stage_submit.add_argument("--input", required=True)
     create_stage_submit.add_argument("--note", default="")
@@ -178,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_feedback_add.add_argument("--judgment", default="")
     create_feedback_add.add_argument("--task-id")
     create_feedback_add.add_argument("--role-id")
-    create_feedback_add.add_argument("--stage", choices=CREATION_STAGES)
+    create_feedback_add.add_argument("--stage", choices=ALL_CREATION_STAGES)
     create_feedback_add.add_argument("--json", action="store_true")
     create_feedback_analyze = create_feedback_sub.add_parser("analyze", help="Summarize feedback for one IP role")
     create_feedback_analyze.add_argument("--role-id", required=True)
@@ -616,6 +617,7 @@ def handle_create(args: argparse.Namespace, store: Store) -> int:
                 provider=args.provider,
                 model=args.model,
                 allow_reuse_material=args.allow_reuse_material,
+                creation_mode=args.creation_mode,
             )
             if args.json:
                 json_print(report)

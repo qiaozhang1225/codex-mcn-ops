@@ -70,10 +70,10 @@ Material collection separates three responsibilities:
 
 Creation separates process state from final publish content:
 
-- `creation_tasks`: one high-level rewrite task for a confirmed IP, topic, platform, goal, and target count.
-- `creation_stage_runs`: versioned stage outputs for material selection, brief, draft, hook, risk cleanup, publish format, and delivery. Retry creates a new stage version and keeps the old one.
+- `creation_tasks`: one high-level adaptation, half-original, or original task for a confirmed IP, topic, platform, goal, and target count.
+- `creation_stage_runs`: versioned stage outputs. Methodology v3 uses material selection, brief, Script Writer, Quality Review, Risk Review, publish format, and delivery. Retry creates a new stage version and keeps the old one; methodology-v2 stage records remain readable.
 - `creation_material_selections`: material recall results for one task. It records selected and rejected material decisions, scores, and reasons.
-- `creation_drafts`: draft artifacts from rewrite, hook enhancement, and risk cleanup stages.
+- `creation_drafts`: immutable viewer-copy versions written by Script Writer in methodology v3, plus legacy rewrite, hook-enhancement, and risk-cleanup artifacts.
 - `creation_delivery_packages`: the five-part delivery structure and the linked `content_packages` row when publish formatting is generated.
 - `creation_feedback_events`: lightweight manual feedback and platform notices after publishing.
 - `creation_stage_feedback_events`: pre-publish stage feedback such as rejected drafts, retry reasons, and human review notes. These events feed learning proposals before content is published.
@@ -82,7 +82,7 @@ Creation separates process state from final publish content:
 
 Formal creation uses a two-step agent interface. `create stage prepare` builds a read-only context packet with stage knowledge, complete source text where required, and a response contract. Codex performs semantic judgment or writing, then `create stage submit` validates and persists the result. The deterministic `create task run` path records `rules-fallback/deterministic-v1` and is not formal agent output.
 
-`material_selection` records source task, propagation mechanism, thickness, professional alignment, disposition, and salvage boundary. `topic_clue` and `hard_conflict` cannot advance as standard adaptation. `rewrite_draft` must return source mapping and trace every added professional claim to a card ID.
+`material_selection` records source task, propagation mechanism, thickness, professional alignment, disposition, and salvage boundary. `topic_clue` and `hard_conflict` cannot advance as standard adaptation. `script_writing` is the only stage allowed to write viewer copy and must trace added professional claims to card IDs. `quality_review` and `risk_review` are read-only and bind their verdicts to one Script Writer stage run and body hash.
 
 IP role confirmation status:
 
@@ -228,20 +228,23 @@ mcn create task new \
   --topic 财运 \
   --goal "为思丞说生成一条知识型五段式口播" \
   --platform douyin \
-  --target-count 3
+  --target-count 3 \
+  --creation-mode adaptation
 ```
 
 Stages are fixed and should be confirmed in order:
 
 1. `material_selection`: recalls only `collected_materials.status='collected'` and `eligibility_status='accepted'`.
 2. `creation_brief`: locks IP, topic, audience, main claim, retained material points, and avoided directions.
-3. `rewrite_draft`: generates a complete oral script draft.
-4. `hook_enhancement`: keeps or rebuilds the opening and records hook candidates.
-5. `risk_cleanup`: replaces high-risk terms and records edge terms for observation.
+3. `script_writing`: creates the complete script or applies a bounded review revision. It is the only copy-writing stage.
+4. `quality_review`: performs read-only content, reasoning, oral, body-payoff, and `贪、瞋、痴、慢、疑` evidence review.
+5. `risk_review`: performs read-only claim, professional-boundary, and platform-risk review.
 6. `publish_format`: creates the five-part publish package and the linked `content_packages` draft.
 7. `delivery`: exports a human-readable Markdown delivery package.
 
 The default formal identity is `codex-agent/gpt-5.5`. Rule-based output is only a fallback/test mode and must be marked as draft-level creation, not final Codex work.
+
+Quality or risk revisions return to `script_writing`. Any new body invalidates prior review passes. `publish_format.final_copy` must equal the latest Script Writer body passed by both reviewers. Original tasks use `--creation-mode original` and start at `creation_brief` without material selection.
 
 Material reuse is IP-specific. By default, materials already present in `material_creations` for the same role are not recommended again. Use `--allow-reuse-material` only when intentionally revisiting a source material.
 

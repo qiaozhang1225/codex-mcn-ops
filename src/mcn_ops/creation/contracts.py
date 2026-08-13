@@ -9,6 +9,12 @@ MATERIAL_CLASSES = {"formal_rewrite_base", "topic_clue"}
 PROFESSIONAL_ALIGNMENTS = {"aligned", "acceptable_variance", "repairable_conflict", "hard_conflict"}
 PROFESSIONAL_DISPOSITIONS = {"keep", "qualify", "replace_claim", "reclassify", "reject"}
 PROFESSIONAL_SUPPORT_MODES = {"none", "guardrail_only", "one_support_point"}
+WRITING_MODES = {"initial_draft", "opening_only", "opening_and_bridge", "localized_body_revision", "risk_localized_revision", "full_rewrite"}
+REVIEW_VERDICTS = {"pass", "revise", "return_upstream"}
+RISK_REVIEW_VERDICTS = {"pass", "revise", "return_upstream", "reject"}
+AFFLICTION_DRIVERS = ("贪", "瞋", "痴", "慢", "疑")
+AFFLICTION_STATUSES = {"strong", "weak", "absent", "artificial"}
+REVIEW_COPY_KEYS = {"body", "draft", "draft_text", "cleaned_body", "final_copy", "publish_package", "replacement_copy", "suggested_copy"}
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,29 @@ def stage_contract(stage_key: str) -> dict[str, Any]:
             "required": ["cleaned_body", "claim_risks", "risk_replacement_scope", "overall_risk"],
             "gate": "Risk cleanup may change only unsafe spans and must not replace the source content task.",
         },
+        "script_writing": {
+            "required": [
+                "writing_mode", "creation_mode", "base_script_run_id", "base_body_hash", "revision_request_stage_run_id",
+                "body", "opening", "body_contract", "source_content_task_preserved", "source_hook_mechanism_preserved",
+                "source_evidence_path_preserved", "speaker_translation_valid", "new_claims", "source_mapping",
+                "protected_elements", "changed_spans",
+            ],
+            "enums": {"writing_mode": sorted(WRITING_MODES), "creation_mode": sorted(ADAPTATION_MODES)},
+            "gate": "Script Writer is the only copy owner. Revisions must bind to a review request and reconstruct the new body only from declared changed_spans.",
+        },
+        "quality_review": {
+            "required": [
+                "reviewed_script_run_id", "reviewed_body_hash", "verdict", "quality_dimensions", "five_affliction_review",
+                "source_mechanism_review", "body_contract_review", "protected_elements", "failed_dimensions", "revision_request",
+            ],
+            "enums": {"verdict": sorted(REVIEW_VERDICTS)},
+            "gate": "Quality Review is read-only. All five drivers require evidence-based review; a pass normally needs at least three strong, no artificial driver, and complete body payoff.",
+        },
+        "risk_review": {
+            "required": ["reviewed_script_run_id", "reviewed_body_hash", "verdict", "issues", "overall_risk", "revision_request"],
+            "enums": {"verdict": sorted(RISK_REVIEW_VERDICTS)},
+            "gate": "Risk Review is read-only and must review the same script version passed by Quality Review. Repairable issues return bounded directions to Script Writer.",
+        },
         "publish_format": {
             "required": ["publish_package"],
             "package_required": ["cover_title_4", "video_title_18", "video_description", "pinned_comment", "final_copy"],
@@ -129,7 +158,7 @@ def response_template(stage_key: str) -> dict[str, Any]:
             "support_card_ids": [],
             "support_function": "",
             "target_gap": "",
-            "risk_policy": "defer_to_risk_cleanup",
+            "risk_policy": "defer_to_risk_review",
         },
         "rewrite_draft": {
             "draft_text": "",
@@ -142,6 +171,22 @@ def response_template(stage_key: str) -> dict[str, Any]:
         },
         "hook_enhancement": {"selected_hook": "", "body": "", "hook_diff_type": "unchanged", "mechanism_preserved": True},
         "risk_cleanup": {"cleaned_body": "", "claim_risks": [], "risk_replacement_scope": {"changed_spans": []}, "overall_risk": "safe"},
+        "script_writing": {
+            "writing_mode": "initial_draft", "creation_mode": "adaptation", "base_script_run_id": "", "base_body_hash": "",
+            "revision_request_stage_run_id": "", "body": "", "opening": "", "body_contract": "",
+            "source_content_task_preserved": True, "source_hook_mechanism_preserved": True,
+            "source_evidence_path_preserved": True, "speaker_translation_valid": True, "new_claims": [], "source_mapping": [],
+            "protected_elements": [], "changed_spans": [],
+        },
+        "quality_review": {
+            "reviewed_script_run_id": "", "reviewed_body_hash": "", "verdict": "pass", "quality_dimensions": {},
+            "five_affliction_review": {
+                **{driver: {"status": "absent", "evidence_span": "", "reason": "", "body_payoff": False, "body_payoff_span": "", "revision_direction": ""} for driver in AFFLICTION_DRIVERS},
+                "coherent_body_contract": True, "rationale_for_not_forcing_missing": "",
+            },
+            "source_mechanism_review": {}, "body_contract_review": {}, "protected_elements": [], "failed_dimensions": [], "revision_request": None,
+        },
+        "risk_review": {"reviewed_script_run_id": "", "reviewed_body_hash": "", "verdict": "pass", "issues": [], "overall_risk": "safe", "revision_request": None},
         "publish_format": {"publish_package": {"cover_title_4": "", "video_title_18": "", "video_description": "", "pinned_comment": "", "final_copy": ""}},
         "delivery": {"delivery_markdown": ""},
     }
@@ -170,6 +215,12 @@ def validate_stage_submission(stage_key: str, result: Any, packet: dict[str, Any
         _validate_hook(result, structural, gates)
     elif stage_key == "risk_cleanup":
         _validate_risk(result, structural, gates)
+    elif stage_key == "script_writing":
+        _validate_script_writing(result, packet, structural, gates)
+    elif stage_key == "quality_review":
+        _validate_quality_review(result, packet, structural, gates)
+    elif stage_key == "risk_review":
+        _validate_risk_review(result, packet, structural, gates)
     elif stage_key == "publish_format":
         _validate_publish(result, packet, structural, gates)
     elif stage_key == "delivery":
@@ -235,6 +286,9 @@ def _validate_creation_brief(result: dict[str, Any], packet: dict[str, Any], str
     cards = result.get("support_card_ids")
     if mode not in ADAPTATION_MODES:
         structural.append("adaptation_mode is invalid")
+    requested_mode = str((packet.get("task_context") or {}).get("creation_mode") or "adaptation")
+    if mode != requested_mode:
+        gates.append(f"adaptation_mode must match task creation_mode: {requested_mode}")
     if support_mode not in PROFESSIONAL_SUPPORT_MODES:
         structural.append("professional_support_mode is invalid")
     if not isinstance(cards, list):
@@ -298,13 +352,231 @@ def _validate_risk(result: dict[str, Any], structural: list[str], gates: list[st
         gates.append("risk cleanup changed the source content task")
 
 
+def _validate_script_writing(result: dict[str, Any], packet: dict[str, Any], structural: list[str], gates: list[str]) -> None:
+    writing_mode = result.get("writing_mode")
+    creation_mode = result.get("creation_mode")
+    body = str(result.get("body") or "")
+    opening = str(result.get("opening") or "")
+    if writing_mode not in WRITING_MODES:
+        structural.append("writing_mode is invalid")
+    if creation_mode not in ADAPTATION_MODES:
+        structural.append("creation_mode is invalid")
+    requested_mode = str((packet.get("task_context") or {}).get("creation_mode") or "adaptation")
+    if creation_mode != requested_mode:
+        gates.append(f"creation_mode must match task creation_mode: {requested_mode}")
+    if not body.strip():
+        structural.append("body must not be empty")
+    if not opening.strip() or not body.lstrip().startswith(opening.strip()):
+        gates.append("opening must be the exact leading span of body")
+    for field in ["new_claims", "source_mapping", "protected_elements", "changed_spans"]:
+        if not isinstance(result.get(field), list):
+            structural.append(f"{field} must be a list")
+    if creation_mode == "adaptation":
+        for field in ["source_content_task_preserved", "source_hook_mechanism_preserved", "source_evidence_path_preserved", "speaker_translation_valid"]:
+            if result.get(field) is not True:
+                gates.append(f"adaptation requires {field}=true")
+    _validate_professional_claims(result.get("new_claims"), packet, creation_mode, structural, gates)
+
+    revision = packet.get("script_revision_context") or {}
+    if writing_mode == "initial_draft":
+        if packet.get("current_script"):
+            gates.append("initial_draft is allowed only when no confirmed script version exists")
+        if revision:
+            gates.append("a pending review revision request must be handled instead of creating another initial_draft")
+        if any(str(result.get(field) or "").strip() for field in ["base_script_run_id", "base_body_hash", "revision_request_stage_run_id"]):
+            gates.append("initial_draft must not bind to a base script or revision request")
+        if result.get("changed_spans"):
+            gates.append("initial_draft must use an empty changed_spans list")
+        return
+
+    if not revision:
+        gates.append("revision writing_mode requires a pending confirmed review request")
+        return
+    for field in ["base_script_run_id", "base_body_hash", "revision_request_stage_run_id"]:
+        if result.get(field) != revision.get(field):
+            gates.append(f"{field} does not match the pending review request")
+    request = revision.get("revision_request") or {}
+    if writing_mode != request.get("revision_scope"):
+        gates.append("writing_mode must equal revision_request.revision_scope")
+    base_body = str(revision.get("base_body") or "")
+    changes = result.get("changed_spans")
+    if not isinstance(changes, list) or not changes:
+        gates.append("a revision requires at least one declared changed span")
+        return
+    reconstructed = base_body
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            structural.append(f"changed_spans[{index}] must be an object")
+            continue
+        before = str(change.get("before") or "")
+        after = str(change.get("after") or "")
+        if not before or before not in reconstructed:
+            gates.append(f"changed_spans[{index}].before must occur in the current base body")
+            continue
+        reconstructed = reconstructed.replace(before, after, 1)
+    if reconstructed != body:
+        gates.append("declared changed_spans do not reconstruct the submitted body exactly")
+    boundary = 240 if writing_mode == "opening_only" else (500 if writing_mode == "opening_and_bridge" else None)
+    if boundary is not None:
+        for index, change in enumerate(changes):
+            if base_body.find(str((change or {}).get("before") or "")) >= boundary:
+                gates.append(f"changed_spans[{index}] exceeds the {writing_mode} boundary")
+    for span in request.get("protected_spans") or []:
+        if str(span) and str(span) not in body:
+            gates.append(f"protected span was removed: {span}")
+
+
+def _validate_professional_claims(claims: Any, packet: dict[str, Any], creation_mode: str, structural: list[str], gates: list[str]) -> None:
+    if not isinstance(claims, list):
+        return
+    valid_card_ids = {str(item.get("id") or "") for item in packet.get("professional_knowledge_cards") or []}
+    for index, claim in enumerate(claims):
+        if not isinstance(claim, dict) or not str((claim or {}).get("claim") or "").strip():
+            structural.append(f"new_claims[{index}] requires claim")
+            continue
+        card_id = str(claim.get("knowledge_card_id") or "")
+        if creation_mode == "adaptation" and not card_id:
+            gates.append(f"new_claims[{index}] requires knowledge_card_id in adaptation mode")
+        if card_id and card_id not in valid_card_ids:
+            gates.append(f"new_claims[{index}] cites unknown knowledge_card_id: {card_id}")
+
+
+def _validate_quality_review(result: dict[str, Any], packet: dict[str, Any], structural: list[str], gates: list[str]) -> None:
+    _validate_read_only_review(result, structural)
+    script = packet.get("current_script") or {}
+    _validate_review_binding(result, script, structural, gates)
+    verdict = result.get("verdict")
+    if verdict not in REVIEW_VERDICTS:
+        structural.append("verdict is invalid")
+    for field in ["quality_dimensions", "five_affliction_review", "source_mechanism_review", "body_contract_review"]:
+        if not isinstance(result.get(field), dict):
+            structural.append(f"{field} must be an object")
+    for field in ["protected_elements", "failed_dimensions"]:
+        if not isinstance(result.get(field), list):
+            structural.append(f"{field} must be a list")
+    review = result.get("five_affliction_review") or {}
+    opening = str(script.get("opening") or "")
+    body = str(script.get("body") or "")
+    strong_count = 0
+    artificial = []
+    for driver in AFFLICTION_DRIVERS:
+        item = review.get(driver)
+        if not isinstance(item, dict):
+            structural.append(f"five_affliction_review.{driver} is required")
+            continue
+        status = item.get("status")
+        if status not in AFFLICTION_STATUSES:
+            structural.append(f"five_affliction_review.{driver}.status is invalid")
+            continue
+        evidence = str(item.get("evidence_span") or "")
+        if status in {"strong", "weak", "artificial"} and (not evidence or evidence not in opening):
+            gates.append(f"five_affliction_review.{driver}.evidence_span must quote the opening")
+        if status == "strong":
+            strong_count += 1
+            payoff = str(item.get("body_payoff_span") or "")
+            if item.get("body_payoff") is not True or not payoff or payoff not in body:
+                gates.append(f"five_affliction_review.{driver} strong status requires an exact body payoff")
+        if status == "artificial":
+            artificial.append(driver)
+    review["derived_active_driver_count"] = strong_count
+    if verdict == "pass":
+        if strong_count < 3:
+            gates.append("quality pass normally requires at least three strong five-affliction drivers")
+        if artificial:
+            gates.append("quality pass cannot contain artificial five-affliction drivers")
+        if review.get("coherent_body_contract") is not True:
+            gates.append("quality pass requires coherent_body_contract=true")
+        if strong_count < 5 and not str(review.get("rationale_for_not_forcing_missing") or "").strip():
+            gates.append("quality pass with fewer than five strong drivers requires rationale_for_not_forcing_missing")
+        if result.get("failed_dimensions"):
+            gates.append("quality pass must not contain failed_dimensions")
+        if result.get("revision_request") not in (None, {}):
+            gates.append("quality pass must not contain a revision_request")
+    else:
+        _validate_revision_request(result.get("revision_request"), structural, gates)
+
+
+def _validate_risk_review(result: dict[str, Any], packet: dict[str, Any], structural: list[str], gates: list[str]) -> None:
+    _validate_read_only_review(result, structural)
+    script = packet.get("current_script") or {}
+    _validate_review_binding(result, script, structural, gates)
+    verdict = result.get("verdict")
+    if verdict not in RISK_REVIEW_VERDICTS:
+        structural.append("verdict is invalid")
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        structural.append("issues must be a list")
+        return
+    body = str(script.get("body") or "")
+    for index, issue in enumerate(issues):
+        if not isinstance(issue, dict):
+            structural.append(f"issues[{index}] must be an object")
+            continue
+        _require_fields(issue, ["span", "risk_type", "severity", "reason", "repair_boundary", "protected_elements", "revision_direction"], structural, prefix=f"issues[{index}].")
+        span = str(issue.get("span") or "")
+        if not span or span not in body:
+            gates.append(f"issues[{index}].span must quote the reviewed body")
+    quality = packet.get("current_quality_review") or {}
+    if quality.get("verdict") != "pass" or quality.get("reviewed_body_hash") != result.get("reviewed_body_hash"):
+        gates.append("risk review requires a quality pass for the same script body")
+    if verdict == "pass":
+        if any((issue or {}).get("severity") == "hard_fail" for issue in issues if isinstance(issue, dict)):
+            gates.append("risk pass cannot contain hard_fail issues")
+        if result.get("revision_request") not in (None, {}):
+            gates.append("risk pass must not contain a revision_request")
+    else:
+        if not issues:
+            gates.append("a non-pass risk review requires at least one issue")
+        _validate_revision_request(result.get("revision_request"), structural, gates)
+
+
+def _validate_read_only_review(result: dict[str, Any], structural: list[str]) -> None:
+    forbidden = sorted(REVIEW_COPY_KEYS & set(result))
+    if forbidden:
+        structural.append("review output must not contain viewer copy fields: " + ", ".join(forbidden))
+
+
+def _validate_review_binding(result: dict[str, Any], script: dict[str, Any], structural: list[str], gates: list[str]) -> None:
+    if not script:
+        gates.append("review requires a current confirmed script")
+        return
+    if result.get("reviewed_script_run_id") != script.get("stage_run_id"):
+        gates.append("reviewed_script_run_id does not match the current script")
+    if result.get("reviewed_body_hash") != script.get("body_hash"):
+        gates.append("reviewed_body_hash does not match the current script")
+
+
+def _validate_revision_request(value: Any, structural: list[str], gates: list[str]) -> None:
+    if not isinstance(value, dict):
+        structural.append("a non-pass review requires revision_request object")
+        return
+    _require_fields(value, ["revision_scope", "problems", "revision_directions", "protected_elements", "protected_spans", "max_edit_boundary"], structural, prefix="revision_request.")
+    if value.get("revision_scope") not in WRITING_MODES - {"initial_draft"}:
+        structural.append("revision_request.revision_scope is invalid")
+    for field in ["problems", "revision_directions", "protected_elements", "protected_spans"]:
+        if not isinstance(value.get(field), list):
+            structural.append(f"revision_request.{field} must be a list")
+    if not value.get("problems") or not value.get("revision_directions"):
+        gates.append("revision_request requires concrete problems and revision_directions")
+
+
 def _validate_publish(result: dict[str, Any], packet: dict[str, Any], structural: list[str], gates: list[str]) -> None:
     package = result.get("publish_package")
     if not isinstance(package, dict):
         structural.append("publish_package must be an object")
         return
     _require_fields(package, stage_contract("publish_format")["package_required"], structural, prefix="publish_package.")
-    risk = packet.get("upstream_outputs", {}).get("risk_cleanup") or {}
-    expected = str(risk.get("cleaned_body") or "")
+    script = packet.get("current_script") or {}
+    if script:
+        expected = str(script.get("body") or "")
+        quality = packet.get("current_quality_review") or {}
+        risk = packet.get("current_risk_review") or {}
+        if quality.get("verdict") != "pass" or risk.get("verdict") != "pass":
+            gates.append("publish_format requires quality and risk pass")
+        if quality.get("reviewed_body_hash") != script.get("body_hash") or risk.get("reviewed_body_hash") != script.get("body_hash"):
+            gates.append("publish_format reviews must bind to the current script body")
+    else:
+        risk = packet.get("upstream_outputs", {}).get("risk_cleanup") or {}
+        expected = str(risk.get("cleaned_body") or "")
     if expected and package.get("final_copy") != expected:
-        gates.append("publish_package.final_copy must equal risk_cleanup.cleaned_body")
+        gates.append("publish_package.final_copy must equal the approved current script")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .workflow import (
+    ALL_CREATION_STAGES,
     CREATION_STAGES,
     DEFAULT_CREATION_MODEL,
     DEFAULT_CREATION_PROVIDER,
@@ -17,6 +18,7 @@ from .workflow import (
 from .stage_io import prepare_creation_stage, submit_creation_stage
 
 __all__ = [
+    "ALL_CREATION_STAGES",
     "CREATION_STAGES",
     "DEFAULT_CREATION_MODEL",
     "DEFAULT_CREATION_PROVIDER",

@@ -6,7 +6,7 @@
 
 - Identify the source's retention mechanism, viewer position, authority posture, body logic, and must-keep elements.
 - Decide whether the source, body plan, and current business goal naturally earn a CTA. No CTA is acceptable.
-- Record risk observations and set `risk_policy: defer_to_risk_cleanup`.
+- Record risk observations and set `risk_policy: defer_to_risk_review` for methodology v3. Legacy v2 tasks may retain `defer_to_risk_cleanup`.
 - Classify the work as `adaptation`, `half_original`, or `original`.
 - Select `none`, `guardrail_only`, or `one_support_point` for professional support. Standard adaptation may cite at most one support card.
 
