@@ -188,10 +188,22 @@ function Remove-WxPinnedCertificate {
         throw "refusing cleanup because the pinned SunnyNet certificate exists in LocalMachine Root"
     }
     if ([int]$counts.current_user -gt 0) {
-        & certutil.exe -user -delstore Root $script:WxExpectedCertificateThumbprint | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "failed to remove pinned SunnyNet certificate from CurrentUser Root"
+        # Root-store APIs can return ERROR_NOT_SUPPORTED from an unattended
+        # process while waiting for the interactive deletion confirmation.
+        # The certificate was already pinned by thumbprint and file hash, so
+        # remove only its exact CurrentUser registry key and verify the store.
+        $certificateRegistryPath = (
+            "Registry::HKEY_CURRENT_USER\Software\Microsoft\SystemCertificates" +
+            "\Root\Certificates\$script:WxExpectedCertificateThumbprint"
+        )
+        if (!(Test-Path -LiteralPath $certificateRegistryPath)) {
+            throw "pinned SunnyNet certificate registry key is missing"
         }
+        Remove-Item -LiteralPath $certificateRegistryPath -Recurse -Force
+    }
+    $verifiedCounts = Get-WxCertificateCounts
+    if ([int]$verifiedCounts.current_user -ne 0) {
+        throw "failed to remove pinned SunnyNet certificate from CurrentUser Root"
     }
 }
 

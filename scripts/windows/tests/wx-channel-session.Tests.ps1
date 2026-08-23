@@ -64,7 +64,9 @@ Describe "WeChat Channels acquisition session script contract" {
         $combined | Should Not Match "cleanup-wx-channel-poc.ps1"
         $combined | Should Not Match 'wx_channel_cloud\*\.exe'
         $combined | Should Not Match 'Get-Process\s+-Name\s+wx_channel'
-        $sources.common | Should Match 'certutil\.exe -user -delstore Root \$script:WxExpectedCertificateThumbprint'
+        $sources.common | Should Match 'HKEY_CURRENT_USER\\Software\\Microsoft\\SystemCertificates'
+        $sources.common | Should Match 'Remove-Item -LiteralPath \$certificateRegistryPath -Recurse -Force'
+        $sources.common | Should Not Match 'certutil\.exe.*-delstore'
     }
 
     It "records cleanup pending and failed states before retry" {

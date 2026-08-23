@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any
 
 from ..store import Store
 from .task_contracts import (
+    TERMINAL_TASK_STATUSES,
     CollectionActionStatus,
     CollectionActionType,
     CollectionTaskStatus,
     MaterialReviewOutcome,
-    TERMINAL_TASK_STATUSES,
 )
-
 
 OPEN_REVIEW_ACTION_STATUSES = frozenset(
     {
@@ -22,6 +23,9 @@ OPEN_REVIEW_ACTION_STATUSES = frozenset(
         CollectionActionStatus.INTERRUPTED.value,
     }
 )
+
+FORMAL_TRANSCRIPT_DUPLICATE_THRESHOLD = 0.80
+FORMAL_TRANSCRIPT_DUPLICATE_MIN_CHARS = 120
 
 
 class TaskReviewService:
@@ -144,6 +148,18 @@ class TaskReviewService:
             raise RuntimeError(f"review action is not executable: {action['id']} ({action['status']})")
 
         try:
+            if normalized["outcome"] == MaterialReviewOutcome.FORMAL_REWRITE_BASE.value:
+                duplicate = self._find_formal_transcript_duplicate(
+                    material_id=material_id,
+                    role_id=role_id,
+                    transcript=transcript,
+                )
+                if duplicate is not None:
+                    raise ValueError(
+                        "near-duplicate formal transcript: "
+                        f"material_id={duplicate['material_id']} "
+                        f"similarity={duplicate['similarity']:.3f}"
+                    )
             review = self.store.record_collection_material_review(
                 task_id=task_id,
                 action_id=action["id"],
@@ -195,6 +211,60 @@ class TaskReviewService:
             "review": review,
             "progress": progress,
         }
+
+    def _find_formal_transcript_duplicate(
+        self,
+        *,
+        material_id: str,
+        role_id: str,
+        transcript: str,
+    ) -> dict[str, Any] | None:
+        normalized = self._normalize_transcript_for_dedup(transcript)
+        if len(normalized) < FORMAL_TRANSCRIPT_DUPLICATE_MIN_CHARS:
+            return None
+        best: dict[str, Any] | None = None
+        seen_material_ids: set[str] = set()
+        for review in self.store.list_collection_material_reviews(role_id=role_id):
+            reviewed_material_id = str(review.get("material_id") or "")
+            if (
+                review.get("outcome") != MaterialReviewOutcome.FORMAL_REWRITE_BASE.value
+                or not reviewed_material_id
+                or reviewed_material_id == material_id
+                or reviewed_material_id in seen_material_ids
+            ):
+                continue
+            seen_material_ids.add(reviewed_material_id)
+            reviewed_material = self.store.get_collected_material(reviewed_material_id)
+            if reviewed_material is None:
+                continue
+            reviewed_transcript = self._normalize_transcript_for_dedup(
+                str(reviewed_material.get("transcript_text") or "")
+            )
+            if len(reviewed_transcript) < FORMAL_TRANSCRIPT_DUPLICATE_MIN_CHARS:
+                continue
+            length_ratio = min(len(normalized), len(reviewed_transcript)) / max(
+                len(normalized), len(reviewed_transcript)
+            )
+            if length_ratio < 0.60:
+                continue
+            similarity = SequenceMatcher(
+                None,
+                normalized,
+                reviewed_transcript,
+                autojunk=False,
+            ).ratio()
+            if similarity < FORMAL_TRANSCRIPT_DUPLICATE_THRESHOLD:
+                continue
+            if best is None or similarity > float(best["similarity"]):
+                best = {
+                    "material_id": reviewed_material_id,
+                    "similarity": similarity,
+                }
+        return best
+
+    @staticmethod
+    def _normalize_transcript_for_dedup(transcript: str) -> str:
+        return re.sub(r"[^\w]+", "", transcript.casefold(), flags=re.UNICODE)
 
     def _reconcile_task_state(
         self,

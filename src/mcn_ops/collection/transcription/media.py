@@ -261,6 +261,82 @@ def normalize_prepared_media(media: PreparedMedia) -> PreparedMedia:
         raise
 
 
+def split_prepared_media(
+    media: PreparedMedia,
+    chunk_seconds: float,
+    *,
+    timeout_seconds: float | None = None,
+) -> list[PreparedMedia]:
+    """Split normalized local audio into independently transcribable MP3 chunks."""
+    if chunk_seconds <= 0:
+        raise TranscriptionInputError("audio chunk duration must be positive")
+    temporary_directory = Path(tempfile.mkdtemp(prefix="mcn-asr-chunks-"))
+    pattern = temporary_directory / "chunk-%03d.mp3"
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(media.path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "32k",
+        "-f",
+        "segment",
+        "-segment_time",
+        str(float(chunk_seconds)),
+        "-reset_timestamps",
+        "1",
+        str(pattern),
+    ]
+    timeout = timeout_seconds or max(120.0, media.duration_seconds * 1.5)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        raise TranscriptionInputError("ffmpeg is required to split long audio") from exc
+    except subprocess.TimeoutExpired as exc:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        raise ProviderUnavailableError("ffmpeg audio splitting timed out") from exc
+    chunk_paths = sorted(temporary_directory.glob("chunk-*.mp3"))
+    if completed.returncode != 0 or not chunk_paths:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        raise TranscriptionInputError(
+            f"ffmpeg audio splitting failed: {completed.stderr.strip()[-300:]}"
+        )
+    chunks: list[PreparedMedia] = []
+    try:
+        for path in chunk_paths:
+            duration_seconds = probe_duration_seconds(path)
+            chunks.append(
+                PreparedMedia(
+                    path=path,
+                    duration_seconds=duration_seconds,
+                    size_bytes=path.stat().st_size,
+                    mime_type="audio/mpeg",
+                    sha256=sha256_file(path),
+                    source_url=None,
+                    temporary_directory=temporary_directory,
+                )
+            )
+    except Exception:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        raise
+    return chunks
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

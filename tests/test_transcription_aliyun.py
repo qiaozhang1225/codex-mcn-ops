@@ -162,6 +162,53 @@ def test_long_local_audio_uses_uploader_and_cleans_remote(tmp_path: Path) -> Non
     assert cleaned == uploaded
 
 
+def test_long_local_audio_without_uploader_uses_short_asr_chunks(tmp_path: Path) -> None:
+    media = make_media(tmp_path, duration=650, content=b"same-long-local-audio")
+    media.source_url = None
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    chunks: list[PreparedMedia] = []
+    for index, duration in enumerate((240.0, 240.0, 170.0)):
+        path = chunks_dir / f"chunk-{index}.mp3"
+        path.write_bytes(f"chunk-{index}".encode())
+        chunks.append(
+            PreparedMedia(
+                path=path,
+                duration_seconds=duration,
+                size_bytes=path.stat().st_size,
+                mime_type="audio/mpeg",
+                sha256=str(index) * 64,
+                temporary_directory=chunks_dir,
+            )
+        )
+    transport = SequenceTransport(
+        [HttpResponse(200, fixture("short_success.json")) for _ in chunks]
+    )
+    seen: list[tuple[Path, float]] = []
+
+    def chunker(prepared: PreparedMedia, chunk_seconds: float) -> list[PreparedMedia]:
+        seen.append((prepared.path, chunk_seconds))
+        return chunks
+
+    provider = AliyunTranscriptionProvider(
+        config(local_chunk_seconds=240),
+        transport=transport,
+        media_preparer=lambda source: media,
+        media_chunker=chunker,
+    )
+
+    result = provider.transcribe(str(tmp_path / "local-long.mp3"))
+
+    assert seen == [(media.path, 240)]
+    assert result["normalized"]["text"].count("旺自己") == 3
+    assert result["normalized"]["model"] == "qwen3-asr-flash:chunked:240s"
+    assert len(result["normalized"]["segments"]) == 3
+    assert result["raw"]["chunk_count"] == 3
+    assert len(transport.calls) == 3
+    assert all(json.loads(call["body"])["model"] == "qwen3-asr-flash" for call in transport.calls)
+    assert not chunks_dir.exists()
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [

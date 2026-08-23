@@ -416,6 +416,60 @@ class CollectionTaskOrchestrator:
             )
         return action
 
+    def tune_channels_task_policy(
+        self,
+        *,
+        task_id: str,
+        min_duration_seconds: int | None = None,
+        max_duration_seconds: int | None = None,
+        max_materials_per_iteration: int | None = None,
+    ) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        parsed = dict(task.get("parsed") or {})
+        current_policy = {
+            **asdict(CollectionPolicy()),
+            **dict(parsed.get("policy") or {}),
+        }
+        changes: dict[str, int] = {}
+        for key, value in (
+            ("min_duration_seconds", min_duration_seconds),
+            ("max_duration_seconds", max_duration_seconds),
+            ("max_materials_per_iteration", max_materials_per_iteration),
+        ):
+            if value is not None:
+                changes[key] = int(value)
+        if not changes:
+            raise ValueError("at least one Channels task policy adjustment is required")
+        next_policy = {**current_policy, **changes}
+        if int(next_policy["min_duration_seconds"]) < 0:
+            raise ValueError("min_duration_seconds must be >= 0")
+        if int(next_policy["max_duration_seconds"]) < int(
+            next_policy["min_duration_seconds"]
+        ):
+            raise ValueError(
+                "max_duration_seconds must be >= min_duration_seconds"
+            )
+        if int(next_policy["max_materials_per_iteration"]) < 1:
+            raise ValueError("max_materials_per_iteration must be >= 1")
+        parsed["policy"] = next_policy
+        updated = self.store.update_collection_task_configuration(
+            task_id,
+            expected_state_version=int(task["state_version"]),
+            parsed=parsed,
+            event_type="channels_task_policy_tuned",
+            event_payload={
+                "previous": {key: current_policy[key] for key in changes},
+                "changes": changes,
+            },
+        )
+        return {
+            "task_id": task_id,
+            "status": updated["status"],
+            "state_version": updated["state_version"],
+            "policy": next_policy,
+            "changes": changes,
+        }
+
     def step_channels_task(self, task_id: str) -> dict[str, Any]:
         task = self._require_durable_channels_task(task_id)
         if task["status"] in {

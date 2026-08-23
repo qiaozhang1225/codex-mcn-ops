@@ -361,6 +361,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_step.add_argument("--task-id", required=True)
     task_step.add_argument("--json", action="store_true")
+    task_tune = task_sub.add_parser(
+        "tune",
+        help="Adjust bounded materialization policy for an open Channels task",
+    )
+    task_tune.add_argument("--task-id", required=True)
+    task_tune.add_argument("--min-duration-seconds", type=int)
+    task_tune.add_argument("--max-duration-seconds", type=int)
+    task_tune.add_argument("--max-materials-per-iteration", type=int)
+    task_tune.add_argument("--json", action="store_true")
     task_cancel = task_sub.add_parser(
         "cancel",
         help="Cancel a durable Channels task and verify Windows cleanup",
@@ -1312,6 +1321,19 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             json_print(report)
         else:
             print(format_task_show(report))
+        return 0
+
+    if args.task_command == "tune":
+        result = orchestrator.tune_channels_task_policy(
+            task_id=args.task_id,
+            min_duration_seconds=args.min_duration_seconds,
+            max_duration_seconds=args.max_duration_seconds,
+            max_materials_per_iteration=args.max_materials_per_iteration,
+        )
+        if args.json:
+            json_print(result)
+        else:
+            print(json.dumps(result, ensure_ascii=False))
         return 0
 
     if args.task_command == "cancel":

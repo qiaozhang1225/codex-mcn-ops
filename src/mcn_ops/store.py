@@ -1334,6 +1334,74 @@ class Store:
             row = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
         return _task_row_to_dict(row)
 
+    def update_collection_task_configuration(
+        self,
+        task_id: str,
+        *,
+        expected_state_version: int,
+        parsed: dict[str, Any],
+        event_type: str = "task_configuration_updated",
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update an open task configuration without changing its lifecycle state."""
+        from .collection.task_contracts import (
+            TERMINAL_TASK_STATUSES,
+            CollectionTaskStatus,
+        )
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            current = conn.execute(
+                "SELECT * FROM collection_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            if int(current["state_version"] or 0) != int(expected_state_version):
+                raise RuntimeError(
+                    f"collection task state version conflict: expected {expected_state_version}, "
+                    f"found {current['state_version']}"
+                )
+            status = CollectionTaskStatus(str(current["status"]))
+            if status in TERMINAL_TASK_STATUSES or status in {
+                CollectionTaskStatus.ACQUIRING,
+                CollectionTaskStatus.AWAITING_REVIEW,
+                CollectionTaskStatus.COMPLETING,
+                CollectionTaskStatus.CANCELLING,
+                CollectionTaskStatus.CLEANUP_REQUIRED,
+            }:
+                raise ValueError(
+                    f"collection task configuration cannot change in status {status.value}"
+                )
+            timestamp = now_iso()
+            cursor = conn.execute(
+                """
+                UPDATE collection_tasks
+                SET parsed_json = ?, state_version = state_version + 1, updated_at = ?
+                WHERE id = ? AND state_version = ?
+                """,
+                (
+                    dumps(scrub_for_storage(parsed)),
+                    timestamp,
+                    task_id,
+                    expected_state_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"collection task state version conflict: {task_id}")
+            _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                event_type=event_type,
+                from_status=status.value,
+                to_status=status.value,
+                payload=event_payload or {},
+            )
+            row = conn.execute(
+                "SELECT * FROM collection_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return _task_row_to_dict(row)
+
     def create_collection_task_action(
         self,
         *,

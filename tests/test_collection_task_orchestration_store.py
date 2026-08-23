@@ -151,6 +151,36 @@ def test_action_idempotency_single_active_acquisition_and_task_cas(tmp_path: Pat
         )
 
 
+def test_open_task_configuration_update_is_cas_and_audited(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _task(store)
+    task = store.get_collection_task(task_id)
+    assert task is not None
+    parsed = dict(task["parsed"])
+    parsed["policy"] = {"viral_like_floor": 2000, "max_duration_seconds": 900}
+
+    updated = store.update_collection_task_configuration(
+        task_id,
+        expected_state_version=0,
+        parsed=parsed,
+        event_type="channels_task_policy_tuned",
+        event_payload={"changes": {"max_duration_seconds": 900}},
+    )
+
+    assert updated["status"] == "ready_for_search"
+    assert updated["state_version"] == 1
+    assert updated["parsed"]["policy"]["max_duration_seconds"] == 900
+    assert store.list_collection_task_events(task_id=task_id)[-1]["event_type"] == (
+        "channels_task_policy_tuned"
+    )
+    with pytest.raises(RuntimeError, match="state version conflict"):
+        store.update_collection_task_configuration(
+            task_id,
+            expected_state_version=0,
+            parsed=parsed,
+        )
+
+
 def test_frontier_advance_is_cas_idempotent_and_only_authoritative_exhaustion_closes_it(
     tmp_path: Path,
 ) -> None:

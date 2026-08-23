@@ -421,3 +421,68 @@ def test_one_role_goal_does_not_complete_a_multi_role_task(tmp_path: Path) -> No
     assert by_role[role_id]["remaining_count"] == 0
     assert by_role[second_role_id]["remaining_count"] == 1
     assert result["task"]["status"] == "awaiting_review"
+
+
+def test_formal_review_blocks_cross_task_near_duplicate_transcript(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    role_id = _role(store)
+    original_task_id = _task(store, role_id=role_id, target_count=1)
+    original_transcript = (
+        "孩子越来越不愿意说心里话，不是因为他没有话，而是每次开口都会被打断、"
+        "评判和翻旧账。父母真正要做的是先听完，再回应感受，最后询问孩子需要陪伴"
+        "还是需要一起解决问题。只有让表达变得安全，孩子遇到厌学和同伴冲突时才愿意"
+        "把真实困难告诉家长。这个过程不能靠一次说教完成，而要靠持续稳定的倾听建立信任。"
+    )
+    original_id = _material(
+        store,
+        task_id=original_task_id,
+        role_id=role_id,
+        work_id="original-copy",
+        transcript=original_transcript,
+    )
+    _review(
+        TaskReviewService(store),
+        task_id=original_task_id,
+        material_id=original_id,
+        role_id=role_id,
+        outcome="formal_rewrite_base",
+        key="review:original-copy:v1",
+    )
+
+    duplicate_task_id = _task(store, role_id=role_id, target_count=1)
+    duplicate_id = _material(
+        store,
+        task_id=duplicate_task_id,
+        role_id=role_id,
+        work_id="reposted-copy",
+        transcript="主持人提问。" + original_transcript + "关注账号，了解更多。",
+    )
+    with pytest.raises(ValueError, match=rf"material_id={original_id} similarity=0\."):
+        _review(
+            TaskReviewService(store),
+            task_id=duplicate_task_id,
+            material_id=duplicate_id,
+            role_id=role_id,
+            outcome="formal_rewrite_base",
+            key="review:reposted-copy:formal:v1",
+        )
+
+    failed_action = next(
+        action
+        for action in store.list_collection_task_actions(task_id=duplicate_task_id)
+        if action["idempotency_key"] == "review:reposted-copy:formal:v1"
+    )
+    assert failed_action["status"] == "failed"
+    assert store.list_collection_material_reviews(task_id=duplicate_task_id) == []
+    assert store.get_collection_task(duplicate_task_id)["status"] == "awaiting_review"
+
+    rejected = _review(
+        TaskReviewService(store),
+        task_id=duplicate_task_id,
+        material_id=duplicate_id,
+        role_id=role_id,
+        outcome="rejected",
+        key="review:reposted-copy:rejected:v1",
+    )
+    assert rejected["review"]["outcome"] == "rejected"
+    assert rejected["task"]["status"] == "awaiting_strategy"

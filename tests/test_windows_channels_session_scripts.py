@@ -105,8 +105,9 @@ def test_production_cleanup_targets_only_pinned_resources() -> None:
     assert "Get-WxPinnedWorkerProcesses" in common
     assert "[IO.Path]::GetFullPath($script:WxWorkerPath)" in common
     assert "executable SHA256 changed" in common
-    assert "certutil.exe -user -delstore Root $script:WxExpectedCertificateThumbprint" in common
-    assert "certutil.exe -delstore Root $script:WxExpectedCertificateThumbprint" not in common
+    assert "HKEY_CURRENT_USER\\Software\\Microsoft\\SystemCertificates" in common
+    assert "Remove-Item -LiteralPath $certificateRegistryPath -Recurse -Force" in common
+    assert "certutil.exe" not in common
     assert "refusing cleanup because the pinned SunnyNet certificate exists in LocalMachine Root" in common
     assert "Start-WxInteractiveCleanupTask" in common
     assert "AddSeconds(90)" in common

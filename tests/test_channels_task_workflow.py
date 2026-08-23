@@ -46,6 +46,17 @@ def test_durable_channels_task_commands_are_exposed_by_the_cli() -> None:
         [
             "collect",
             "task",
+            "tune",
+            "--task-id",
+            "ctask-123",
+            "--max-duration-seconds",
+            "900",
+        ]
+    ).task_command == "tune"
+    assert parser.parse_args(
+        [
+            "collect",
+            "task",
             "cancel",
             "--task-id",
             "ctask-123",
@@ -254,6 +265,44 @@ def test_cancelling_a_durable_task_cancels_planned_actions_before_cleanup(
     assert report["task"]["status"] == "cancelled"
     assert store.get_collection_task_action(action["id"])["status"] == "cancelled"
     assert session.closed_reasons == ["task_cancelled"]
+
+
+def test_open_channels_task_policy_can_be_tuned_without_changing_state(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+    migrate_collection_task_orchestration_v1(store.db_path)
+    task_id = store.create_collection_task(
+        command="collect Channels scripts",
+        target_scope="keyword",
+        target_count_per_role=14,
+        topic="厌学休学",
+        parsed={
+            "entrypoint": "keyword",
+            "tool_provider": "wechat_channels_remote",
+            "policy": {
+                "viral_like_floor": 2_000,
+                "min_duration_seconds": 30,
+                "max_duration_seconds": 360,
+                "max_materials_per_iteration": 8,
+            },
+        },
+        status="ready_for_search",
+    )
+    orchestrator = CollectionTaskOrchestrator(store)
+
+    result = orchestrator.tune_channels_task_policy(
+        task_id=task_id,
+        max_duration_seconds=900,
+    )
+
+    assert result["status"] == "ready_for_search"
+    assert result["changes"] == {"max_duration_seconds": 900}
+    updated = store.get_collection_task(task_id)
+    assert updated is not None
+    assert updated["parsed"]["policy"]["max_duration_seconds"] == 900
+    assert updated["state_version"] == 1
 
 
 def test_completion_stays_non_terminal_until_failed_cleanup_is_recovered(
