@@ -387,3 +387,20 @@ def test_channels_task_semantic_review_queue_includes_automatic_role_rejections(
     assert report["remaining_count"] == 20
     assert review_role["pending_count"] == 1
     assert review_role["materials"][0]["automatic_role_decision"] == "rejected"
+
+    material_id = report["saved_materials"][0]["id"]
+    store.classify_material_inventory(
+        material_id=material_id,
+        role_id=role_id,
+        topic_direction="不适配",
+        content_mechanism="完整转写审核后排除",
+        material_class="topic_clue",
+        is_primary=False,
+        review_status="rejected",
+        reviewer="codex-semantic-review",
+        decision_source="full-transcript-review",
+        classification_reasons=["与目标账号方向不一致"],
+    )
+
+    reviewed_report = CollectionTaskOrchestrator(store).build_task_report(report["task"]["id"])
+    assert reviewed_report["inventory_handoff"]["pending_review_count"] == 0

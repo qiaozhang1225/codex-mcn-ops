@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mcn_ops.cli import build_parser, main
+from mcn_ops.collection.workflows import CollectionTaskOrchestrator
 from mcn_ops.migrations import (
     COLLECTION_TASK_ORCHESTRATION_V1,
     migrate_collection_task_orchestration_v1,
@@ -96,6 +97,18 @@ def test_orchestration_migration_is_explicit_additive_and_idempotent(tmp_path: P
         ).fetchone()
         assert migrated_task["status"] == "awaiting_strategy"
         assert migrated_task["state_version"] == 1
+
+    report_task_id = store.create_collection_task(
+        command="collect task keyword",
+        target_scope="keyword",
+        target_count_per_role=1,
+        topic="亲子沟通",
+        status="awaiting_strategy",
+    )
+    report = CollectionTaskOrchestrator(store).build_task_report(report_task_id)
+    assert report["orchestration"]["schema_ready"] is True
+    assert report["orchestration"]["actions"] == []
+    assert report["orchestration"]["frontiers"] == []
 
 
 def test_orchestration_event_and_review_tables_are_append_only(tmp_path: Path) -> None:

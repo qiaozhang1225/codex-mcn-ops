@@ -660,7 +660,7 @@ class CollectionTaskOrchestrator:
             reviewed_source_work_ids = {
                 str(item.get("source_work_id") or "")
                 for item in inventory
-                if item.get("review_status") == "reviewed"
+                if item.get("review_status") in {"reviewed", "rejected"}
             }
             formal_source_work_ids = {
                 str(item.get("source_work_id") or "")
@@ -699,6 +699,17 @@ class CollectionTaskOrchestrator:
                         ),
                     }
                 )
+            try:
+                durable_goal = self.store.count_available_task_formal_bases(
+                    task_id=task_id,
+                    role_id=role_id,
+                )
+            except RuntimeError as exc:
+                if "orchestration schema is not installed" not in str(exc):
+                    raise
+                durable_goal = None
+            if durable_goal is not None:
+                formal_source_work_ids = set(durable_goal["source_work_ids"])
             pending_by_role.append(
                 {
                     "role_id": role_id,
@@ -763,6 +774,31 @@ class CollectionTaskOrchestrator:
             if role_targeted_goal
             else len(saved_materials) >= _target_count(task)
         )
+        orchestration: dict[str, Any]
+        try:
+            sessions = self.store.list_channels_acquisition_sessions(task_id=task_id)
+            orchestration = {
+                "schema_ready": True,
+                "actions": self.store.list_collection_task_actions(task_id=task_id),
+                "events": self.store.list_collection_task_events(task_id=task_id),
+                "frontiers": self.store.list_collection_task_frontiers(task_id=task_id),
+                "reviews": self.store.list_collection_material_reviews(task_id=task_id),
+                "acquisition_sessions": sessions,
+                "acquisition_session_events": [
+                    event
+                    for session in sessions
+                    for event in self.store.list_channels_acquisition_events(
+                        session_id=str(session["id"])
+                    )
+                ],
+            }
+        except RuntimeError as exc:
+            if "orchestration schema is not installed" not in str(exc):
+                raise
+            orchestration = {
+                "schema_ready": False,
+                "migration_command": "mcn db migrate-collection-task-orchestration-v1",
+            }
         return {
             "task": task,
             "runs": runs,
@@ -827,6 +863,7 @@ class CollectionTaskOrchestrator:
             "next_recommended_keywords": _next_keywords_from_materials(saved_materials),
             "next_recommended_authors": _next_authors_from_materials(saved_materials),
             "collection_call_summary": call_summary,
+            "orchestration": orchestration,
         }
 
     def _build_collection_provider(
