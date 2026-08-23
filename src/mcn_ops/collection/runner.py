@@ -1051,6 +1051,8 @@ def filter_candidates_for_relevance(
                 source_package.get("platform_caption"),
                 source_package.get("author_name"),
                 source_package.get("transcript_text"),
+                source_package.get("search_keyword"),
+                " ".join(source_package.get("matched_search_keywords") or []),
             ]
         )
         positive_terms = _topic_terms(topic)

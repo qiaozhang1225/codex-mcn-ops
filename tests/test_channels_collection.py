@@ -233,6 +233,31 @@ def test_channels_relevance_uses_explicit_task_search_keywords() -> None:
     assert skipped == []
 
 
+def test_channels_relevance_preserves_provider_search_provenance() -> None:
+    candidate = {
+        "source_package": {
+            **_package(
+                "work-search-provenance",
+                "nonce-search-provenance",
+                "孩子到了14岁，父母不要再较劲了",
+                21_902,
+            ),
+            "search_keyword": "青春期孩子",
+            "matched_search_keywords": ["青春期孩子"],
+        }
+    }
+
+    accepted, skipped = filter_candidates_for_relevance(
+        [candidate],
+        role_profile=None,
+        topic="宋立心理：20条二创底稿",
+        search_keywords=["青春期孩子"],
+    )
+
+    assert accepted == [candidate]
+    assert skipped == []
+
+
 def test_channels_detail_recheck_retains_task_search_keyword_match(tmp_path: Path) -> None:
     store = Store(tmp_path / "mcn.sqlite")
     store.init_db()
