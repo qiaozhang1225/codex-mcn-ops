@@ -70,6 +70,6 @@ gofmt -w \
 )
 
 mkdir -p "$output_dir"
-output_path="$output_dir/wx_channel_cloud_hardened_v5.6.9.exe"
+output_path="$output_dir/wx_channel_cloud_hardened_v5.6.9_share_v1.exe"
 cp "$build_root/wx_channel_cloud_hardened.exe" "$output_path"
 shasum -a 256 "$output_path"

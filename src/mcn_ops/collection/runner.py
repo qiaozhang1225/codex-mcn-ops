@@ -290,6 +290,23 @@ class TopicCollectionRunner:
                     selection_reason=_selection_reason(candidate, candidate_threshold_mode),
                     threshold_mode=candidate_threshold_mode,
                 )
+                try:
+                    candidate = self._resolve_channels_source_link(
+                        executor, candidate
+                    )
+                except ToolExecutionError as exc:
+                    skipped.append(
+                        _skip(candidate, "source_link_resolution_failed", str(exc))
+                    )
+                    self.store.upsert_collection_candidate(
+                        run_id,
+                        candidate,
+                        status="rejected",
+                        skip_reason="source_link_resolution_failed",
+                        skip_detail=str(exc),
+                        threshold_mode=candidate_threshold_mode,
+                    )
+                    continue
                 existing = find_existing_material_for_candidate(self.store, candidate) if config.reuse_existing else None
                 if existing:
                     if existing.get("status") != "collected":
@@ -692,6 +709,49 @@ class TopicCollectionRunner:
         if not text:
             raise ToolExecutionError("Mock candidate has no transcript_text.")
         return text, {"ok": True, "method_key": "mock_text", "cache_hit": False}
+
+    def _resolve_channels_source_link(
+        self,
+        executor: LoggedToolExecutor,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_package = dict(candidate.get("source_package") or {})
+        if source_package.get("source_platform") != "wechat_channels":
+            return candidate
+        work_id = str(source_package.get("work_id") or "").strip()
+        if not work_id:
+            raise ToolExecutionError("Channels candidate has no stable work_id.")
+        if not self.tools.has("channels_resolve_share_link"):
+            raise ToolExecutionError(
+                "Channels formal collection requires the public share-link resolver."
+            )
+        result = executor.run(
+            "channels_resolve_share_link",
+            {"work_id": work_id},
+            use_cache=False,
+        )
+        normalized = (
+            result.get("normalized")
+            if isinstance(result.get("normalized"), dict)
+            else {}
+        )
+        returned_work_id = str(normalized.get("work_id") or "").strip()
+        source_link = str(normalized.get("source_link") or "").strip().rstrip("/")
+        if returned_work_id != work_id:
+            raise ToolExecutionError(
+                "Channels share-link resolver returned a different work_id."
+            )
+        if not bool(normalized.get("source_link_verified")) or not re.fullmatch(
+            r"https://weixin\.qq\.com/sph/[A-Za-z0-9_-]+", source_link
+        ):
+            raise ToolExecutionError(
+                "Channels share-link resolver returned no verified public source URL."
+            )
+        source_package["source_link"] = source_link
+        source_package["source_link_verified"] = True
+        resolved = dict(candidate)
+        resolved["source_package"] = source_package
+        return resolved
 
     def _resolve_short_link(self, executor: LoggedToolExecutor, source_package: dict[str, Any]) -> dict[str, Any]:
         work_id = source_package.get("work_id")

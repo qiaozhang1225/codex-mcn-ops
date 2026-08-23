@@ -43,8 +43,8 @@ Describe "WeChat Channels acquisition session script contract" {
     It "pins certificate and worker identities" {
         $sources.common | Should Match "1A61D4F74DC31D27630B25E37AAF46C364955EDC7A6EA11EB20E4B6B05114E04"
         $sources.common | Should Match "D70CD039051F77C30673B8209FC15EFA650ED52C"
-        $sources.common | Should Match "C5CFF437248220EDD113403987E6C3005136A23AEE2B410E09736DD26BD2B0EA"
-        $sources.common | Should Match "wx_channel_cloud_hardened_v5.6.9.exe"
+        $sources.common | Should Match "9681B3777A677D491BE15E248065909F78593A013C211C4176444D8F5B960584"
+        $sources.common | Should Match "wx_channel_cloud_hardened_v5.6.9_share_v1.exe"
         $sources.common | Should Match "DEV-IyZU9C5DDMKxsY36"
         $sources.common | Should Match "GetFullPath"
     }

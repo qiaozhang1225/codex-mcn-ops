@@ -120,6 +120,23 @@ def _channels_tools() -> ToolRegistry:
             ),
         )
     )
+    registry.register(
+        ToolSpec(
+            name="channels_resolve_share_link",
+            description="test",
+            parameters={},
+            handler=lambda args: build_provider_result(
+                provider="wechat_channels_remote",
+                method_key="wechat_channels_share_url",
+                normalized={
+                    "work_id": args["work_id"],
+                    "source_link": f"https://weixin.qq.com/sph/{args['work_id']}",
+                    "source_link_verified": True,
+                },
+                raw={},
+            ),
+        )
+    )
     transcript = (
         "为什么孩子进入青春期以后不愿沟通？因为他开始需要边界，所以父母不要和他较劲。"
         "第一，先稳定自己的情绪；第二，给孩子表达空间；第三，在孩子开口时认真回应。"

@@ -11,6 +11,7 @@ from mcn_ops.collection.channels.provider import (
     ChannelsRemoteProvider,
     _author_feed_with_hub,
     _search_with_hub,
+    _share_url_with_hub,
     _source_package,
 )
 from mcn_ops.collection.channels.registry import build_channels_registry
@@ -114,6 +115,116 @@ def test_source_package_uses_platform_neutral_identity_and_metrics() -> None:
     assert package["author_sec_uid"] == "wx-author"
     assert package["duration_ms"] == 4321
     assert package["public_metrics"]["digg_count"] == 90
+
+
+def test_share_url_provider_requires_matching_public_weixin_link() -> None:
+    async def scenario() -> None:
+        calls: list[dict[str, object]] = []
+
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            calls.append({"action": action, "data": data})
+            return {
+                "errCode": 0,
+                "errMsg": "ok",
+                "data": {
+                    "feedH5Url": "https://weixin.qq.com/sph/Abc_123-Z",
+                    "urlList": [
+                        {
+                            "objectId": "work-1",
+                            "feedH5Url": "https://weixin.qq.com/sph/Abc_123-Z",
+                        }
+                    ],
+                },
+            }
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="profile"
+            )
+            url = await _share_url_with_hub(
+                hub,
+                worker_id="windows-01",
+                work_id="work-1",
+                command_timeout=1,
+            )
+            assert url == "https://weixin.qq.com/sph/Abc_123-Z"
+            assert calls == [
+                {
+                    "action": "api_call",
+                    "data": {
+                        "key": "key:channels:feed_share_url",
+                        "body": {"object_id": "work-1"},
+                    },
+                }
+            ]
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "errCode": 0,
+            "data": {"feedH5Url": "https://finder.video.qq.com/private"},
+        },
+        {
+            "errCode": 0,
+            "data": {
+                "urlList": [
+                    {
+                        "objectId": "other-work",
+                        "feedH5Url": "https://weixin.qq.com/sph/Other123",
+                    }
+                ]
+            },
+        },
+    ],
+)
+def test_share_url_provider_rejects_private_or_mismatched_links(
+    response: dict[str, object],
+) -> None:
+    async def scenario() -> None:
+        async def responder(_action: str, _data: dict[str, object]) -> dict[str, object]:
+            return response
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="profile"
+            )
+            with pytest.raises(ProviderResponseError, match="verified"):
+                await _share_url_with_hub(
+                    hub,
+                    worker_id="windows-01",
+                    work_id="work-1",
+                    command_timeout=1,
+                )
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
 
 
 def test_provider_fails_closed_for_insecure_lan_and_missing_keyword() -> None:

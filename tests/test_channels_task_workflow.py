@@ -128,6 +128,23 @@ def _registry(search_calls: list[dict[str, Any]]) -> ToolRegistry:
             ),
         )
     )
+    registry.register(
+        ToolSpec(
+            "channels_resolve_share_link",
+            "test",
+            {},
+            lambda arguments: build_provider_result(
+                provider="wechat_channels_remote",
+                method_key="wechat_channels_share_url",
+                normalized={
+                    "work_id": arguments["work_id"],
+                    "source_link": "https://weixin.qq.com/sph/DurableWork1",
+                    "source_link_verified": True,
+                },
+                raw={},
+            ),
+        )
+    )
     transcript = (
         "为什么青春期孩子越来越不愿意和父母沟通？因为父母一开口就急着纠正，孩子感受到的不是帮助，而是不被理解。"
         "孩子拒绝沟通时，父母最先要处理的不是孩子的态度，而是自己的焦虑。第一，暂停追问和说教，让关系先恢复安全；"

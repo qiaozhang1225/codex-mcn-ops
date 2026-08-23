@@ -92,6 +92,26 @@ def build_channels_registry(
             ),
         )
     )
+    registry.register(
+        ToolSpec(
+            name="channels_resolve_share_link",
+            description=(
+                "Resolve and verify a durable public weixin.qq.com/sph source link "
+                "from a stable WeChat Channels work id."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"work_id": {"type": "string"}},
+                "required": ["work_id"],
+            },
+            handler=lambda args: provider.call(
+                "wechat_channels_share_url",
+                body={"work_id": str(args.get("work_id") or "")},
+                use_cache=False,
+            ),
+        )
+    )
 
     def transcribe(args: dict[str, Any]) -> ProviderResult:
         source_package = dict(args.get("source_package") or {})

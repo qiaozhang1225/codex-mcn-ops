@@ -88,6 +88,20 @@ def _active_review_action(store: Store, *, task_id: str, material_id: str) -> di
     return store.update_collection_task_action_status(action["id"], status="running")
 
 
+def test_channels_formal_material_requires_public_share_link(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    role_id = _role(store)
+    task_id = _task(store)
+
+    with pytest.raises(ValueError, match="weixin.qq.com/sph"):
+        _material(
+            store,
+            task_id=task_id,
+            role_id=role_id,
+            source_link="channels://private-locator",
+        )
+
+
 def test_action_idempotency_single_active_acquisition_and_task_cas(tmp_path: Path) -> None:
     store = _store(tmp_path)
     task_id = _task(store)
@@ -309,13 +323,13 @@ def test_review_is_atomic_and_formal_count_is_distinct_by_source_and_excludes_an
         store,
         task_id=task_id,
         role_id=role_id,
-        source_link="channels://same-source",
+        source_link="https://weixin.qq.com/sph/SameSource",
     )
     duplicate_material = _material(
         store,
         task_id=task_id,
         role_id=role_id,
-        source_link="channels://same-source",
+        source_link="https://weixin.qq.com/sph/SameSource",
     )
     assert duplicate_material != first_material
     for material_id in (first_material, duplicate_material):
@@ -382,7 +396,12 @@ def test_failed_review_validation_rolls_back_all_review_facts(tmp_path: Path) ->
     store = _store(tmp_path)
     role_id = _role(store)
     task_id = _task(store)
-    material_id = _material(store, task_id=task_id, role_id=role_id, source_link="channels://rollback")
+    material_id = _material(
+        store,
+        task_id=task_id,
+        role_id=role_id,
+        source_link="https://weixin.qq.com/sph/RollbackSource",
+    )
     store.insert_material_role_match(
         material_id=material_id,
         role_id=role_id,

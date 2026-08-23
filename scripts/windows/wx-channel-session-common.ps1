@@ -3,7 +3,7 @@ $script:WxSessionDir = Join-Path $script:WxWorkDir "session"
 $script:WxLeasePath = Join-Path $script:WxSessionDir "lease.json"
 $script:WxConfigPath = Join-Path $script:WxWorkDir "config.yaml"
 $script:WxCertificatePath = Join-Path $script:WxWorkDir "SunnyRoot-poc.cer"
-$script:WxWorkerPath = Join-Path $script:WxWorkDir "wx_channel_cloud_hardened_v5.6.9.exe"
+$script:WxWorkerPath = Join-Path $script:WxWorkDir "wx_channel_cloud_hardened_v5.6.9_share_v1.exe"
 $script:WxWorkerTaskName = "CodexWxChannelWorker"
 $script:WxInteractiveCleanupTaskName = "CodexWxChannelInteractiveCleanup"
 $script:WxRefreshTaskName = "CodexWxChannelRefresh"
@@ -12,7 +12,7 @@ $script:WxWatchdogTaskName = "CodexWxChannelLeaseGuard"
 $script:WxMutexName = "Global\CodexWxChannelSessionLeaseV1"
 $script:WxExpectedCertificateSha256 = "1A61D4F74DC31D27630B25E37AAF46C364955EDC7A6EA11EB20E4B6B05114E04"
 $script:WxExpectedCertificateThumbprint = "D70CD039051F77C30673B8209FC15EFA650ED52C"
-$script:WxExpectedWorkerSha256 = "C5CFF437248220EDD113403987E6C3005136A23AEE2B410E09736DD26BD2B0EA"
+$script:WxExpectedWorkerSha256 = "9681B3777A677D491BE15E248065909F78593A013C211C4176444D8F5B960584"
 
 function Enter-WxSessionMutex {
     param([int]$TimeoutSeconds = 30)

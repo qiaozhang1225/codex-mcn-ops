@@ -2921,6 +2921,17 @@ class Store:
         material_understanding: dict[str, Any],
         raw: dict[str, Any],
     ) -> str:
+        source_platform = str(source_package.get("source_platform") or "").strip().lower()
+        source_url = str(
+            source_package.get("source_link") or source_package.get("source_url") or ""
+        ).strip()
+        if source_platform == "wechat_channels" and not _is_public_channels_source_url(
+            source_url
+        ):
+            raise ValueError(
+                "WeChat Channels formal materials require a verified "
+                "https://weixin.qq.com/sph/ source link"
+            )
         material_id = new_id("mat")
         timestamp = now_iso()
         provider = str(material_understanding.get("understanding_provider") or "codex-agent")
@@ -6515,6 +6526,15 @@ def _source_package_platform_work_id(
         if platform != "douyin":
             return source_url
     return None
+
+
+def _is_public_channels_source_url(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"https://weixin\.qq\.com/sph/[A-Za-z0-9_-]+/?",
+            str(value or "").strip(),
+        )
+    )
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:

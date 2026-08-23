@@ -74,7 +74,7 @@ def _material(
             "role_id": role_id,
             "source_platform": "wechat_channels",
             "work_id": work_id,
-            "source_link": f"channels://{work_id}",
+            "source_link": f"https://weixin.qq.com/sph/{work_id}",
             "title": "青春期亲子沟通",
             "transcript_text": transcript,
             "public_metrics": {"likes": 5000},

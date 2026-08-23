@@ -150,6 +150,16 @@ class ChannelsRemoteProvider:
             )
         if canonical == "detail":
             return asyncio.run(self._detail_once(supplied))
+        if canonical == "share_url":
+            work_id = str(
+                supplied.get("work_id")
+                or supplied.get("object_id")
+                or supplied.get("objectId")
+                or ""
+            ).strip()
+            if not work_id:
+                raise ProviderInputError("Channels share URL requires work_id")
+            return asyncio.run(self._share_url_once(work_id))
         raise ProviderInputError(f"unsupported Channels method: {method_key}")
 
     def search_many(
@@ -264,6 +274,35 @@ class ChannelsRemoteProvider:
                 method_key="wechat_channels_detail",
                 endpoint="channels-lan://detail",
                 normalized={"source_package": package},
+                raw={},
+            )
+        finally:
+            await hub.stop()
+
+    async def _share_url_once(self, work_id: str) -> ProviderResult:
+        hub, ssl_context = await self._start_hub()
+        del ssl_context
+        try:
+            await hub.wait_for_worker(
+                self.config.worker_id,
+                timeout=self.config.wait_timeout,
+                required_capability="profile",
+            )
+            source_link = await _share_url_with_hub(
+                hub,
+                worker_id=self.config.worker_id,
+                work_id=work_id,
+                command_timeout=self.config.command_timeout,
+            )
+            return build_provider_result(
+                provider=self.provider_name,
+                method_key="wechat_channels_share_url",
+                endpoint="channels-lan://share-url",
+                normalized={
+                    "work_id": work_id,
+                    "source_link": source_link,
+                    "source_link_verified": True,
+                },
                 raw={},
             )
         finally:
@@ -607,6 +646,55 @@ async def _detail_with_hub(
     return data
 
 
+async def _share_url_with_hub(
+    hub: ChannelsHub,
+    *,
+    worker_id: str,
+    work_id: str,
+    command_timeout: float,
+) -> str:
+    data = await hub.call(
+        worker_id,
+        "api_call",
+        {
+            "key": "key:channels:feed_share_url",
+            "body": {"object_id": work_id},
+        },
+        timeout=command_timeout,
+        required_capability="profile",
+    )
+    if not isinstance(data, dict):
+        raise ProviderResponseError("Channels share URL returned an invalid object")
+    error_code = _int(data.get("errCode"))
+    if error_code:
+        raise ProviderResponseError(
+            str(data.get("errMsg") or f"Channels share URL failed ({error_code})")
+        )
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    candidates: list[tuple[str, str]] = []
+    direct_url = str(payload.get("feedH5Url") or "").strip()
+    if direct_url:
+        candidates.append((work_id, direct_url))
+    url_list = payload.get("urlList") if isinstance(payload.get("urlList"), list) else []
+    for item in url_list:
+        if not isinstance(item, dict):
+            continue
+        candidates.append(
+            (
+                str(item.get("objectId") or item.get("object_id") or "").strip(),
+                str(item.get("feedH5Url") or item.get("shareUrl") or "").strip(),
+            )
+        )
+    for returned_work_id, candidate in candidates:
+        if returned_work_id and returned_work_id != work_id:
+            continue
+        if _is_public_channels_share_url(candidate):
+            return candidate.rstrip("/")
+    raise ProviderResponseError(
+        "Channels share URL response contained no verified weixin.qq.com/sph link"
+    )
+
+
 def _source_package(value: Any) -> dict[str, Any]:
     obj = _find_object(value)
     if obj is None:
@@ -682,11 +770,23 @@ def _canonical_method(method_key: str) -> str:
         "wechat_channels_detail": "detail",
         "channels_detail": "detail",
         "detail": "detail",
+        "wechat_channels_share_url": "share_url",
+        "channels_share_url": "share_url",
+        "share_url": "share_url",
         "wechat_channels_author_feed": "author_feed",
         "channels_author_feed": "author_feed",
         "author_feed": "author_feed",
     }
     return aliases.get(method_key.strip().lower(), method_key.strip().lower())
+
+
+def _is_public_channels_share_url(value: Any) -> bool:
+    return bool(
+        re.fullmatch(
+            r"https://weixin\.qq\.com/sph/[A-Za-z0-9_-]+/?",
+            str(value or "").strip(),
+        )
+    )
 
 
 def _validate_config(config: ChannelsRemoteConfig) -> None:

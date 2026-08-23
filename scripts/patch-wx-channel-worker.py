@@ -83,6 +83,47 @@ def patch_source(root: Path) -> None:
     replace_once(video, 'utils.LogInfo("[视频链接] URL=%s", videoURL)', 'utils.LogInfo("[视频链接] URL=%s", utils.SanitizeURLForLog(videoURL))')
     replace_once(video, 'utils.LogInfo("[页面链接] URL=%s", pageURL)', 'utils.LogInfo("[页面链接] URL=%s", utils.SanitizeURLForLog(pageURL))')
 
+    api_client = root / "internal/assets/inject/api_client.js"
+    replace_once(
+        api_client,
+        "      methods.finderGetCommentDetail = !!(window.WXU.API && typeof window.WXU.API.finderGetCommentDetail === 'function');\n",
+        "      methods.finderGetCommentDetail = !!(window.WXU.API && typeof window.WXU.API.finderGetCommentDetail === 'function');\n"
+        "      methods.finderGetFeedH5Url = !!(window.WXU.API && typeof window.WXU.API.finderGetFeedH5Url === 'function');\n",
+    )
+    replace_once(
+        api_client,
+        "      // 获取视频详情\n",
+        "      // Resolve a durable public share URL from the stable object id.\n"
+        "      if (key === 'key:channels:feed_share_url') {\n"
+        "        var shareObjectId = String(body.object_id || body.objectId || body.oid || '');\n"
+        "        if (!shareObjectId) {\n"
+        "          resp({ errCode: 1011, errMsg: '缺失 object_id', payload: body });\n"
+        "          return;\n"
+        "        }\n"
+        "        if (typeof window.WXU.API.finderGetFeedH5Url !== 'function') {\n"
+        "          resp({ errCode: 1011, errMsg: 'finderGetFeedH5Url 不可用', payload: { objectId: shareObjectId } });\n"
+        "          return;\n"
+        "        }\n"
+        "        var sharePayload = { objectId: shareObjectId };\n"
+        "        try {\n"
+        "          var shareResult = await window.WXU.API.finderGetFeedH5Url(sharePayload);\n"
+        "          resp({ ...shareResult, payload: sharePayload });\n"
+        "        } catch (err) {\n"
+        "          resp({ errCode: 1011, errMsg: err.message, payload: sharePayload });\n"
+        "        }\n"
+        "        return;\n"
+        "      }\n\n"
+        "      // 获取视频详情\n",
+    )
+
+    websocket_client = root / "internal/websocket/client.go"
+    replace_once(
+        websocket_client,
+        '\tcase "key:channels:feed_profile":\n\t\treturn c.methods["finderGetCommentDetail"]\n',
+        '\tcase "key:channels:feed_profile":\n\t\treturn c.methods["finderGetCommentDetail"]\n'
+        '\tcase "key:channels:feed_share_url":\n\t\treturn c.methods["finderGetFeedH5Url"]\n',
+    )
+
     (root / "internal/utils/sanitize.go").write_text(
         '''package utils
 
