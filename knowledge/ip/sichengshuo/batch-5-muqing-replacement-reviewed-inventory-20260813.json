@@ -1,0 +1,31 @@
+{
+  "role_id": "role_791ffbf51f20",
+  "batch_key": "sichengshuo-batch-5-muqing-replacement-20260813",
+  "reviewer": "codex-agent-full-transcript-review-20260813",
+  "classifications": [
+    {
+      "material_id": "mat_d588951a76e7",
+      "topic_direction": "财运 / 磁场 / 漏财边界",
+      "content_mechanism": "用居住环境、社交圈、精气神和认知四层结构解释磁场并给出自查动作",
+      "knowledge_subtype": "磁场与生活状态自查",
+      "material_class": "formal_rewrite_base",
+      "is_primary": true,
+      "review_status": "reviewed",
+      "reviewer": "codex-agent-full-transcript-review-20260813",
+      "decision_source": "full-transcript-review",
+      "classification_reasons": ["完整保留幸运稀缺钩子、卦师视角、四层解释链和可执行清理动作；删除伪科学类比、必然转运承诺和未经证实的具体禁忌后仍有充分内容厚度"]
+    },
+    {
+      "material_id": "mat_43ac38ea534e",
+      "topic_direction": "财运 / 磁场 / 漏财边界",
+      "content_mechanism": "用合作选择的现实对比解释机会为何更容易流向稳定、有余地且可信的人",
+      "knowledge_subtype": "财富机会与匮乏感",
+      "material_class": "formal_rewrite_base",
+      "is_primary": true,
+      "review_status": "reviewed",
+      "reviewer": "codex-agent-full-transcript-review-20260813",
+      "decision_source": "full-transcript-review",
+      "classification_reasons": ["反常识财富问题、两类人的选择实验、有形与无形财富解释以及现实行动链完整；将嫌贫爱富与吸引力法则的绝对表达修为风险、信用和承接能力后可用于正式二创"]
+    }
+  ]
+}

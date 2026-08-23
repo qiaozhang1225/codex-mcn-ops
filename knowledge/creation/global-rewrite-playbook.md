@@ -124,6 +124,7 @@ Publish-platform preferences belong in the IP or publish-format layer, not in th
 ## Stage Boundaries
 
 - `rewrite_draft`: protect source task, mechanism, opening, value, and logic. Record risk; do not solve it.
+- The first complete source sentence is a protected artifact. Do not compress it into a calmer summary merely because its wording sounds absolute or uncomfortable; exact or near-literal preservation must be verified against the actual draft text.
 - `hook_enhancement`: make the smallest useful opening adjustment. Do not change the content task or body logic.
 - `risk_cleanup`: replace only the unsafe span. Do not use safety as permission for a second rewrite.
 - `publish_format`: package the cleaned body without editing it.

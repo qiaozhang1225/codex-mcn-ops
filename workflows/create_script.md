@@ -87,6 +87,20 @@ The packet also includes rewrite requirements, source analysis, and recent stage
 
 For `rewrite_draft`, `knowledge/creation/global-rewrite-playbook.md` is the cross-IP methodology. It preserves content task, propagation mechanism, speaker credibility, internal logic, and stage boundaries without prescribing a fixed script structure. IP-specific playbooks should contain only genuine role differences.
 
+For `hook_enhancement`, analyze the opening with the creator-side `贪、瞋、痴、慢、疑` lens in `knowledge/creation/hook-playbook.md`. Record which desires, objections, misconceptions, identity comparisons, and information gaps are active. A high-retention candidate should normally activate at least three organically, but all active drivers must create one coherent promise that the unchanged body can fulfil. Preserve a compatible source opening that already does this; do not replace it with a calmer summary or stack unrelated stimulation merely to raise the count.
+
+## Professional-IP Knowledge Integration
+
+For professional IPs, organize collected books, courses, videos, and audio into role-specific knowledge before using them in creation. Keep each reusable claim tied to its applicable scene, non-applicable boundary, evidence strength, usable explanation, and risk note. Do not place raw transcripts into every generation prompt.
+
+Use the knowledge in three ways only:
+
+1. **Guardrail:** at `material_selection`, classify the source as aligned, acceptable variance, repairable conflict, or hard conflict. Keep, locally repair, reclassify, or reject accordingly.
+2. **Support:** at `creation_brief`, decide whether the draft needs no explicit theory, guardrail-only handling, or one support point. State what the support explains and where it belongs.
+3. **Review:** at `risk_cleanup`, verify professional claims, qualify uncertain causal language, and retain medical, legal, or other practice boundaries.
+
+The source's verified content task and propagation mechanism remain the drafting spine. A professional point may strengthen one weak link, but it must not turn a thin topic clue into a formal rewrite base or turn the draft into a lecture summary. When the professional corpus supplies most of the argument, handle the work as an explicit original or half-original task rather than source adaptation.
+
 ## Output
 
 `publish_format` creates:

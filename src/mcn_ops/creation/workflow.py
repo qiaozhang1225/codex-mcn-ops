@@ -241,6 +241,7 @@ Publish-platform preferences belong in the IP or publish-format layer, not in th
 ## Stage Boundaries
 
 - `rewrite_draft`: protect source task, mechanism, opening, value, and logic. Record risk; do not solve it.
+- The first complete source sentence is a protected artifact. Do not compress it into a calmer summary merely because its wording sounds absolute or uncomfortable; exact or near-literal preservation must be verified against the actual draft text.
 - `hook_enhancement`: make the smallest useful opening adjustment. Do not change the content task or body logic.
 - `risk_cleanup`: replace only the unsafe span. Do not use safety as permission for a second rewrite.
 - `publish_format`: package the cleaned body without editing it.
@@ -522,7 +523,15 @@ def _stage_contract_descriptor(stage_key: str | None) -> dict[str, Any]:
             "forbidden_outputs": ["high_risk_replacements", "risk_replacement_scope", "publish_package"],
         },
         "hook_enhancement": {
-            "allowed_outputs": ["selected_hook", "body", "hook_diff_type", "mechanism_preserved"],
+            "allowed_outputs": [
+                "selected_hook",
+                "body",
+                "hook_diff_type",
+                "mechanism_preserved",
+                "driver_map",
+                "active_driver_count",
+                "body_contract",
+            ],
             "forbidden_outputs": ["high_risk_replacements", "publish_package"],
         },
         "risk_cleanup": {
@@ -589,8 +598,20 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
         checks["no_replacement_phrases"] = {"passed": not replacement_keys, "replacement_keys": replacement_keys}
     elif stage_key == "rewrite_draft":
         draft_text = str(output.get("draft_text") or (output.get("draft") or {}).get("draft_text") or "")
-        opening = ((output.get("quality_checks") or {}).get("opening_preservation") or {})
-        checks["opening_preserved"] = {"passed": bool(opening.get("passed")), "mode": opening.get("mode")}
+        submitted_opening = ((output.get("quality_checks") or {}).get("opening_preservation") or {})
+        source_opening = _confirmed_source_opening(store, str(task["id"]))
+        derived_opening = _opening_preservation_status(
+            draft_text,
+            source_opening,
+            _rewrite_requirements(task, store.get_ip_role(str(task["role_id"])) or {}),
+        )
+        checks["opening_preserved"] = {
+            "passed": bool(derived_opening.get("passed")),
+            "mode": derived_opening.get("mode"),
+            "submitted_passed": bool(submitted_opening.get("passed")),
+            "source_opening_text": source_opening,
+            "body_opening_preview": derived_opening.get("body_opening_preview"),
+        }
         checks["no_cleanup_outputs"] = {
             "passed": not any(key in output for key in ["high_risk_replacements", "risk_replacement_scope"]),
             "forbidden_keys": [key for key in ["high_risk_replacements", "risk_replacement_scope"] if key in output],
@@ -598,11 +619,18 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
         leaked = _rewrite_risk_replacement_leaks(store, task["id"], draft_text)
         checks["risk_replacement_not_done"] = {"passed": not leaked, "leaked_replacements": leaked}
     elif stage_key == "hook_enhancement":
-        hook_validation = output.get("validation") or {}
+        source_opening = _confirmed_source_opening(store, str(task["id"]))
+        hook_validation = _validate_hook_enhancement(
+            source_opening=source_opening,
+            selected_hook=str(output.get("selected_hook") or ""),
+            original_body=_latest_stage_body(store, str(task["id"]), "rewrite_draft"),
+            enhanced_body=str(output.get("body") or ""),
+        )
         checks["minimal_hook_diff"] = {
             "passed": bool(hook_validation.get("passed")) and output.get("hook_diff_type") != "replaced",
-            "hook_diff_type": output.get("hook_diff_type"),
-            "mechanism_preserved": output.get("mechanism_preserved"),
+            "hook_diff_type": hook_validation.get("diff_type"),
+            "submitted_hook_diff_type": output.get("hook_diff_type"),
+            "mechanism_preserved": hook_validation.get("mechanism_preserved"),
         }
     elif stage_key == "risk_cleanup":
         scope = output.get("risk_replacement_scope") or {}
@@ -635,6 +663,20 @@ def _rewrite_risk_replacement_leaks(store: Store, task_id: str, draft_text: str)
         if term in source_text and term not in draft_text and replacement in draft_text:
             leaks.append({"term": term, "replacement": replacement})
     return leaks
+
+
+def _confirmed_source_opening(store: Store, task_id: str) -> str:
+    selection = _latest_output(store, task_id, "material_selection")
+    selected = selection.get("selected") or []
+    analyses = selection.get("source_analysis") or {}
+    if not selected:
+        return ""
+    material_id = str(selected[0].get("material_id") or "")
+    return str((analyses.get(material_id) or {}).get("source_opening_text") or "")
+
+
+def _latest_stage_body(store: Store, task_id: str, stage_key: str) -> str:
+    return _stage_body_text(stage_key, _latest_output(store, task_id, stage_key))
 
 
 def _stage_body_text(stage_key: str, output: dict[str, Any]) -> str:
@@ -738,7 +780,7 @@ def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
         "global_rewrite_playbook": DEFAULT_GLOBAL_REWRITE_PLAYBOOK,
         "global_risk_lexicon": "# Global Risk Lexicon\n\n- 超高风险：保证发财、保证有效、百分百有效、立马见效、一定成功、必定成功、必能转运、注定发财、逆天改命、明确医疗/金融/法律/宗教结果承诺。\n- 源文案携带风险：改命、改运、转运、自带财运等，默认记录并后置，不在 rewrite_draft 或 hook_enhancement 阶段替换。\n- 边缘观察：财运、财气、好运、招财、旺财、福报、因果、气场、开悟、命运、贵人、修行、能量、磁场。\n- risk_cleanup 只局部替换超高风险词；源文案携带词和边缘词默认观察，不机械删除。\n",
         "risk_cleanup_playbook": "# Risk Cleanup Playbook\n\n- 只处理超高风险表达，且只替换命中的短语。\n- 不重写整句，不改变钩子机制，不把风险软化成解释性降温。\n- 原文案携带的财运、命运、贵人、磁场、能量、福报等语境词默认记录观察。\n- 如果风险词位于开头，只替换风险短语，保留原开头的主体、数量钩子、节奏和情绪力度。\n- 风险表达同时承载核心态度时，先用主体、对象、条件或场景限定其含义；只有限定后仍不可发布，才删除立场本身。\n",
-        "hook_playbook": "# Hook Playbook\n\n- 保护原钩子的传播任务和强度，不以改动幅度衡量二创质量。\n- 原说话者与目标 IP 兼容时优先保留；不兼容时做 `perspective_translation`，重建可信入口而不是照搬身份。\n- 反感、异议或反常识可能就是留人机制，不要在开头主动消解。\n- 通过 strength parity 检查冲突、具体性、受众入口、态度强度和继续观看理由。\n- 当留人机制是鲜明立场时，不能用警示、信息差或中性后果替换。\n- 本阶段不重写正文，也不承担风险清理。\n",
+        "hook_playbook": "# Hook Playbook\n\n- 保护原钩子的传播任务和强度，不以改动幅度衡量二创质量。\n- 原说话者与目标 IP 兼容时优先保留；不兼容时做 `perspective_translation`，重建可信入口而不是照搬身份。\n- 反感、异议或反常识可能就是留人机制，不要在开头主动消解。\n- 通过 strength parity 检查冲突、具体性、受众入口、态度强度和继续观看理由。\n\n## Five-Affliction Attention Lens\n\n- 用贪、瞋、痴、慢、疑作为创作者侧的注意力分析框架：利益欲望、反感反驳、认知错觉、身份比较、信息缺口。强钩子通常应自然激活 at least three distinct drivers，但每项必须指向同一个正文承诺，禁止靠无关刺激词硬凑。\n- 输出 driver_map、active_driver_count 和 body_contract；原开头已有三项以上且说话者兼容时，逐字或近似逐字保留。\n- 当留人机制是鲜明立场时，不能用警示、信息差或中性后果替换。\n- 本阶段不重写正文，也不承担风险清理。\n",
         "publish_format_playbook": "# Publish Format Playbook\n\n- 只根据 risk cleanup 后正文生成发布包装。\n- 输出四字封面标题、十八字视频标题、视频描述、置顶评论、最终可复制文案和正文字数。\n- 最终可复制文案必须等于 risk cleanup 后正文；不得在发布包装阶段重写正文逻辑。\n",
         "ip_creation_playbook": f"# {role.get('name') or role_slug} Creation Playbook\n\n- 只记录相对于全局规则真正不同的角色定位、受众张力、专业解释方式和禁区。\n- 不固化开头句式、正文组件、案例结构或 CTA 模板。\n",
         "ip_feedback_learnings": f"# {role.get('name') or role_slug} Feedback Learnings\n\n- 发布后的作品层和词汇层反馈写在这里。\n",

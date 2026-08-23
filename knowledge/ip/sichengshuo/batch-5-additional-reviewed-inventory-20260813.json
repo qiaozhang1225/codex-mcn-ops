@@ -1,0 +1,15 @@
+{
+  "role_id": "role_791ffbf51f20",
+  "batch_key": "sichengshuo-batch-5-additional-20260813",
+  "reviewer": "codex-agent-full-transcript-review-20260813",
+  "classifications": [
+    {"material_id":"mat_9ea5f4e1b656","topic_direction":"玄学专业知识拆解","content_mechanism":"从罗经总纲、三套针法和学习次序拆解罗盘原理","knowledge_subtype":"罗盘与风水经典入门","material_class":"topic_clue","is_primary":true,"review_status":"reviewed","reviewer":"human-feedback-20260813","decision_source":"human-feedback","classification_reasons":["原文是系列第一集，主要介绍经典背景和后续学习顺序，单集没有让初学者立即对照或实测的动作闭环；只保留为罗盘选题线索"]},
+    {"material_id":"mat_97fabc6d44c0","topic_direction":"玄学专业知识拆解","content_mechanism":"从旺衰、心性和格局解释癸水日主为何难断","knowledge_subtype":"日主特性与旺衰","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["三个原因层次清楚，覆盖旺衰、体感与格局争议，符合日主知识快速理解方向"]},
+    {"material_id":"mat_b0f8f3ad38a3","topic_direction":"玄学专业知识拆解","content_mechanism":"用癸水与甲木、戊土关系解释口才、客户和贵人","knowledge_subtype":"日主与天干组合","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["围绕一个日主给出组合条件和现实表现，结构完整；需转成普通话并弱化断言"]},
+    {"material_id":"mat_3e6ad8b8c066","topic_direction":"玄学专业知识拆解","content_mechanism":"先讲五类生克关系再按阴阳拆出十神","knowledge_subtype":"十神基础框架","material_class":"topic_clue","is_primary":true,"review_status":"reviewed","reviewer":"human-feedback-20260813","decision_source":"human-feedback","classification_reasons":["知识结构完整，但食神及十神关系对零基础观众缺少直接定位和自查入口；只保留为内部知识线索，不再作为大众短视频正式底稿"]},
+    {"material_id":"mat_2bc7ff039ea3","topic_direction":"玄学专业知识拆解","content_mechanism":"用偏印与不同十神的组合拆解适配赛道","knowledge_subtype":"十神组合","material_class":"topic_clue","is_primary":true,"review_status":"reviewed","reviewer":"human-feedback-20260813","decision_source":"human-feedback","classification_reasons":["偏印及其组合需要观众先理解日主、十神定位和组合关系，零基础无法直接对照，有基础者又会认为短视频解释过浅；只保留为内部知识线索"]},
+    {"material_id":"mat_1946d4fc7800","topic_direction":"玄学专业知识拆解","content_mechanism":"用亡魂幻境重新解释重生网文设定","material_class":"topic_clue","is_primary":false,"review_status":"rejected","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["属于文学脑洞而非可解释、可验证的四柱或玄学专业知识"]},
+    {"material_id":"mat_957b8456c8fb","topic_direction":"玄学专业知识拆解","content_mechanism":"用五行推断夫妻生活和男性性能力","material_class":"topic_clue","is_primary":false,"review_status":"rejected","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["涉及情爱、性能力和医学疾病断言，超出IP选题边界且存在明显健康误导风险"]},
+    {"material_id":"mat_45e14f2bd060","topic_direction":"苦难","content_mechanism":"以道家视角反驳歌颂吃苦并强调休息和避免苦难重演","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["反常识钩子、多个生活反例和行动结论完整，适合作为苦难方向的反面命题测试"]}
+  ]
+}

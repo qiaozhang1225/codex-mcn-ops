@@ -1,0 +1,12 @@
+{
+  "role_id": "role_791ffbf51f20",
+  "batch_key": "sichengshuo-luopan-search-20260813",
+  "reviewer": "codex-agent-full-transcript-review-20260813",
+  "classifications": [
+    {"material_id":"mat_f49b9baa8511","topic_direction":"玄学专业知识拆解","content_mechanism":"用二十四山和坐向概念教观众自查房屋大致朝向","knowledge_subtype":"罗盘二十四山自查","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["开头直接承诺自查，完整解释二十四山、坐与向，并给出具体测量动作；净阴净阳、旺人旺财和性别结果断言必须删除，只保留方向识别机制"]},
+    {"material_id":"mat_9ea5f4e1b656","topic_direction":"玄学专业知识拆解","content_mechanism":"从罗经总纲、三套针法和学习次序拆解罗盘原理","knowledge_subtype":"罗盘与风水经典入门","material_class":"topic_clue","is_primary":true,"review_status":"reviewed","reviewer":"human-feedback-20260813","decision_source":"human-feedback","classification_reasons":["原文是系列内容第一集，主要交代经典背景与后续预告，单集缺少零基础观众可以立即理解和实测的完整动作，不再作为正式底稿"]},
+    {"material_id":"mat_80a6f619fbae","topic_direction":"玄学专业知识拆解","content_mechanism":"比较穿山七十二龙与透地六十龙的对象、圈层和使用次序","knowledge_subtype":"罗盘高级圈层","material_class":"topic_clue","is_primary":false,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["知识链完整但概念远高于大众入门门槛，并含长期运势等无法支持的断言，只保留为高级知识线索"]},
+    {"material_id":"mat_c0ea860403aa","topic_direction":"玄学专业知识拆解","content_mechanism":"以二十天系列预告区分形峦派与理气派","knowledge_subtype":"堪舆流派入门","material_class":"topic_clue","is_primary":false,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["仍以系列背景和抽象气机解释为主，没有让观众立即拿起罗盘实测的单集闭环"]},
+    {"material_id":"mat_007a844bb631","topic_direction":"玄学专业知识拆解","content_mechanism":"用癸山丁向案例讲玄空飞星排盘","knowledge_subtype":"玄空飞星排盘","material_class":"topic_clue","is_primary":false,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["属于系列中段的高级排盘教学，依赖九宫、元运和顺逆飞等前置知识，不适合作为普通观众入口"]}
+  ]
+}

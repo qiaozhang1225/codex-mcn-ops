@@ -265,6 +265,10 @@ def test_creation_context_packet_uses_knowledge_without_transcript_by_default(tm
     hook_playbook = packet["knowledge"]["hook_playbook"]
     assert "perspective_translation" in hook_playbook
     assert "strength parity" in hook_playbook.lower()
+    assert "Five-Affliction Attention Lens" in hook_playbook
+    assert all(driver in hook_playbook for driver in ["贪", "瞋", "痴", "慢", "疑"])
+    assert "at least three distinct drivers" in hook_playbook
+    assert "body_contract" in hook_playbook
     assert packet["selected_materials"]
     assert packet["rewrite_requirements"]["target_length_range"] == [300, 500]
     assert packet["selected_materials"][0]["source_analysis"]["source_hook_text"]
@@ -659,6 +663,108 @@ def test_hook_enhancement_rejects_risk_denial_replacement() -> None:
     assert validation["passed"] is False
     assert validation["diff_type"] == "replaced"
     assert validation["mechanism_preserved"] is False
+
+
+def test_rewrite_contract_derives_opening_preservation_instead_of_trusting_submission(tmp_path: Path) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+    role_id = _confirmed_role(store)
+    task = create_creation_task(
+        store,
+        role_id=role_id,
+        topic="贵人",
+        goal="生成口播",
+        platform="douyin",
+        target_count=1,
+    )
+    task_id = task["task"]["id"]
+    material_id = "mat_source"
+    store.insert_creation_stage_run(
+        task_id=task_id,
+        stage_key="material_selection",
+        status="confirmed",
+        provider="codex-agent",
+        model="gpt-5.5",
+        output_data={
+            "selected": [{"material_id": material_id}],
+            "source_analysis": {
+                material_id: {
+                    "source_opening_text": "亲戚再有钱，他也不会给你花一分；朋友再有钱，他也不会借你用一下。",
+                }
+            },
+        },
+    )
+    task_row = store.get_creation_task(task_id)
+    assert task_row is not None
+
+    validation = _validate_stage_contract(
+        store,
+        task_row,
+        "rewrite_draft",
+        {
+            "draft_text": "不要去高攀任何人。你真正的贵人，其实是自己。" * 8,
+            "quality_checks": {"opening_preservation": {"passed": True, "mode": "minimal_edit"}},
+        },
+    )
+
+    assert validation["passed"] is False
+    assert validation["checks"]["opening_preserved"]["submitted_passed"] is True
+    assert validation["checks"]["opening_preserved"]["passed"] is False
+
+
+def test_hook_contract_derives_diff_instead_of_trusting_submission(tmp_path: Path) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+    role_id = _confirmed_role(store)
+    task = create_creation_task(
+        store,
+        role_id=role_id,
+        topic="贵人",
+        goal="生成口播",
+        platform="douyin",
+        target_count=1,
+    )
+    task_id = task["task"]["id"]
+    material_id = "mat_source"
+    source_opening = "亲戚再有钱，他也不会给你花一分；朋友再有钱，他也不会借你用一下。"
+    store.insert_creation_stage_run(
+        task_id=task_id,
+        stage_key="material_selection",
+        status="confirmed",
+        provider="codex-agent",
+        model="gpt-5.5",
+        output_data={
+            "selected": [{"material_id": material_id}],
+            "source_analysis": {material_id: {"source_opening_text": source_opening}},
+        },
+    )
+    store.insert_creation_stage_run(
+        task_id=task_id,
+        stage_key="rewrite_draft",
+        status="confirmed",
+        provider="codex-agent",
+        model="gpt-5.5",
+        output_data={"draft_text": source_opening + "后续正文。"},
+    )
+    task_row = store.get_creation_task(task_id)
+    assert task_row is not None
+
+    validation = _validate_stage_contract(
+        store,
+        task_row,
+        "hook_enhancement",
+        {
+            "selected_hook": "不要去高攀任何人。",
+            "body": "不要去高攀任何人。后续正文。",
+            "hook_diff_type": "minimal_edit",
+            "mechanism_preserved": True,
+            "validation": {"passed": True},
+        },
+    )
+
+    assert validation["passed"] is False
+    assert validation["checks"]["minimal_hook_diff"]["submitted_hook_diff_type"] == "minimal_edit"
+    assert validation["checks"]["minimal_hook_diff"]["hook_diff_type"] == "replaced"
 
 
 def test_rewrite_draft_rejects_internal_process_terms(tmp_path: Path) -> None:

@@ -1,0 +1,12 @@
+{
+  "role_id": "role_791ffbf51f20",
+  "batch_key": "sichengshuo-batch-5-last-gap-20260813",
+  "reviewer": "codex-agent-full-transcript-review-20260813",
+  "classifications": [
+    {"material_id":"mat_a5ecfd393c32","topic_direction":"苦难","content_mechanism":"重大打击后从追逐外界结果转向珍视平静生活","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["从执念破碎、价值排序变化到新的生活选择形成完整链条，适合中年受众的低谷后认知主题"]},
+    {"material_id":"mat_3ff0d31cad65","topic_direction":"苦难","content_mechanism":"用吃饭、回消息、走出房间等微小行动解释创伤后的生活重建","material_class":"formal_rewrite_base","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["明确反对感谢苦难，并提供逐步恢复生活的具体过程，观点、边界和行动均完整"]},
+    {"material_id":"mat_0194fa81854c","topic_direction":"苦难","content_mechanism":"重大打击后价值排序改变并追求平静生活","material_class":"topic_clue","is_primary":false,"review_status":"rejected","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["与mat_a5ecfd393c32几乎逐字重复，不作为第二份正式来源"]},
+    {"material_id":"mat_b38ecba1106e","topic_direction":"苦难","content_mechanism":"误入葬礼后意外获得支票的猎奇故事","material_class":"topic_clue","is_primary":false,"review_status":"rejected","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["虚构猎奇故事且与苦难重建无关，支票无记录且合法的表述也不可靠"]},
+    {"material_id":"mat_61fd0de0f0e9","topic_direction":"现实贵人","content_mechanism":"把贵人关系解释为价值交换和自我经营","material_class":"topic_clue","is_primary":true,"review_status":"reviewed","reviewer":"codex-agent-full-transcript-review-20260813","decision_source":"full-transcript-review","classification_reasons":["观点完整但现实贵人底稿池已经达标，保留为价值交换角度的扩展线索"]}
+  ]
+}
