@@ -37,6 +37,9 @@ class CollectionConfig:
     understanding_provider: str = DEFAULT_UNDERSTANDING_PROVIDER
     understanding_model: str = DEFAULT_UNDERSTANDING_MODEL
     reuse_existing: bool = True
+    run_id: str | None = None
+    preloaded_candidates: list[dict[str, Any]] | None = None
+    preloaded_traversal: dict[str, Any] | None = None
 
 
 CHANNELS_MIN_VIRAL_DIGG_COUNT = 2000
@@ -158,18 +161,39 @@ class TopicCollectionRunner:
                 f"{CHANNELS_MIN_VIRAL_DIGG_COUNT}."
             )
 
-        run_id = self.store.create_collection_run(
-            task_id=config.task_id,
-            role_id=config.role_id,
-            topic=topic,
-            target_count=config.target_count,
-            like_floor=config.like_floor,
-            super_like_threshold=config.super_like_threshold,
-            tool_provider=config.tool_provider,
-        )
+        run_id = config.run_id
+        if run_id is None:
+            run_id = self.store.create_collection_run(
+                task_id=config.task_id,
+                role_id=config.role_id,
+                topic=topic,
+                target_count=config.target_count,
+                like_floor=config.like_floor,
+                super_like_threshold=config.super_like_threshold,
+                tool_provider=config.tool_provider,
+            )
+        else:
+            stored_run = self.store.get_collection_run(run_id)
+            if stored_run is None:
+                raise KeyError(f"collection run not found: {run_id}")
+            if stored_run.get("task_id") != config.task_id:
+                raise ValueError("preloaded collection run belongs to another task")
         executor = LoggedToolExecutor(self.tools, self.store, run_id, provider=config.tool_provider)
         try:
-            discovered_items, traversal = self._search_candidates(executor, config)
+            if config.preloaded_candidates is None:
+                discovered_items, traversal = self._search_candidates(executor, config)
+            else:
+                discovered_items = [dict(item) for item in config.preloaded_candidates]
+                traversal = {
+                    "captured_pages": 0,
+                    "captured_items": len(discovered_items),
+                    "has_next": False,
+                    "requested_pages": 0,
+                    "stop_reason": "preloaded_action_candidates",
+                    "request_satisfied": True,
+                    "source_exhausted": False,
+                    **(config.preloaded_traversal or {}),
+                }
             discovered = dedupe_candidates(discovered_items)
             for candidate in discovered:
                 candidate = self._candidate_with_context(candidate, config)

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ..store import Store
 from .channels.factory import build_channels_collection_registry
-from .eligibility import evaluate_material_eligibility, is_material_eligible
-from .mock_tools import build_mock_source_registry
+from .channels.session import ChannelsAcquisitionController
 from .douyin.contracts import DouyinProvider
 from .douyin.factory import build_collection_provider
 from .douyin.registry import build_douyin_registry
+from .eligibility import evaluate_material_eligibility, is_material_eligible
+from .mock_tools import build_mock_source_registry
 from .runner import (
     CollectionConfig,
     TopicCollectionRunner,
@@ -19,6 +22,8 @@ from .runner import (
     metric_value,
     request_fingerprint,
 )
+from .task_contracts import CollectionActionStatus, CollectionTaskStatus
+from .task_engine import CollectionTaskActionEngine
 from .understanding import (
     DEFAULT_UNDERSTANDING_MODEL,
     DEFAULT_UNDERSTANDING_PROVIDER,
@@ -27,7 +32,6 @@ from .understanding import (
     build_material_understanding,
     validate_understanding,
 )
-
 
 LOCAL_UNDERSTANDING_PROVIDER = RULES_UNDERSTANDING_PROVIDER
 LOCAL_UNDERSTANDING_MODEL = RULES_UNDERSTANDING_MODEL
@@ -48,8 +52,20 @@ class CollectionPolicy:
 
 
 class CollectionTaskOrchestrator:
-    def __init__(self, store: Store) -> None:
+    def __init__(
+        self,
+        store: Store,
+        *,
+        channels_registry_factory: Callable[..., Any] | None = None,
+        channels_session_controller_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self.store = store
+        self._channels_registry_factory = (
+            channels_registry_factory or build_channels_collection_registry
+        )
+        self._channels_session_controller_factory = (
+            channels_session_controller_factory or ChannelsAcquisitionController
+        )
 
     def run_keyword_task(
         self,
@@ -97,6 +113,15 @@ class CollectionTaskOrchestrator:
             "policy": asdict(policy),
             "target_understanding": _target_understanding(provider=understanding_provider, model=understanding_model),
         }
+        if tool_provider == "wechat_channels_remote" and _orchestration_schema_ready(
+            self.store
+        ):
+            return self._run_durable_channels_keyword_task(
+                parsed=parsed,
+                policy=policy,
+                role_profile=role_profile,
+                task_id=task_id,
+            )
         if task_id is None:
             task_id = self.store.create_collection_task(
                 command=command,
@@ -267,6 +292,445 @@ class CollectionTaskOrchestrator:
                 error=error,
             )
             raise
+
+    def _run_durable_channels_keyword_task(
+        self,
+        *,
+        parsed: dict[str, Any],
+        policy: CollectionPolicy,
+        role_profile: dict[str, Any] | None,
+        task_id: str | None,
+    ) -> dict[str, Any]:
+        topic = str(parsed["topic"])
+        target_count = int(parsed["target_count"])
+        role_id = str(parsed.get("role_id") or "") or None
+        if task_id is None:
+            task_id = self.store.create_collection_task(
+                command=f"collect task keyword --topic {topic} --target-count {target_count}",
+                target_scope="keyword",
+                target_count_per_role=target_count,
+                topic=topic,
+                parsed=parsed,
+                status=CollectionTaskStatus.READY_FOR_SEARCH.value,
+            )
+            if role_id:
+                self.store.upsert_collection_task_role(
+                    task_id=task_id,
+                    role_id=role_id,
+                    target_count=target_count,
+                    status=CollectionTaskStatus.READY_FOR_SEARCH.value,
+                )
+            planner = self._channels_action_engine(task_id=task_id, live=False)
+            parsed_keywords = _unique_strings(parsed.get("keywords") or [])
+            queue = _unique_strings(
+                [
+                    *[keyword for keyword in parsed_keywords if keyword != topic],
+                    *_role_collection_keywords(role_profile, topic),
+                    *(parsed.get("related_keywords") or []),
+                    topic,
+                ]
+            )
+            if not queue:
+                queue = [topic]
+            for index, keyword in enumerate(queue):
+                if index == 0:
+                    planner.plan_keyword(
+                        task_id=task_id,
+                        keyword=keyword,
+                        max_pages=min(policy.max_search_pages, 5),
+                        page_size=policy.page_size,
+                        role_id=role_id,
+                        reason="initial task keyword",
+                    )
+                else:
+                    planner.plan_related_keyword(
+                        task_id=task_id,
+                        keyword=keyword,
+                        origin_keyword=queue[0],
+                        max_pages=min(policy.max_search_pages, 5),
+                        page_size=policy.page_size,
+                        role_id=role_id,
+                        reason="initial related keyword",
+                    )
+        return self.step_channels_task(task_id)
+
+    def plan_channels_keyword_action(
+        self,
+        *,
+        task_id: str,
+        keyword: str,
+        continue_frontier: bool = False,
+        origin_keyword: str | None = None,
+        max_pages: int = 1,
+        page_size: int = 20,
+        strategy_iteration: int = 0,
+        reason: str = "strategy decision",
+    ) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        role_id = str((task.get("parsed") or {}).get("role_id") or "") or None
+        engine = self._channels_action_engine(task_id=task_id, live=False)
+        if continue_frontier:
+            action = engine.plan_continue_keyword(
+                task_id=task_id,
+                keyword=keyword,
+                max_pages=max_pages,
+                page_size=page_size,
+                role_id=role_id,
+                strategy_iteration=strategy_iteration,
+                reason=reason,
+            )
+        elif origin_keyword:
+            action = engine.plan_related_keyword(
+                task_id=task_id,
+                keyword=keyword,
+                origin_keyword=origin_keyword,
+                max_pages=max_pages,
+                page_size=page_size,
+                role_id=role_id,
+                strategy_iteration=strategy_iteration,
+                reason=reason,
+            )
+        else:
+            action = engine.plan_keyword(
+                task_id=task_id,
+                keyword=keyword,
+                max_pages=max_pages,
+                page_size=page_size,
+                role_id=role_id,
+                strategy_iteration=strategy_iteration,
+                reason=reason,
+            )
+        current = self.store.get_collection_task(task_id)
+        assert current is not None
+        if current["status"] in {
+            CollectionTaskStatus.AWAITING_STRATEGY.value,
+            CollectionTaskStatus.BLOCKED.value,
+        }:
+            self.store.compare_and_swap_collection_task(
+                task_id,
+                expected_state_version=int(current["state_version"]),
+                status=CollectionTaskStatus.READY_FOR_SEARCH.value,
+                event_type="strategy_action_planned",
+                action_id=action["id"],
+                event_payload={"action_type": action["action_type"]},
+            )
+        return action
+
+    def step_channels_task(self, task_id: str) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        if task["status"] in {
+            CollectionTaskStatus.AWAITING_REVIEW.value,
+            CollectionTaskStatus.COMPLETING.value,
+            CollectionTaskStatus.CANCELLING.value,
+            CollectionTaskStatus.CLEANUP_REQUIRED.value,
+            CollectionTaskStatus.COMPLETED.value,
+            CollectionTaskStatus.CANCELLED.value,
+            CollectionTaskStatus.FAILED.value,
+        }:
+            return self.build_task_report(task_id)
+        if task["status"] in {
+            CollectionTaskStatus.AWAITING_STRATEGY.value,
+            CollectionTaskStatus.BLOCKED.value,
+        }:
+            planned = [
+                action
+                for action in self.store.list_collection_task_actions(task_id=task_id)
+                if action["status"]
+                in {
+                    CollectionActionStatus.PLANNED.value,
+                    CollectionActionStatus.INTERRUPTED.value,
+                }
+            ]
+            if not planned:
+                return self.build_task_report(task_id)
+            task = self.store.compare_and_swap_collection_task(
+                task_id,
+                expected_state_version=int(task["state_version"]),
+                status=CollectionTaskStatus.READY_FOR_SEARCH.value,
+                event_type="planned_action_queue_resumed",
+            )
+        engine = self._channels_action_engine(task_id=task_id, live=True)
+        outcome = engine.execute_one(task_id=task_id)
+        if outcome is None:
+            return self.build_task_report(task_id)
+        if outcome.status == CollectionActionStatus.SUCCEEDED.value:
+            try:
+                self._materialize_channels_action(task_id=task_id, action_id=outcome.action_id)
+            except Exception as exc:
+                current = self.store.get_collection_task(task_id)
+                if current and current["status"] == CollectionTaskStatus.ACQUIRING.value:
+                    self.store.compare_and_swap_collection_task(
+                        task_id,
+                        expected_state_version=int(current["state_version"]),
+                        status=CollectionTaskStatus.BLOCKED.value,
+                        error=str(exc),
+                        event_type="action_materialization_failed",
+                        action_id=outcome.action_id,
+                        event_payload={"error_type": type(exc).__name__, "message": str(exc)},
+                    )
+                raise
+        report = self.build_task_report(task_id)
+        proposal = engine.propose_next_task_state(
+            task_id=task_id,
+            pending_review_count=int(
+                report["inventory_handoff"]["pending_review_count"] or 0
+            ),
+        )
+        current = self.store.get_collection_task(task_id)
+        assert current is not None
+        if current["status"] != proposal.status:
+            self.store.compare_and_swap_collection_task(
+                task_id,
+                expected_state_version=int(current["state_version"]),
+                status=proposal.status,
+                event_type="bounded_action_reconciled",
+                action_id=outcome.action_id,
+                event_payload={**proposal.to_dict(), "outcome_code": outcome.code},
+            )
+        return self.build_task_report(task_id)
+
+    def _materialize_channels_action(self, *, task_id: str, action_id: str) -> None:
+        task = self._require_durable_channels_task(task_id)
+        action = self.store.get_collection_task_action(action_id)
+        if action is None:
+            raise KeyError(f"collection task action not found: {action_id}")
+        runs = [
+            run
+            for run in self.store.list_collection_runs(task_id=task_id)
+            if run.get("action_id") == action_id
+        ]
+        if not runs:
+            return
+        run = runs[-1]
+        candidates = [
+            candidate
+            for candidate in self.store.list_collection_candidates(task_id=task_id)
+            if candidate.get("run_id") == run["id"]
+        ]
+        if not candidates:
+            self.store.finish_collection_run(
+                run["id"],
+                "partial",
+                {"action_id": action_id, "saved_count": 0, "candidate_count": 0},
+            )
+            return
+        parsed = task.get("parsed") if isinstance(task.get("parsed"), dict) else {}
+        policy = CollectionPolicy(
+            **{**asdict(CollectionPolicy()), **(parsed.get("policy") or {})}
+        )
+        role_id = str(parsed.get("role_id") or "") or None
+        role_profile = self.store.get_ip_role(role_id) if role_id else None
+        before = self.build_task_report(task_id)
+        remaining = max(1, int(before.get("remaining_count") or 1))
+        target_count = min(remaining, max(1, policy.max_materials_per_iteration))
+        registry = self._channels_registry(task_id)
+        TopicCollectionRunner(registry, self.store).run(
+            CollectionConfig(
+                topic=str(action["input"].get("keyword") or task.get("topic") or "channels"),
+                target_count=target_count,
+                like_floor=policy.viral_like_floor,
+                super_like_threshold=policy.super_like_threshold,
+                min_duration_seconds=policy.min_duration_seconds,
+                max_duration_seconds=policy.max_duration_seconds,
+                tool_provider="wechat_channels_remote",
+                max_search_pages=1,
+                page_size=policy.page_size,
+                task_id=task_id,
+                role_id=role_id,
+                role_profile=role_profile,
+                search_keywords=[str(action["input"].get("keyword") or "")],
+                understanding_provider=str(
+                    (parsed.get("target_understanding") or {}).get("provider")
+                    or TARGET_UNDERSTANDING_PROVIDER
+                ),
+                understanding_model=str(
+                    (parsed.get("target_understanding") or {}).get("model")
+                    or TARGET_UNDERSTANDING_MODEL
+                ),
+                run_id=str(run["id"]),
+                preloaded_candidates=[
+                    {"source_package": dict(candidate["source_package"])}
+                    for candidate in candidates
+                ],
+                preloaded_traversal=dict(action.get("result", {}).get("paging") or {}),
+            )
+        )
+
+    def _channels_action_engine(
+        self,
+        *,
+        task_id: str,
+        live: bool,
+    ) -> CollectionTaskActionEngine:
+        if live:
+            return CollectionTaskActionEngine(
+                self.store,
+                lease_owner="mac-codex-channels",
+                registry=self._channels_registry(task_id),
+            )
+        return CollectionTaskActionEngine(
+            self.store,
+            lease_owner="mac-codex-channels-plan",
+            executor=lambda _action_type, _arguments: {},
+        )
+
+    def _channels_registry(self, task_id: str) -> Any:
+        controller = self._channels_session_controller_factory(self.store, task_id)
+        return self._channels_registry_factory(
+            transcription_provider_name="aliyun",
+            session_guard=controller,
+        )
+
+    def _require_durable_channels_task(self, task_id: str) -> dict[str, Any]:
+        if not _orchestration_schema_ready(self.store):
+            raise RuntimeError(
+                "collection task orchestration schema is not installed; run "
+                "mcn db migrate-collection-task-orchestration-v1"
+            )
+        task = self.store.get_collection_task(task_id)
+        if task is None:
+            raise KeyError(f"collection task not found: {task_id}")
+        parsed = task.get("parsed") if isinstance(task.get("parsed"), dict) else {}
+        if parsed.get("tool_provider") != "wechat_channels_remote":
+            raise ValueError(f"collection task is not a Channels task: {task_id}")
+        return task
+
+    def complete_channels_task(self, task_id: str) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        if task["status"] == CollectionTaskStatus.COMPLETED.value:
+            return self.build_task_report(task_id)
+        if task["status"] != CollectionTaskStatus.COMPLETING.value:
+            raise ValueError(
+                f"collection task is not ready for completion: {task_id} ({task['status']})"
+            )
+        return self._cleanup_and_finalize_channels_task(
+            task_id=task_id,
+            terminal_status=CollectionTaskStatus.COMPLETED,
+            cleanup_reason="task_completed",
+        )
+
+    def cancel_channels_task(self, task_id: str, *, reason: str) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        if task["status"] == CollectionTaskStatus.CANCELLED.value:
+            return self.build_task_report(task_id)
+        if task["status"] in {
+            CollectionTaskStatus.COMPLETED.value,
+            CollectionTaskStatus.FAILED.value,
+        }:
+            raise ValueError(
+                f"terminal collection task cannot be cancelled: {task_id} ({task['status']})"
+            )
+        if task["status"] != CollectionTaskStatus.CANCELLING.value:
+            summary = {
+                **(task.get("summary") if isinstance(task.get("summary"), dict) else {}),
+                "terminal_intent": "cancel",
+                "cancel_reason": str(reason or "operator_request"),
+            }
+            task = self.store.compare_and_swap_collection_task(
+                task_id,
+                expected_state_version=int(task["state_version"]),
+                status=CollectionTaskStatus.CANCELLING.value,
+                summary=summary,
+                event_type="task_cancellation_requested",
+                event_payload={"reason": str(reason or "operator_request")},
+            )
+        for action in self.store.list_collection_task_actions(task_id=task_id):
+            if action["status"] in {
+                CollectionActionStatus.PLANNED.value,
+                CollectionActionStatus.CLAIMED.value,
+                CollectionActionStatus.RUNNING.value,
+                CollectionActionStatus.INTERRUPTED.value,
+            }:
+                self.store.update_collection_task_action_status(
+                    action["id"],
+                    status=CollectionActionStatus.CANCELLED.value,
+                    error={"reason": str(reason or "operator_request")},
+                )
+        return self._cleanup_and_finalize_channels_task(
+            task_id=task_id,
+            terminal_status=CollectionTaskStatus.CANCELLED,
+            cleanup_reason="task_cancelled",
+        )
+
+    def recover_channels_task_cleanup(self, task_id: str) -> dict[str, Any]:
+        task = self._require_durable_channels_task(task_id)
+        if task["status"] != CollectionTaskStatus.CLEANUP_REQUIRED.value:
+            raise ValueError(
+                f"collection task does not require cleanup recovery: {task_id} ({task['status']})"
+            )
+        summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
+        intent = str(summary.get("terminal_intent") or "complete")
+        target = (
+            CollectionTaskStatus.CANCELLING
+            if intent == "cancel"
+            else CollectionTaskStatus.COMPLETING
+        )
+        task = self.store.compare_and_swap_collection_task(
+            task_id,
+            expected_state_version=int(task["state_version"]),
+            status=target.value,
+            event_type="cleanup_recovery_started",
+            event_payload={"terminal_intent": intent},
+        )
+        if target is CollectionTaskStatus.CANCELLING:
+            return self.cancel_channels_task(task_id, reason="cleanup_recovery")
+        return self.complete_channels_task(task_id)
+
+    def _cleanup_and_finalize_channels_task(
+        self,
+        *,
+        task_id: str,
+        terminal_status: CollectionTaskStatus,
+        cleanup_reason: str,
+    ) -> dict[str, Any]:
+        controller = self._channels_session_controller_factory(self.store, task_id)
+        try:
+            controller.close(reason=cleanup_reason)
+        except Exception as exc:
+            current = self.store.get_collection_task(task_id)
+            assert current is not None
+            if current["status"] in {
+                CollectionTaskStatus.COMPLETING.value,
+                CollectionTaskStatus.CANCELLING.value,
+            }:
+                summary = {
+                    **(
+                        current.get("summary")
+                        if isinstance(current.get("summary"), dict)
+                        else {}
+                    ),
+                    "terminal_intent": (
+                        "cancel"
+                        if terminal_status is CollectionTaskStatus.CANCELLED
+                        else "complete"
+                    ),
+                    "cleanup_error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                }
+                self.store.compare_and_swap_collection_task(
+                    task_id,
+                    expected_state_version=int(current["state_version"]),
+                    status=CollectionTaskStatus.CLEANUP_REQUIRED.value,
+                    summary=summary,
+                    error=str(exc),
+                    event_type="task_cleanup_failed",
+                    event_payload={"error_type": type(exc).__name__, "message": str(exc)},
+                )
+            raise
+        current = self.store.get_collection_task(task_id)
+        assert current is not None
+        self.store.compare_and_swap_collection_task(
+            task_id,
+            expected_state_version=int(current["state_version"]),
+            status=terminal_status.value,
+            error=None,
+            completed_at=datetime.now(UTC).isoformat(),
+            event_type="task_cleanup_verified",
+            event_payload={"terminal_status": terminal_status.value},
+        )
+        return self.build_task_report(task_id)
 
     def run_author_task(
         self,
@@ -543,6 +1007,18 @@ class CollectionTaskOrchestrator:
         policy = CollectionPolicy(**{**asdict(CollectionPolicy()), **(parsed.get("policy") or {})})
         entrypoint = parsed.get("entrypoint") or task.get("target_scope")
         if entrypoint == "keyword":
+            if (
+                _resume_data_provider(parsed.get("tool_provider"), default="mock")
+                == "wechat_channels_remote"
+                and _orchestration_schema_ready(self.store)
+            ):
+                if task["status"] == CollectionTaskStatus.COMPLETING.value:
+                    return self.complete_channels_task(task_id)
+                if task["status"] == CollectionTaskStatus.CLEANUP_REQUIRED.value:
+                    return self.recover_channels_task_cleanup(task_id)
+                if task["status"] == CollectionTaskStatus.CANCELLING.value:
+                    return self.cancel_channels_task(task_id, reason="resume_cancellation")
+                return self.step_channels_task(task_id)
             return self.run_keyword_task(
                 topic=str(parsed.get("topic") or task.get("topic") or ""),
                 target_count=int(parsed.get("target_count") or task.get("target_count_per_role") or 1),
@@ -662,6 +1138,19 @@ class CollectionTaskOrchestrator:
                 for item in inventory
                 if item.get("review_status") in {"reviewed", "rejected"}
             }
+            try:
+                durable_reviews = self.store.list_collection_material_reviews(
+                    task_id=task_id,
+                    role_id=role_id,
+                )
+            except RuntimeError as exc:
+                if "orchestration schema is not installed" not in str(exc):
+                    raise
+                durable_reviews = None
+            if durable_reviews is not None:
+                reviewed_source_work_ids = {
+                    str(item.get("source_work_id") or "") for item in durable_reviews
+                }
             formal_source_work_ids = {
                 str(item.get("source_work_id") or "")
                 for item in inventory
@@ -1617,6 +2106,14 @@ def _resume_data_provider(value: Any, *, default: str) -> str:
 def _resume_transcription_provider(value: Any) -> str:
     provider = str(value or "aliyun").strip().lower()
     return "aliyun" if provider in {"", "provider"} else provider
+
+
+def _orchestration_schema_ready(store: Store) -> bool:
+    with store.connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("collection_task_actions",),
+        ).fetchone() is not None
 
 
 def _target_understanding(

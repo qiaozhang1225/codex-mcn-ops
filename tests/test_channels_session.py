@@ -393,9 +393,19 @@ def test_provider_calls_guard_before_every_ephemeral_hub_start(monkeypatch) -> N
 def test_remote_config_accepts_guard_overrides_without_secret_environment(monkeypatch) -> None:
     monkeypatch.delenv("CHANNELS_WORKER_ID", raising=False)
     monkeypatch.delenv("CHANNELS_HUB_SECRET", raising=False)
+    monkeypatch.delenv("CHANNELS_HUB_HOST", raising=False)
+    monkeypatch.delenv("CHANNELS_ALLOW_INSECURE_LAN", raising=False)
     config = ChannelsRemoteConfig.from_env(
         worker_id_override="workstation-channels-01",
         shared_secret_override="guard-secret",
     )
     assert config.worker_id == "workstation-channels-01"
     assert config.shared_secret == "guard-secret"
+
+    managed = ChannelsRemoteConfig.from_env(
+        worker_id_override="workstation-channels-01",
+        shared_secret_override="guard-secret",
+        managed_session=True,
+    )
+    assert managed.host == "0.0.0.0"
+    assert managed.allow_insecure_lan is True

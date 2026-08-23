@@ -38,3 +38,10 @@ def test_task_contract_marks_only_remote_discovery_as_acquisition() -> None:
     assert is_acquisition_action(CollectionActionType.SEARCH_KEYWORD)
     assert is_acquisition_action(CollectionActionType.COLLECT_AUTHOR_WORKS)
     assert not is_acquisition_action(CollectionActionType.REVIEW_MATERIAL)
+
+
+def test_bounded_acquisition_can_return_to_the_ready_queue() -> None:
+    require_task_transition(
+        CollectionTaskStatus.ACQUIRING,
+        CollectionTaskStatus.READY_FOR_SEARCH,
+    )

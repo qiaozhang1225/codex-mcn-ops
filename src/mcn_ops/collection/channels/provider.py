@@ -5,11 +5,16 @@ import html
 import os
 import re
 import ssl
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol
+from typing import Any, Protocol
 
 from ..douyin.contracts import ProviderResult, build_provider_result, normalize_paging
-from ..douyin.errors import ProviderConfigError, ProviderInputError, ProviderResponseError
+from ..douyin.errors import (
+    ProviderConfigError,
+    ProviderInputError,
+    ProviderResponseError,
+)
 from .hub import ChannelsHub
 from .media_probe import extract_media_candidate
 from .probe import _is_loopback_host, _server_ssl_context
@@ -33,6 +38,7 @@ class ChannelsRemoteConfig:
         *,
         worker_id_override: str | None = None,
         shared_secret_override: str | None = None,
+        managed_session: bool = False,
     ) -> "ChannelsRemoteConfig":
         worker_id = str(
             worker_id_override
@@ -51,13 +57,17 @@ class ChannelsRemoteConfig:
         return cls(
             worker_id=worker_id,
             shared_secret=shared_secret,
-            host=os.environ.get("CHANNELS_HUB_HOST", "127.0.0.1").strip(),
+            host=os.environ.get(
+                "CHANNELS_HUB_HOST", "0.0.0.0" if managed_session else "127.0.0.1"
+            ).strip(),
             port=_env_int("CHANNELS_HUB_PORT", 18081),
             wait_timeout=_env_float("CHANNELS_WAIT_TIMEOUT", 120.0),
             command_timeout=_env_float("CHANNELS_COMMAND_TIMEOUT", 180.0),
             tls_cert=os.environ.get("CHANNELS_TLS_CERT", "").strip() or None,
             tls_key=os.environ.get("CHANNELS_TLS_KEY", "").strip() or None,
-            allow_insecure_lan=_env_bool("CHANNELS_ALLOW_INSECURE_LAN", False),
+            allow_insecure_lan=_env_bool(
+                "CHANNELS_ALLOW_INSECURE_LAN", managed_session
+            ),
         )
 
 

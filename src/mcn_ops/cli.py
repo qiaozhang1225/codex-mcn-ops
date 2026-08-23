@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .adb import AdbClient
 from .adapters import list_platforms
+from .adb import AdbClient
 from .collection.channels.factory import build_channels_collection_registry
-from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.direct.client import cookie_looks_authenticated
+from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.factory import (
     build_collection_provider,
     build_data_provider,
@@ -22,7 +22,12 @@ from .collection.douyin.factory import (
 from .collection.douyin.registry import build_douyin_registry
 from .collection.mock_tools import build_mock_source_registry
 from .collection.review import TaskReviewService
-from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
+from .collection.runner import (
+    CollectionConfig,
+    TopicCollectionRunner,
+    engagement_score,
+    metric_value,
+)
 from .collection.tools import parse_json_object
 from .collection.understanding import (
     DEFAULT_UNDERSTANDING_MODEL,
@@ -59,7 +64,7 @@ from .migrations import (
 )
 from .publisher import PublishRunner
 from .report import build_daily_report
-from .store import DEFAULT_DB_PATH, Store, loads
+from .store import DEFAULT_DB_PATH, Store
 
 
 def json_print(value: Any) -> None:
@@ -336,6 +341,38 @@ def build_parser() -> argparse.ArgumentParser:
     task_review.add_argument("--knowledge-subtype")
     task_review.add_argument("--idempotency-key")
     task_review.add_argument("--json", action="store_true")
+    task_plan = task_sub.add_parser(
+        "plan",
+        help="Persist one bounded Channels search strategy action",
+    )
+    task_plan.add_argument("--task-id", required=True)
+    task_plan.add_argument("--keyword", required=True)
+    task_plan.add_argument("--continue-frontier", action="store_true")
+    task_plan.add_argument("--origin-keyword")
+    task_plan.add_argument("--max-pages", type=int, default=1)
+    task_plan.add_argument("--page-size", type=int, default=20)
+    task_plan.add_argument("--strategy-iteration", type=int, default=0)
+    task_plan.add_argument("--reason", default="codex-strategy-decision")
+    task_plan.add_argument("--json", action="store_true")
+    task_step = task_sub.add_parser(
+        "step",
+        help="Execute one persisted Channels action and materialize its candidates",
+    )
+    task_step.add_argument("--task-id", required=True)
+    task_step.add_argument("--json", action="store_true")
+    task_cancel = task_sub.add_parser(
+        "cancel",
+        help="Cancel a durable Channels task and verify Windows cleanup",
+    )
+    task_cancel.add_argument("--task-id", required=True)
+    task_cancel.add_argument("--reason", required=True)
+    task_cancel.add_argument("--json", action="store_true")
+    task_cleanup_recover = task_sub.add_parser(
+        "recover-cleanup",
+        help="Retry verified cleanup for a task in cleanup_required",
+    )
+    task_cleanup_recover.add_argument("--task-id", required=True)
+    task_cleanup_recover.add_argument("--json", action="store_true")
 
     author = collect_sub.add_parser("author", help="Manage Douyin source authors")
     author_sub = author.add_subparsers(dest="author_command", required=True)
@@ -1230,6 +1267,47 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             json_print(result)
         else:
             print(format_task_show(orchestrator.build_task_report(args.task_id)))
+        return 0
+
+    if args.task_command == "plan":
+        action = orchestrator.plan_channels_keyword_action(
+            task_id=args.task_id,
+            keyword=args.keyword,
+            continue_frontier=args.continue_frontier,
+            origin_keyword=args.origin_keyword,
+            max_pages=args.max_pages,
+            page_size=args.page_size,
+            strategy_iteration=args.strategy_iteration,
+            reason=args.reason,
+        )
+        if args.json:
+            json_print(action)
+        else:
+            print(action["id"])
+        return 0
+
+    if args.task_command == "step":
+        report = orchestrator.step_channels_task(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "cancel":
+        report = orchestrator.cancel_channels_task(args.task_id, reason=args.reason)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "recover-cleanup":
+        report = orchestrator.recover_channels_task_cleanup(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
         return 0
 
     raise ValueError(args.task_command)

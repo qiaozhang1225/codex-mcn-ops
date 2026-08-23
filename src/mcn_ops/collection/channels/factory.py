@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 
 from ..douyin.factory import load_local_env
 from ..tools import ToolRegistry
-from ..transcription.aliyun import AliyunTranscriptionConfig, AliyunTranscriptionProvider
+from ..transcription.aliyun import (
+    AliyunTranscriptionConfig,
+    AliyunTranscriptionProvider,
+)
 from ..transcription.sqlite_cache import SqliteTranscriptionCache
 from .provider import ChannelsRemoteConfig, ChannelsRemoteProvider
 from .registry import build_channels_registry
@@ -28,6 +31,7 @@ def build_channels_collection_registry(
         shared_secret_override=(
             session_guard.shared_secret if session_guard is not None else None
         ),
+        managed_session=session_guard is not None,
     )
     provider = ChannelsRemoteProvider(remote_config, session_guard=session_guard)
     cache_path = Path(os.environ.get("MCN_ASR_CACHE_PATH", "data/transcription-cache.sqlite"))

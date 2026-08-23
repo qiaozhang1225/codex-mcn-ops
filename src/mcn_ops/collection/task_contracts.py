@@ -94,6 +94,7 @@ ALLOWED_TASK_TRANSITIONS: dict[CollectionTaskStatus, frozenset[CollectionTaskSta
     ),
     CollectionTaskStatus.ACQUIRING: frozenset(
         {
+            CollectionTaskStatus.READY_FOR_SEARCH,
             CollectionTaskStatus.AWAITING_REVIEW,
             CollectionTaskStatus.AWAITING_STRATEGY,
             CollectionTaskStatus.BLOCKED,
