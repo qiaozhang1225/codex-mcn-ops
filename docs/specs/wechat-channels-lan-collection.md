@@ -1,204 +1,125 @@
-# WeChat Channels LAN Collection v1
+# WeChat Channels LAN Collection
 
-Status: Phase 1 proof complete; production provider and ingestion remain gated.
+Status: Mac provider, durable task orchestration, bounded materialization, semantic review, and task-bound Windows session control are implemented. Live operation still depends on the configured Windows machine, WeChat login/readiness, compatible worker build, LAN transport, and ASR credentials.
 
 ## Objective
 
-Extend the existing Mac-hosted collection workflow with a Windows WeChat
-Channels acquisition worker. Codex and `mcn` remain on the Mac. The Windows
-machine supplies authenticated WeChat search and detail data but never opens or
-writes the Mac SQLite database.
+Extend the Mac-hosted collection system with authenticated access to the operator's logged-in WeChat Channels environment on a dedicated Windows machine. Windows supplies bounded acquisition results; Mac remains the only owner of task state, media verification, transcription, semantic review, and SQLite writes.
 
-The first proof must establish this chain without UI search and without formal
-material persistence:
+## Ownership boundary
 
-```text
-Mac probe -> authenticated WebSocket command -> Windows worker -> WeChat page
-          <- correlated paged search response <-
+### Mac
+
+- durable collection task, action, event, and frontier state;
+- authenticated Hub and provider command dispatch;
+- candidate/source persistence and completeness accounting;
+- bounded materialization, media validation, ASR, understanding, and review;
+- session lease orchestration and cleanup verification.
+
+### Windows
+
+- WeChat login and supported Channels page;
+- pinned worker process and certificate/proxy integration;
+- one authenticated Channels command at a time;
+- short-lived media locator/decryption metadata;
+- task-bound status and pinned cleanup actions.
+
+### Prohibited
+
+- Windows access to the Mac database or Git worktree over SMB;
+- public exposure of the worker's loopback API or a public Hub;
+- CAPTCHA/login/risk-control bypass;
+- durable storage of cookies, Hub secrets, authorization headers, signed media URLs, or decode keys;
+- automatic conversion of candidates into reviewed formal material;
+- concurrent searches from one leased worker.
+
+## Transport contract
+
+The Windows worker initiates an authenticated WebSocket connection to the Mac Hub. Every handshake carries `X-Cloud-Secret` and `X-Client-ID`; the Hub uses constant-time secret comparison and a worker allowlist.
+
+Production LAN transport requires WSS or an authenticated private overlay. Plain `ws://` is restricted to loopback unless an explicit controlled-PoC flag is supplied.
+
+Protocol messages correlate the outer command ID and response request ID. The Hub retains only non-sensitive readiness state such as worker ID, hostname, versions, heartbeat time, and supported page capabilities.
+
+Reconnect replaces the stale connection and fails pending calls explicitly. The provider does not silently replay a command whose persistence outcome is unknown.
+
+## Provider actions
+
+The Mac registry supports bounded operations for:
+
+- keyword search and cursor continuation;
+- author inspection and author works;
+- work detail;
+- durable public share-link resolution from a stable work ID;
+- media locator/materialization;
+- transcript extraction handoff.
+
+Search normalization preserves stable work and author identity, public metrics, duration, source keyword, cursor, and provenance. HTML highlighting is removed without rewriting source text.
+
+Before a Channels candidate becomes a formal material, the worker resolves the
+stable work ID through `finderGetFeedH5Url`. Mac accepts only a matching public
+`https://weixin.qq.com/sph/...` URL, marks it verified, and persists that URL as
+the durable source link. Private locators, mismatched work IDs, and arbitrary
+hosts fail closed.
+
+## Pagination and completeness
+
+Every search reports captured pages/items, `has_next`, `source_exhausted`, request satisfaction, and a stop reason.
+
+- `source_exhausted=true` requires authoritative `has_next=false`.
+- Reaching `max_pages`, an item cap, or a materialization cap is bounded sampling.
+- `has_next=true` without a reusable marker fails as `cursor_missing`.
+- The next marker and origin keyword are persisted in a task frontier before another iteration.
+
+## Media and transcription
+
+The preferred path is Mac-side media acquisition from a short-lived locator, prefix decryption compatible with the pinned worker, container validation, FFmpeg normalization, and Qwen ASR. Windows full-file materialization is a fallback when the locator cannot be consumed by Mac.
+
+Locator values and decode keys remain in memory or ignored runtime state. Durable evidence contains stable work identity, observation metrics, media hash/verification result, and transcription provenance.
+
+## Task execution
+
+Initialize the additive schema once:
+
+```bash
+mcn db migrate-collection-task-orchestration-v1 --json
 ```
 
-## System boundary
+Create one bounded role-targeted task:
 
-### Mac owns
-
-- collection task orchestration;
-- durable task and provider-call state;
-- candidate selection and completeness reporting;
-- media verification, ASR, understanding, and SQLite writes;
-- the WebSocket Hub that accepts a configured Windows worker.
-
-### Windows owns
-
-- the WeChat login and supported Channels page;
-- the third-party client bridge, root certificate, and proxy;
-- execution of one WeChat command at a time;
-- short-lived media locator and decryption-key acquisition;
-- full media materialization only when a signed URL cannot be used by Mac.
-
-### Explicit exclusions
-
-- no SQLite access over SMB or another network filesystem;
-- no inbound exposure of the third-party worker HTTP API;
-- no public cloud Hub;
-- no CAPTCHA, login challenge, or risk-control bypass;
-- no persistence of cookies, `urlToken`, `decodeKey`, signed media URLs, or
-  authorization headers;
-- no automatic classification as a reviewed formal rewrite base;
-- no multi-worker scheduling or concurrent WeChat searches in v1.
-
-## Transport
-
-The Windows project already implements an outbound WebSocket connector. The Mac
-Hub therefore follows its existing wire envelope rather than defining a second
-incompatible protocol.
-
-```json
-{
-  "id": "clv1-<uuid>",
-  "type": "command",
-  "client_id": "windows-01",
-  "payload": {
-    "action": "search_videos",
-    "data": {
-      "keyword": "AI",
-      "next_marker": ""
-    }
-  },
-  "timestamp": 1787328000
-}
+```bash
+mcn collect task keyword \
+  --topic '目标主题' --target-count 20 \
+  --role-id role_xxx \
+  --data-provider wechat_channels_remote \
+  --transcription-provider aliyun \
+  --max-search-pages 1 \
+  --max-materials-per-iteration 5 \
+  --json
 ```
 
-The response is correlated by `payload.request_id`, which must equal the outer
-command `id`. IDs prefixed with `clv1-` identify this protocol version.
-
-Supported worker message types are:
-
-- `heartbeat`: declares worker identity and page capabilities;
-- `response`: resolves one pending Mac command;
-- `sync_data`: ignored in the search-only proof;
-- binary gzip frames: decoded because the worker compresses larger messages.
-
-Supported Mac commands for v1 are:
-
-- `search_videos`;
-- `api_call`, reserved for video detail after the search gate passes;
-- `download_video`, reserved for media materialization after the detail gate.
-
-## Authentication and network policy
-
-- The worker initiates the connection to the Mac Hub.
-- Every handshake must contain `X-Cloud-Secret` and `X-Client-ID`.
-- Secrets are compared in constant time and are read from an environment
-  variable, never a command-line argument.
-- A configured worker allowlist rejects unknown client IDs.
-- Production LAN binding requires WSS. Plain `ws://` is permitted only on a
-  loopback address unless the operator explicitly enables an insecure PoC.
-- Only one live connection is retained per worker ID. A reconnect replaces the
-  stale connection and fails its pending calls.
-- The third-party worker API remains bound to Windows loopback. Windows Firewall
-  does not expose it to the LAN.
-
-## Search contract
-
-Mac sends:
-
-```json
-{
-  "keyword": "AI",
-  "next_marker": "",
-  "page": 1,
-  "page_size": 20
-}
-```
-
-Windows returns normalized search data:
-
-```json
-{
-  "list": [],
-  "next_marker": "opaque marker",
-  "has_more": true
-}
-```
-
-The Mac probe reports:
-
-- `captured_pages`;
-- `captured_items`;
-- `has_next`;
-- `source_exhausted`;
-- `request_satisfied`;
-- `stop_reason`.
-
-`source_exhausted=true` is valid only when the worker returns
-`has_more=false`. Reaching `max_pages` is a bounded sample and must report
-`source_exhausted=false`. `has_more=true` without a next marker fails closed as
-`cursor_missing`.
-
-## Heartbeat readiness
-
-The Hub retains only non-sensitive capability state:
-
-- worker ID and hostname;
-- worker and WeChat bridge version;
-- last heartbeat timestamp;
-- `api_ready`;
-- `supports_search`;
-- `supports_feed`;
-- `supports_profile`;
-- supported page methods.
-
-Search is rejected before dispatch when the worker is disconnected or its
-heartbeat says search is unavailable.
+Use `collect task plan` and `step` for subsequent strategy iterations. Use `collect task review` for each full-transcript semantic decision. Use `show`/`report` for progress and `session-status`, `session-recover`, or `session-close` for the leased Windows environment.
 
 ## Failure taxonomy
 
-- `unauthorized_worker`
-- `worker_disconnected`
-- `worker_not_ready`
-- `command_timeout`
-- `invalid_message`
-- `invalid_response`
-- `remote_error`
-- `cursor_missing`
+- unauthorized or unknown worker;
+- worker disconnected or not ready;
+- command timeout, invalid message/response, or remote error;
+- cursor missing/stalled;
+- public share-link resolution or work-ID verification failure;
+- media locator expiry, download, decrypt, container, or ASR failure;
+- stale task/action state or idempotency conflict;
+- transcript/review mismatch;
+- cleanup required or cleanup verification failure.
 
-Failures are terminal for the individual call. The probe does not loop around a
-login challenge or retry indefinitely.
+Failures remain explicit task/action evidence. The workflow never retries around a WeChat login challenge or reports a task complete while cleanup remains unverified.
 
-## Search-only acceptance gate
+## Acceptance invariants
 
-The Windows live test may proceed only after local protocol tests pass. The live
-gate requires:
-
-1. five public keywords and at least twenty search calls;
-2. at least three keywords with a verified second page;
-3. no manual keyword entry in WeChat after the worker is ready;
-4. correct request/response correlation for every returned message;
-5. explicit `worker_not_ready` behavior when the page is unavailable;
-6. successful reconnect after a worker restart;
-7. no secrets or signed media locators in probe output;
-8. no Mac SQLite writes during the proof.
-
-Passing this gate authorizes implementation of the Mac remote provider and
-video-detail phase. It does not authorize formal database ingestion or a claim
-of production readiness.
-
-## Later-phase source package
-
-After the search gate passes, the provider will normalize stable fields as:
-
-```text
-source_platform     = wechat_channels
-work_id             = object.id
-platform_author_id  = contact.username
-author_name         = contact.nickname
-duration_ms         = objectDesc.media[].durationMs
-public_metrics      = likes/favorites/comments/shares
-source_link         = stable share or feed URL
-```
-
-Signed URLs and decryption material exist only in the in-memory media job. The
-verified default is Mac-side media fetch followed by ISAAC64/XOR decryption of
-the first 128 KiB and FFmpeg audio extraction. The database stores the stable
-work identity, observation metrics, verified media hash, and transcription
-evidence.
+- Mac is the only durable state owner.
+- No credential or short-lived media secret appears in SQLite, reports, or Git.
+- Every remote result is correlated to one persisted action and bounded input.
+- Search candidates are persisted before selective materialization.
+- Every formal Channels material has a verified public `weixin.qq.com/sph` source link.
+- Semantic review, not automatic matching, controls formal-base progress.
+- Completion/cancellation verifies the pinned worker and certificate are cleaned up.

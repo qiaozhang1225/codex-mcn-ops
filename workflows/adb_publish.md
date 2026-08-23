@@ -2,25 +2,51 @@
 
 ## Intent
 
-Use a real Android phone and logged-in platform apps to prepare or publish content.
+Use an authorized Android device and an already signed-in platform app to
+prepare a publish job. Submission is always an explicit live action.
 
-## Inputs
+## Preconditions
 
-- publish job id
-- Android device serial
-- target platform
+- the device serial and target platform are confirmed;
+- the publish job contains approved copy and assets;
+- `adb devices` shows one authorized target;
+- no account switch, login flow, or CAPTCHA is pending.
 
 ## Steps
 
 1. Run `mcn adb doctor`.
-2. Run `mcn publish push-assets --job-id <job_id>`.
-3. Run `mcn publish run --job-id <job_id> --device <serial>`.
-4. Inspect `runs/<job_id>/` screenshots.
-5. If the final screen is correct, either stop for human publish or run live publish explicitly.
-6. Run `mcn publish verify` with result URL or manual status.
+2. Push the approved assets:
+
+   ```bash
+   mcn publish push-assets --job-id JOB_ID
+   ```
+
+3. Run the non-submitting preparation flow:
+
+   ```bash
+   mcn publish run --job-id JOB_ID --device DEVICE_SERIAL
+   ```
+
+4. Inspect screenshots and UI dumps under `runs/JOB_ID/`.
+5. Only after the final screen is verified, repeat with both explicit gates:
+
+   ```bash
+   mcn publish run \
+     --job-id JOB_ID \
+     --device DEVICE_SERIAL \
+     --allow-submit \
+     --live
+   ```
+
+6. Record the result URL or an explicit manual status with
+   `mcn publish verify`.
+
+Stop on device ambiguity, unexpected UI, authentication prompts, or missing
+evidence. Logs, screenshots, UI dumps, and account state remain local and are
+not committed to Git.
 
 ## Output
 
-- ADB run logs
-- screenshots/UI dumps
-- verified tracking snapshot
+- local ADB logs, screenshots, and UI dumps;
+- one verified tracking snapshot;
+- a clear distinction between prepared, submitted, and verified states.

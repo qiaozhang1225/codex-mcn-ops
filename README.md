@@ -1,144 +1,119 @@
 # codex-mcn-ops
 
-Codex-native MCN operations for IP building and matrix publishing.
+`codex-mcn-ops` is a Codex-first command-line workspace for creator operations. It keeps public-source collection, material review, content creation, publish preparation, and audit evidence in one local SQLite-backed workflow.
 
-This project replaces `opc-mcn-center` with a smaller execution model:
+The repository contains product code, durable contracts, reusable knowledge, and operator runbooks. Runtime databases, credentials, media, transcripts, research notes, and generated content stay local.
 
-- Codex is the operating brain.
-- SQLite is the local audit ledger.
-- Feishu is the human collaboration and delivery surface.
-- Android publishing runs through ADB against real logged-in apps.
+## Current capabilities
 
-It intentionally does not include a React/FastAPI operations center, private web publishing APIs, AiToEarn API/MCP integration, or a complex task-state product layer.
+- Douyin discovery and author traversal through the signed-in Ego Lite session.
+- WeChat Channels acquisition through a task-bound Mac/Windows LAN workflow.
+- Qwen ASR transcription and provider-neutral evidence persistence.
+- Reviewed material inventory and role-specific allocation.
+- Content Creation Workflow v3 with Script Writer, Quality Review, and Risk Review.
+- Evidence-based `贪、瞋、痴、慢、疑` opening validation and body-payoff checks.
+- Safe Android publishing preparation through ADB.
+- Markdown and Feishu-ready delivery/report payloads.
 
-## Quick Start
+The project intentionally has no web control center and no autonomous final publish. External login state, CAPTCHA, platform risk control, device UI changes, and Windows worker availability remain explicit operator gates.
+
+## Documentation
+
+- [Product requirements](docs/prd.md)
+- [Technical specification](docs/technical-spec.md)
+- [Documentation map](docs/README.md)
+- [Material collection workflow](workflows/collect_materials.md)
+- [Content Creation Workflow v3](workflows/create_script.md)
+- [ADB publish workflow](workflows/adb_publish.md)
+- [Reporting workflow](workflows/review_report.md)
+
+## Setup
 
 ```bash
-python -m pip install -e .
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e .
 mcn init-db
 mcn platforms
-mcn adb doctor
 ```
 
-Run a local material-collection rehearsal without external API credentials:
+Local configuration belongs in `.env.local`. At minimum, real Douyin transcription requires `DASHSCOPE_API_KEY`; browser-backed Douyin operations reuse the signed-in Ego Lite session.
 
 ```bash
-mcn collect role upsert \
-  --name "知识型老师" \
-  --positioning "解释型口播" \
-  --search-keyword 知识型口播
-
-mcn collect run \
-  --topic 知识型口播 \
-  --target-count 2 \
-  --tool-provider mock \
-  --like-floor 1
-
-mcn collect report --run-id crun_xxxxxxxxxxxx
-mcn material promote --material-id mat_xxxxxxxxxxxx --platform douyin
+mcn collect douyin doctor \
+  --provider direct \
+  --transcription-provider aliyun \
+  --json
 ```
 
-Run the reusable high-level collection task entry:
+## Collection entry points
+
+Douyin keyword or author collection:
 
 ```bash
-mcn collect task keyword --topic 财运 --target-count 30 \
-  --data-provider direct --transcription-provider aliyun
-mcn collect task author --sec-uid SEC_UID --like-floor 10000 \
-  --data-provider direct --transcription-provider aliyun
-mcn collect task discover-authors --min-appearances 2 --like-floor 10000 --top-authors 10
+mcn collect task keyword \
+  --topic '亲子关系' --target-count 10 \
+  --data-provider direct --transcription-provider aliyun --json
 
-mcn collect task show --task-id ctask_xxxxxxxxxxxx
-mcn collect task report --task-id ctask_xxxxxxxxxxxx
-mcn collect task resume --task-id ctask_xxxxxxxxxxxx
+mcn collect task author \
+  --sec-uid SEC_UID --like-floor 10000 \
+  --data-provider direct --transcription-provider aliyun --json
 ```
 
-The task layer creates `collection_tasks`, links all search/materialization runs through `collection_runs.task_id`, preserves existing materials by `work_id/source_url/title+author`, and runs material understanding by default. Material understanding is treated as the searchable metadata layer for later IP matching and rewrite work.
-
-For real Douyin material collection, keep Ego Lite logged in to Douyin and set
-`DASHSCOPE_API_KEY` in `.env.local`. Start with `--target-count 1`, verify the
-detail and transcript, then expand the batch. No paid data-aggregation provider
-is used.
-
-Create a content package and a safe publish job:
+WeChat Channels collection uses the same durable task ledger but requires the configured Windows worker and task orchestration migration:
 
 ```bash
-mcn content create \
-  --title "测试标题" \
-  --body "测试正文" \
-  --media /absolute/path/video.mp4 \
-  --cover /absolute/path/cover.jpg \
-  --hashtag 知识型口播
+mcn db migrate-collection-task-orchestration-v1 --json
 
-mcn publish prepare \
-  --content-id content_xxxxxxxxxxxx \
+mcn collect task keyword \
+  --topic '青春期亲子沟通' --target-count 20 \
+  --role-id role_xxx \
+  --data-provider wechat_channels_remote \
+  --transcription-provider aliyun \
+  --max-materials-per-iteration 5 --json
+```
+
+Continue with `collect task plan`, `step`, and evidence-bearing `review` commands. A task completes only from reviewed, unused, primary formal rewrite bases—not from raw search results or automatic matches.
+
+## Creation entry point
+
+```bash
+mcn create task new \
+  --role-id role_xxx \
+  --topic '目标主题' \
+  --goal '生成一条可发布口播' \
   --platform douyin \
-  --device YOUR_ADB_SERIAL
-
-mcn publish run --job-id job_xxxxxxxxxxxx --dry-run
+  --target-count 1 \
+  --creation-mode adaptation
 ```
 
-For a real connected phone flow, keep the default safety stop:
+For every formal stage, use `mcn create stage prepare`, let Codex produce the response JSON, then use `mcn create stage submit`. `create task run` is a deterministic fallback and is not formal agent output.
+
+## Publishing
 
 ```bash
-mcn publish push-assets --job-id job_xxxxxxxxxxxx
-mcn publish run --job-id job_xxxxxxxxxxxx --device YOUR_ADB_SERIAL
+mcn publish prepare \
+  --content-id content_xxx \
+  --platform douyin \
+  --device DEVICE_SERIAL
+
+mcn publish push-assets --job-id job_xxx
+mcn publish run --job-id job_xxx --device DEVICE_SERIAL
 ```
 
-The runner stops before final submit by default. Use live publish only after an explicit manual decision:
+The default run stops before final submission. `--allow-submit --live` is reserved for an explicit human-approved publish action.
 
-```bash
-mcn publish run --job-id job_xxxxxxxxxxxx --allow-submit --live
-```
+## Repository boundary
 
-Generate a local daily report:
+Tracked:
 
-```bash
-mcn report daily --output runs/daily-report.md
-```
+- `src/`, `tests/`, `scripts/` and migration code;
+- `knowledge/`, `workflows/` and current product/technical documentation;
+- stable protocol and data contracts.
 
-## V1 Platforms
+Local-only:
 
-- `douyin`
-- `xhs`
-- `wechat_channels`
-- `kwai`
+- `data/`, `runs/` runtime artifacts;
+- `research/` transcripts, investigation notes, generated scripts, images, and batch evidence;
+- credentials, browser profiles, media, screenshots, and device-specific state.
 
-Each adapter currently supplies package names, content validation, audit steps, screenshots, and manual calibration checkpoints. Device-specific tap/select/type flows should be added only after running dry-runs against the actual phone/app versions.
-
-## Runtime State
-
-- SQLite ledger: `data/mcn_ops.sqlite`
-- Run artifacts: `runs/<job_id>/`
-- Local secrets: `.env.local` or platform app login on the phone, never committed
-- Douyin session: keep Ego Lite logged in; the browser provider reuses that session and its native runtime signatures.
-- Alibaba Cloud ASR: `DASHSCOPE_API_KEY`; `DASHSCOPE_WORKSPACE_ID` and `DASHSCOPE_REGION` are optional deployment settings.
-- Provider preflight: `mcn collect douyin doctor --provider direct --transcription-provider aliyun --json`
-- Douyin author expansion: `mcn collect author expand --name "娜说智慧" --sort-type 1 --max-pages 0 --json`
-- Douyin author materialization: `mcn collect author materialize --name "娜说智慧" --top 5 --json`
-- High-level keyword collection: `mcn collect task keyword --topic 财运 --target-count 30 --data-provider direct --transcription-provider aliyun`
-- High-level author collection: `mcn collect task author --sec-uid SEC_UID --like-floor 10000 --data-provider direct --transcription-provider aliyun`
-- High-level database author discovery: `mcn collect task discover-authors --min-appearances 2 --top-authors 10 --like-floor 10000`
-
-## Local Inspection
-
-Use DB Browser for SQLite to inspect the local ledger when reviewing collected
-materials, source observations, transcriptions, and publish logs:
-
-```text
-/Applications/DB Browser for SQLite.app
-```
-
-Open:
-
-```text
-data/mcn_ops.sqlite
-```
-
-## Safety Rules
-
-- Real publishing is opt-in.
-- `stop_before_submit` is the default.
-- DeepSeek is intentionally not used. Collection defaults to `codex-agent/gpt-5.5/success` material understanding. `local-rules/material-understanding-rules-v2` is only an explicit fallback draft for exceptional cases.
-- ADB screenshots/UI dumps are stored for every major step.
-- Platform accounts are assumed to be logged in on the Android phone.
-- If UI XML is insufficient, hand off to Codex Computer Use for the visible phone/scrcpy session rather than using private platform APIs.
+Git history remains the archive for retired plans and superseded specifications. Do not keep obsolete execution plans beside current documentation.

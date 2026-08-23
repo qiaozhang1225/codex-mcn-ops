@@ -19,6 +19,10 @@ data/runtime/
 runs/*
 !runs/.gitkeep
 
+# Local research, generated content, and retired execution plans
+research/
+docs/superpowers/
+
 # Local secrets and device-specific config
 .env
 .env.local

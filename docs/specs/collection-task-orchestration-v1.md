@@ -1,85 +1,90 @@
 # Collection Task Orchestration v1
 
+Status: implemented and covered by migration, store, task-engine, workflow, CLI, and integration tests.
+
 ## Objective
 
-This contract makes a business collection objective durable across many Codex
-turns, remote searches, cursor continuations, author traversals, transcripts,
-and semantic reviews. A remote run is evidence inside a task; it is never the
-task boundary.
+A collection task represents one durable business objective across many searches, cursors, author traversals, transcripts, reviews, and Codex turns. A provider call or `collection_run` is evidence inside the task, never the task boundary.
 
-For the first production objective, completion means 20 distinct, unused,
-reviewed primary `formal_rewrite_base` source works for the confirmed 宋立心理
-role. Existing Channels runs with no `task_id` are historical experiments and
-do not count unless an explicit reuse action links and re-reviews a material.
+For a role-targeted task, completion is based on distinct, unused, reviewed primary `formal_rewrite_base` source works. Raw candidates, transcripts, material eligibility, and automatic role matches are intermediate counters.
 
-## Shared code contract
+## Code authority
 
-`src/mcn_ops/collection/task_contracts.py` is the authority for task states,
-action types, frontier states, review outcomes, Channels acquisition-session
-states, and legal task transitions. Parallel branches must import this module
-instead of defining local strings.
+- States, action types, frontier types, review outcomes, and legal transitions: `src/mcn_ops/collection/task_contracts.py`.
+- Execution and materialization: `src/mcn_ops/collection/task_engine.py` and `workflows.py`.
+- Persistence: `src/mcn_ops/store.py`.
+- Additive schema: `src/mcn_ops/migrations/collection_task_orchestration_v1.py`.
 
-## Additive storage contract
+## Storage contract
 
-The explicit `collection_task_orchestration_v1` migration adds:
+The migration adds task state/version metadata and these tables:
 
-- state version and update metadata to `collection_tasks`;
-- `collection_task_actions` for idempotent persisted decisions;
-- `collection_task_events` for append-only transition audit;
-- `collection_task_frontiers` for keyword and author cursors;
-- `collection_material_reviews` for immutable full-transcript decisions;
-- `channels_acquisition_sessions` and `channels_acquisition_events` for the
-  Windows certificate/worker lease;
-- `action_id` on `collection_runs` and review provenance on role matches.
+- `collection_task_actions`: persisted, idempotent decisions and bounded inputs;
+- `collection_task_events`: append-only task transition audit;
+- `collection_task_frontiers`: keyword/author cursor state and exhaustion evidence;
+- `collection_material_reviews`: immutable full-transcript semantic decisions;
+- `channels_acquisition_sessions`: task-bound Windows session leases;
+- `channels_acquisition_events`: worker/session lifecycle evidence.
 
-All changes are additive. Existing rows remain readable. Applying the migration
-twice must be safe, and the migration must finish with SQLite integrity and
-foreign-key checks.
+It also links `collection_runs` to actions and adds review provenance to role decisions. Applying the migration twice is safe and every successful run finishes with integrity and foreign-key checks.
 
-## Concurrency and idempotency
+## State model
 
-- Task state updates use a `state_version` compare-and-swap.
-- A task has at most one claimed or running acquisition action.
-- A worker has at most one non-terminal acquisition session.
-- An idempotency key with the same input hash returns the prior action; the same
-  key with a different input hash is a conflict.
-- Candidate persistence and frontier advancement commit together. A failed
-  action never advances its cursor.
-- `max_pages` leaves a frontier open. Only an authoritative
-  `source_exhausted=true` result exhausts it.
+Open task states distinguish executable work, semantic review, strategy choice, external blocking, and cleanup. Terminal completion or cancellation is written only after required external cleanup succeeds.
 
-## Review transaction
+State changes use compare-and-swap `state_version`. A stale writer cannot overwrite a newer decision.
 
-A full-transcript review validates task membership, confirmed role version,
-transcript hash, viral floor, material eligibility, and prior use. It then
-atomically writes the immutable review, the task-scoped role decision, the
-inventory classification, the action result, the event, and the recalculated
-task state.
+## Action model
 
-Legal outcomes are:
+Supported persisted actions include:
 
-- formal rewrite base: accepted role, reviewed primary formal inventory;
-- topic clue: reviewed non-primary topic inventory;
-- rejected: rejected role, rejected non-primary topic inventory.
+- keyword search and cursor continuation;
+- related-keyword search;
+- author inspection and author-work collection;
+- transcript-level material review;
+- task completion and cancellation.
 
-An automatic rules rejection remains evidence but cannot prevent a later
-evidence-bearing full-transcript semantic acceptance.
+An idempotency key is bound to the normalized input hash. Reusing a key with the same input returns the prior action; reusing it with different input is a conflict. A task has at most one claimed/running acquisition action.
 
-## Windows acquisition-session contract
+Candidate persistence, source observations, action outcome, and frontier advancement commit together. A failed action never advances its cursor. `max_pages` or another policy cap leaves the frontier open; only authoritative `has_next=false` / `source_exhausted=true` evidence exhausts it.
 
-The Windows certificate and hardened worker are leased to the collection task,
-not to one keyword. The initial implementation keeps the Mac Hub ephemeral per
-provider action because the worker already reconnects. Windows owns the hard
-lease and watchdog cleanup.
+## Semantic review transaction
 
-Open and renewal secrets travel through SSH stdin, never argv or SQLite. The
-production cleanup script may stop only the pinned executable and remove only
-the pinned SunnyNet certificate. Task completion and cancellation pass through
-`completing` or `cancelling`; cleanup verification is required before a terminal
-status is written.
+`mcn collect task review` validates:
 
-## Integration ownership
+- task and material membership;
+- confirmed role and role version;
+- current transcript hash;
+- viral floor and material eligibility;
+- prior role-specific use;
+- evidence-bearing outcome and reason.
 
-Parallel branches own disjoint files. The primary agent alone integrates
-`workflows.py` and `cli.py`, controls the real database, and performs Windows
-live calls. Subagents use temporary SQLite databases and mock workers.
+It then atomically records the immutable review, task-scoped role decision, inventory classification, action result, task event, and recalculated progress.
+
+Legal outcomes:
+
+- `formal_rewrite_base`: accepted role decision and reviewed primary inventory;
+- `topic_clue`: reviewed non-primary inventory for discovery only;
+- `rejected`: rejected role decision and non-primary rejected inventory.
+
+Automatic rules are evidence, not semantic authority. A rules rejection cannot prevent a later full-transcript Codex review.
+
+## Channels session lease
+
+The Windows certificate, worker, WeChat readiness, and Mac Hub form one task-bound acquisition session. The lease may span bounded strategy iterations.
+
+- One worker has at most one non-terminal session.
+- Secrets travel through process input/environment and never command arguments or SQLite.
+- Cleanup targets only the pinned executable and certificate thumbprint.
+- Completion/cancellation passes through cleanup-required states until verification succeeds.
+- Session status, recovery, and close operations are explicit CLI commands.
+
+## Acceptance invariants
+
+- Replaying the same action is idempotent.
+- A stale state version fails instead of overwriting progress.
+- Cursor advancement cannot survive a failed persistence transaction.
+- Bounded sampling is never reported as source exhaustion.
+- A review cannot bind to a stale or different transcript.
+- Task completion cannot be inferred from raw result, transcript, or automatic-match counts.
+- Channels terminal state cannot bypass verified pinned cleanup.

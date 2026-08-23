@@ -1,43 +1,85 @@
-# Technical Spec
+# Technical Specification
 
 ## Architecture
 
-The system is a Python CLI package with no server process.
+`codex-mcn-ops` is a Python 3.11+ CLI with a local SQLite ledger. It has no application server.
 
 ```mermaid
 flowchart LR
-  User["Operator / Codex"] --> CLI["mcn CLI"]
-  CLI --> SQLite["SQLite ledger"]
-  CLI --> Douyin["Douyin direct provider"]
-  CLI --> Bailian["Alibaba Cloud Qwen ASR"]
-  CLI --> ADB["ADB client"]
-  ADB --> Phone["Android phone with logged-in apps"]
-  CLI --> Runs["runs/job artifacts"]
-  CLI --> Feishu["Feishu payloads / lark-cli handoff"]
+  Operator["Operator / Codex"] --> CLI["mcn CLI"]
+  CLI --> SQLite["Local SQLite ledger"]
+  CLI --> Knowledge["Markdown knowledge and workflows"]
+  CLI --> Ego["Ego Lite signed-in Douyin session"]
+  CLI --> Hub["Authenticated Mac Channels Hub"]
+  Hub <--> Worker["Task-bound Windows WeChat worker"]
+  CLI --> ASR["Alibaba Cloud Qwen ASR"]
+  CLI --> ADB["Android ADB runner"]
+  CLI --> Local["Ignored data / runs / research"]
 ```
 
-## Data Model
+The Mac owns orchestration, persistence, review, media verification, transcription, and reporting. Windows owns only the authenticated WeChat session and one bounded Channels acquisition action at a time. Android apps own the final platform UI.
 
-The minimal ledger includes:
+## Sources of truth
+
+- SQLite schema and storage methods: `src/mcn_ops/store.py` plus explicit migrations under `src/mcn_ops/migrations/`.
+- Collection states and legal transitions: `src/mcn_ops/collection/task_contracts.py`.
+- Channels wire contract: `src/mcn_ops/collection/channels/contracts.py`.
+- Creation stage contracts and validation: `src/mcn_ops/creation/contracts.py`.
+- Creation orchestration: `src/mcn_ops/creation/workflow.py` and `stage_io.py`.
+- Human-operable procedures: `workflows/` and current documents under `docs/`.
+
+Do not maintain a second static creation JSON Schema. The Python contract generates the response template, validates submissions, and is covered by executable tests.
+
+## Repository and runtime boundaries
+
+Tracked:
+
+- application code, tests, migrations, reusable scripts;
+- current product/technical documents and stable protocol specifications;
+- creation knowledge packs and reusable workflows.
+
+Ignored/local-only:
+
+- `data/`: SQLite databases, backups, caches, browser profiles, and runtime session state;
+- `runs/`: job manifests, screenshots, logs, and sanitized run packages;
+- `research/`: transcripts, candidate evidence, generated scripts, batch JSON, images, and investigation notes;
+- `.env*`, credentials, cookies, signed media locators, certificates, and device-specific configuration.
+
+## Data model
+
+### Publishing
 
 - `content_packages`
 - `publish_jobs`
 - `publish_run_logs`
 - `tracking_snapshots`
-- `ip_roles`
-- `ip_role_versions`
-- `collection_tasks`
-- `collection_task_roles`
-- `collection_runs`
-- `collection_candidates`
-- `collected_materials`
-- `source_authors`
-- `source_works`
-- `source_observations`
-- `material_transcriptions`
-- `material_role_matches`
-- `material_inventory_classifications`
-- `material_creations`
+
+### IP and collection
+
+- `ip_roles`, `ip_role_versions`
+- `collection_tasks`, `collection_task_roles`, `collection_runs`
+- `source_authors`, `source_works`, `source_observations`
+- `material_transcriptions`, `collection_candidates`, `collected_materials`
+- `material_role_matches`, `material_inventory_classifications`, `material_creations`
+- `provider_call_logs`, `provider_call_cache`, `material_understanding_logs`
+
+Stable author/work identity is separated from time-varying observations. A transcription is provider/model/audio/options specific. Candidate status, formal material eligibility, role fit, inventory review, and creation usage are distinct decisions.
+
+### Durable task orchestration
+
+The additive `collection_task_orchestration_v1` migration adds:
+
+- `collection_task_actions`
+- `collection_task_events`
+- `collection_task_frontiers`
+- `collection_material_reviews`
+- `channels_acquisition_sessions`
+- `channels_acquisition_events`
+
+Task state uses compare-and-swap `state_version`. Action idempotency keys bind to an input hash. Candidate persistence and frontier advancement share one transaction. A bounded page limit never implies source exhaustion.
+
+### Creation
+
 - `creation_tasks`
 - `creation_stage_runs`
 - `creation_material_selections`
@@ -47,223 +89,112 @@ The minimal ledger includes:
 - `creation_stage_feedback_events`
 - `risk_term_observations`
 - `creation_learning_updates`
-- `provider_call_logs`
-- `provider_call_cache`
-- `schema_migrations`
-- `material_understanding_logs`
 
-JSON columns are used for evolving metadata. Stable publish state stays in explicit status columns.
+Stage runs are immutable versions. Script drafts are owned by Script Writer. Reviews bind to one Writer stage-run ID and body hash. A new body invalidates prior Quality and Risk passes.
 
-Material collection separates three responsibilities:
+## Collection architecture
 
-- `ip_roles`: stores confirmed or draft IP role profiles. It includes positioning, audience, themes, forbidden directions, expression constraints, style anchors, search keywords, and a cached `persona_packet_json` for downstream selection and rewriting.
-- `ip_role_versions`: stores snapshots created by `mcn collect role confirm`. Draft edits do not write versions; confirmed profile changes that touch key strategy fields move the role to `needs_reconfirm`.
-- `source_authors`: stores platform-neutral author identities. Douyin `sec_uid` is stored as `platform_author_id`.
-- `source_works`: stores one stable row per platform work and links it to an optional source author.
-- `source_observations`: stores time-varying metrics and provider evidence without overwriting prior observations.
-- `material_transcriptions`: stores transcript identity, provider, model, audio hash, options, and text separately from the material decision.
-- `collected_materials`: stores only collection and understanding decisions, linked through `source_work_id` and `transcription_id`.
-- `collection_candidates`: stores pipeline decisions linked to `source_work_id`; platform metadata is not duplicated.
-- `material_role_matches`: stores many-to-many role-fit judgments. One material can be accepted or rejected for multiple IP roles, with separate scores and reasons.
-- `material_inventory_classifications`: stores reviewed IP-role batch taxonomy. It records topic direction, content mechanism, optional knowledge subtype, formal-base versus topic-clue class, one primary allocation topic, review provenance, and reasons. It does not infer classifications from role matches.
-- `material_creations`: stores role-specific rewrite usage. This is the source of truth for whether a specific IP role has already created a draft from a specific material.
+### Douyin
 
-Creation separates process state from final publish content:
+The production route is `direct + aliyun`:
 
-- `creation_tasks`: one high-level adaptation, half-original, or original task for a confirmed IP, topic, platform, goal, and target count.
-- `creation_stage_runs`: versioned stage outputs. Methodology v3 uses material selection, brief, Script Writer, Quality Review, Risk Review, publish format, and delivery. Retry creates a new stage version and keeps the old one; methodology-v2 stage records remain readable.
-- `creation_material_selections`: material recall results for one task. It records selected and rejected material decisions, scores, and reasons.
-- `creation_drafts`: immutable viewer-copy versions written by Script Writer in methodology v3, plus legacy rewrite, hook-enhancement, and risk-cleanup artifacts.
-- `creation_delivery_packages`: the five-part delivery structure and the linked `content_packages` row when publish formatting is generated.
-- `creation_feedback_events`: lightweight manual feedback and platform notices after publishing.
-- `creation_stage_feedback_events`: pre-publish stage feedback such as rejected drafts, retry reasons, and human review notes. These events feed learning proposals before content is published.
-- `risk_term_observations`: high-risk replacements, edge-term observations, and word-level experiments.
-- `creation_learning_updates`: proposed Markdown knowledge-pack updates. They stay `pending` until explicitly applied.
+1. Ego Lite supplies the signed-in browser runtime for discovery, detail, and cursor pagination.
+2. Authoritative detail is resolved before transcription.
+3. Media/audio is normalized and sent to Qwen ASR.
+4. Source identity, observations, transcript provenance, candidate decisions, and provider calls are persisted separately.
 
-Formal creation uses a two-step agent interface. `create stage prepare` builds a read-only context packet with stage knowledge, complete source text where required, and a response contract. Codex performs semantic judgment or writing, then `create stage submit` validates and persists the result. The deterministic `create task run` path records `rules-fallback/deterministic-v1` and is not formal agent output.
+Risk-control pages, expired login, empty responses, cursor stalls, and unproven traversal completion fail closed. Static-signature HTTP access remains diagnostic-only.
 
-`material_selection` records source task, propagation mechanism, thickness, professional alignment, disposition, and salvage boundary. `topic_clue` and `hard_conflict` cannot advance as standard adaptation. `script_writing` is the only stage allowed to write viewer copy and must trace added professional claims to card IDs. `quality_review` and `risk_review` are read-only and bind their verdicts to one Script Writer stage run and body hash.
+### WeChat Channels
 
-IP role confirmation status:
+The provider key is `wechat_channels_remote`.
 
-- `draft`: editable, not valid for formal high-level collection tasks or creation.
-- `agent_suggested`: imported or Codex-suggested profile waiting for human confirmation.
-- `confirmed`: valid for formal workflows.
-- `needs_reconfirm`: a previously confirmed profile changed in key fields and must be confirmed again.
+1. A durable Mac collection task plans one bounded persisted action.
+2. A task-bound session controller starts or reuses the pinned Windows certificate/worker lease.
+3. The authenticated Windows worker executes search, continuation, author, detail, public share-link, or media-locator work.
+4. Mac resolves each formal candidate's stable work ID to a matching verified `https://weixin.qq.com/sph/...` source link, then persists candidates and traversal evidence, materializes a bounded shortlist, verifies media, and runs ASR.
+5. Full-transcript semantic review writes the task review, role decision, inventory decision, task event, and progress atomically.
+6. Completion or cancellation verifies pinned Windows cleanup before writing a terminal state.
 
-`source_role_id` is only the role that started or sourced collection. It must not be used to decide whether a material fits exactly one IP. Use `material_role_matches` for role fit, and `material_creations` for whether a role has already used a material.
+Short-lived media URLs, decode keys, Hub secrets, cookies, and authorization headers never enter durable records. The public Channels source link is durable provenance; store insertion fails closed when a formal Channels material does not have a verified public share URL.
 
-## Operator Tools
+### Task completion
 
-DB Browser for SQLite 3.13.1+ is the preferred GUI for inspecting the local ledger at `data/mcn_ops.sqlite`.
-It is an operator/development tool, not a Python runtime dependency. Use it to review high-volume text and JSON fields such as:
+Raw results, saved transcripts, and automatic role matches are intermediate evidence. A role-targeted task completes only when the target number of distinct, unused source works have reviewed primary `formal_rewrite_base` classifications for the confirmed role.
 
-- `material_transcriptions.transcript_text`
-- `source_observations.metrics_json`
-- `source_observations.payload_json`
-- `provider_call_cache.response_json`
+## Content Creation Workflow v3
 
-## CLI
+Adaptation and half-original stages:
 
-- `mcn init-db`
-- `mcn db migrate-collection-schema-v3`
-- `mcn db migrate-material-inventory-v1`
-- `mcn adb doctor`
-- `mcn adb devices`
-- `mcn content create`
-- `mcn create task new/run/confirm/retry/report/export`
-- `mcn create knowledge packet`
-- `mcn create feedback add/analyze`
-- `mcn create learning propose/apply`
-- `mcn collect douyin doctor/detail/search-video/user-posts/transcribe`
-- `mcn collect role upsert/list/show/import/export/confirm/packet/match-existing`
-- `mcn collect task keyword/author/discover-authors/show/report/resume`
-- `mcn collect run`
-- `mcn collect understand`
-- `mcn collect match`
-- `mcn collect report`
-- `mcn material list/show/promote/creations`
-- `mcn material inventory classify/import/list/pending/summary`
-- `mcn publish prepare`
-- `mcn publish push-assets`
-- `mcn publish run`
-- `mcn publish verify`
-- `mcn publish feishu-payload`
+```text
+material_selection -> creation_brief -> script_writing
+-> quality_review -> risk_review -> publish_format -> delivery
+```
+
+Original work starts at `creation_brief`.
+
+`mcn create stage prepare` builds the context packet and response template. Codex produces one JSON response. `mcn create stage submit` runs structural and semantic gates before persisting a stage run. `create task run` is a deterministic fallback for testing or legacy execution and is not formal agent output.
+
+### Ownership
+
+- Script Writer is the only stage that creates or modifies viewer-facing copy.
+- Quality Review and Risk Review are read-only and return bounded revision instructions.
+- Publish Format packages the approved body but cannot rewrite it.
+
+### Opening quality gate
+
+Quality Review evaluates `贪、瞋、痴、慢、疑` with `strong`, `weak`, `absent`, or `artificial`.
+
+- Evidence scope is spoken sentence one plus sentence two; sentence three is bridge/body.
+- Both opening sentences must be strong and each must contain at least one exact strong-driver span.
+- Together they require at least three organic strong drivers and four distinct literal topic-relevant high-stimulus keywords or phrases.
+- Every strong driver requires an exact body-payoff span.
+- Artificial drivers and unsupported stimulation cannot pass.
+
+Legacy methodology-v2 stage records remain readable, but new formal tasks use v3.
+
+## CLI surface
+
+Primary command groups:
+
+- `mcn db migrate-*`
+- `mcn collect douyin ...`
+- `mcn collect task keyword|author|discover-authors|show|report|resume`
+- `mcn collect task plan|step|review|tune|cancel|recover-cleanup`
+- `mcn collect task session-status|session-recover|session-close`
+- `mcn material inventory classify|import|list|pending|summary`
+- `mcn create task new|confirm|retry|report|export`
+- `mcn create stage prepare|submit`
+- `mcn publish prepare|push-assets|run|verify|feishu-payload`
 - `mcn report daily`
 
-## ADB Publishing
+## Migrations
 
-The runner supports:
-
-- asset push to `/sdcard/Download/codex-mcn-ops`
-- app launch through package names
-- screenshot capture through `adb exec-out screencap -p`
-- UI XML capture through `uiautomator dump`
-- safe stop before submit
-- manual calibration checkpoints for app-version-specific flows
-
-## Platform Adapters
-
-Adapters define:
-
-- platform key and display name
-- Android package name
-- platform content constraints
-- ordered publish steps
-- whether a step requires live publishing
-
-V1 adapters are conservative. They validate and capture, then mark UI-specific actions as calibration checkpoints until tested on the target phone/app version.
-
-## Material Collection
-
-Collection is CLI-first and has no server process. Douyin metadata comes from the direct provider, browser pagination reuses the signed-in Ego session, and transcription uses Alibaba Cloud Qwen ASR. There is no paid data-provider fallback.
-
-The high-level task layer is `mcn collect task ...`:
-
-- `keyword`: collects enough materials for one topic. Completion is based on target material count, not one search run. It can continue through seed keywords, related keywords, role keywords, and saved-material `next_collection_keywords`.
-- `author`: collects viral works from one source author. The default viral threshold is `like_floor=10000`, `sortType=1`, duration window `20-300` seconds, and existing materials are preserved.
-- `discover-authors`: ranks `source_authors` through their linked works and observations, then reuses the author workflow.
-- `show/report/resume`: reads `collection_tasks` and linked `collection_runs` to summarize saved materials, skipped candidates, source authors, understanding status, next recommendations, API calls, and cache hits.
-
-Low-level `collect run`, `collect author expand`, and `collect author materialize` remain stable execution primitives. High-level tasks reuse them conceptually through a workflow module and link work with `collection_runs.task_id`.
-
-When a high-level keyword task is started with `--role-id` or `--role-name`, the role must be `confirmed` and must not require reconfirmation. Low-level diagnostic commands can still read draft roles, but JSON match output marks those rows with `not_confirmed`.
-
-The default understanding identity is `codex-agent/gpt-5.5/success`. `local-rules/material-understanding-rules-v2` is an explicit fallback only, remains `draft_local_understanding`, and should not be treated as fully metadata-ready.
-
-The global default collection policy is:
-
-- `viral_like_floor = 10000`
-- `min_duration_seconds = 20`
-- `max_duration_seconds = 300`
-- `engagement_score = likes + collects * 3 + comments * 2 + shares * 4`
-- existing materials are reused by `work_id`, then `source_url`, then `title+author`, and are not overwritten unless an explicit refresh flag is used
-
-Before transcript extraction, search results pass through a prefilter:
-
-- `min_duration_seconds`, default `20`
-- `max_duration_seconds`, default `300`
-- title/caption relevance against topic and role keywords
-- weighted engagement ranking: likes + saves * 3 + comments * 2 + shares * 4
-- dynamic pagination stop when enough qualified candidates exist or the latest page has no promising candidate
-
-The CLI exposes duration overrides with `mcn collect run --min-duration-seconds` and `--max-duration-seconds`, and the same policy is available on high-level task commands.
-
-After transcript extraction, every candidate passes a formal material eligibility gate before it can become a usable `collected_materials` row and before material understanding runs.
-
-The gate is intentionally stricter than search prefiltering:
-
-- `collection_candidates` can keep broad search hits for audit and later review.
-- `collected_materials.status='collected'` means the material has a usable transcript and fits knowledge-sharing oral-script collection.
-- Candidates with no transcript, ritual-action scripts, emotional interaction scripts, non-knowledge scenes, or weak knowledge core are skipped or marked with non-usable statuses such as `eligibility_rejected` or `missing_transcript`.
-- Material understanding must not be generated for newly rejected candidates. Existing rejected rows can keep historical JSON for audit, but downstream list, match, and promote flows should treat only `status='collected'` as reusable.
-
-Eligibility metadata is promoted into explicit columns on `collected_materials`: `material_eligibility_json`, `eligibility_status`, `eligibility_provider`, `eligibility_version`, `eligibility_reason_json`, `content_form`, `knowledge_core_score`, `oral_script_fit_score`, `ip_fit_score`, and `reject_reason`.
-
-Hard-reject examples include concrete ritual actions such as water/spit/breathing/chanting operations, obvious non-knowledge scenes such as parenting/pet/plot interaction, and missing or too-short transcripts. A single Buddhist-color term is not by itself a hard rejection; it is recorded as `content_form='佛教色彩'` or risk context so IP-role matching and rewriting can decide whether to translate it into Daoist/guoxue language.
-
-The fixed material understanding JSON fields are `topic_summary`, `hook`, `core_claim`, `content_structure`, `key_points`, `content_type`, `oral_script_pattern`, `audience`, `emotion_trigger`, `risk_level`, `rewrite_angles`, `risk_notes`, `usable_quotes`, `recommended_platforms`, `role_fit_notes`, and `next_collection_keywords`.
-
-`mcn collect understand` writes or refreshes material understanding and, unless `--skip-role-match` is used, evaluates the material against enabled IP roles and writes `material_role_matches`. High-level task reports expose `metadata_ready_count`, `draft_local_count`, and pending understanding counts so collection output can be audited before二创. `mcn material promote --role-id ...` creates a `content_packages` draft and records role-specific usage in `material_creations`.
-
-The inventory layer is deliberately narrower than role matching. A reviewed row is unique by `(material_id, role_id, topic_direction)`, with a partial unique index allowing at most one `is_primary=true` row per material and role. Topic values remain data owned by the IP/batch, not global schema constants. A reviewed `formal_rewrite_base` requires an active collected material, accepted eligibility, a non-empty transcription, and an accepted role match; a `topic_clue` can retain useful direction evidence without claiming enough substance for adaptation. `mcn material inventory pending` lists distinct, accepted source works still requiring review. Listing excludes rows already referenced by `material_creations` for that role unless `--include-used` is explicit. Summary reports secondary-topic overlap but fills quotas only from distinct source works represented by reviewed primary formal bases. Allocation JSON separates `video_allocation` from `formal_base_targets` and may declare a batch-specific `expected_video_total`.
-
-Existing schema-v3 databases require the explicit additive migration:
+Existing databases are upgraded only through explicit commands:
 
 ```bash
+mcn --db-path data/mcn_ops.sqlite db migrate-collection-schema-v3 --json
 mcn --db-path data/mcn_ops.sqlite db migrate-material-inventory-v1 --json
+mcn --db-path data/mcn_ops.sqlite db migrate-collection-task-orchestration-v1 --json
 ```
 
-The migration creates only the normalized inventory table and indexes, records its version in `schema_migrations`, and performs a foreign-key check in one transaction. It does not backfill role matches or replace the database.
+Migrations must be idempotent where declared, run inside transactions, and finish with SQLite integrity and foreign-key checks. A schema-v3 rebuild writes a validated destination first; source replacement requires an explicit destination and recovery path.
 
-## Creation Workflow
+## Publishing safety
 
-The high-level creation entry is `mcn create task ...`. It is separate from low-level `mcn material promote`: `promote` can still create a quick content package from one material, while `create task` records the full rewrite process and feedback learning trail.
+- `publish run` stops before final submit by default.
+- Live submit requires both `--allow-submit` and `--live`.
+- Every device flow records screenshots, UI dumps when available, and run logs.
+- UI changes are handled through platform/device calibration rather than private publishing APIs.
 
-Formal creation requires a confirmed IP role:
+## Failure policy
 
-```bash
-mcn create task new \
-  --role-id role_xxxxxxxxxxxx \
-  --topic 财运 \
-  --goal "为思丞说生成一条知识型五段式口播" \
-  --platform douyin \
-  --target-count 3 \
-  --creation-mode adaptation
-```
+Fail closed for:
 
-Stages are fixed and should be confirmed in order:
-
-1. `material_selection`: recalls only `collected_materials.status='collected'` and `eligibility_status='accepted'`.
-2. `creation_brief`: locks IP, topic, audience, main claim, retained material points, and avoided directions.
-3. `script_writing`: creates the complete script or applies a bounded review revision. It is the only copy-writing stage.
-4. `quality_review`: performs read-only content, reasoning, oral, body-payoff, and `贪、瞋、痴、慢、疑` evidence review.
-5. `risk_review`: performs read-only claim, professional-boundary, and platform-risk review.
-6. `publish_format`: creates the five-part publish package and the linked `content_packages` draft.
-7. `delivery`: exports a human-readable Markdown delivery package.
-
-The default formal identity is `codex-agent/gpt-5.5`. Rule-based output is only a fallback/test mode and must be marked as draft-level creation, not final Codex work.
-
-Quality or risk revisions return to `script_writing`. Any new body invalidates prior review passes. `publish_format.final_copy` must equal the latest Script Writer body passed by both reviewers. Original tasks use `--creation-mode original` and start at `creation_brief` without material selection.
-
-Material reuse is IP-specific. By default, materials already present in `material_creations` for the same role are not recommended again. Use `--allow-reuse-material` only when intentionally revisiting a source material.
-
-Creation context is assembled from:
-
-- the role `persona_packet_json`
-- `knowledge/creation/global-rewrite-playbook.md`
-- `knowledge/creation/global-risk-lexicon.md`
-- `knowledge/creation/hook-playbook.md`
-- `knowledge/domains/common/playbook.md`
-- `knowledge/domains/<domain_pack>/playbook.md`
-- `knowledge/ip/<role_slug>/role-profile.json`
-- `knowledge/ip/<role_slug>/creation-playbook.md`
-- `knowledge/ip/<role_slug>/professional-knowledge.yaml`
-- `knowledge/ip/<role_slug>/feedback-learnings.md`
-- `knowledge/ip/<role_slug>/recent-creation-memory.md`
-- promoted material understanding fields for selected materials
-- the current task brief
-
-The context packet does not include full transcripts by default. Full transcript text is loaded only when a stage explicitly asks for it.
-
-Feedback is intentionally lightweight. `mcn create feedback add` records platform metrics, platform notices, and human notes. `mcn create learning propose` turns those events and risk observations into Markdown update proposals. `mcn create learning apply` is the only command that mutates the knowledge pack, preventing one bad feedback sample from automatically polluting future creation prompts.
+- missing or unconfirmed IP roles;
+- expired login, CAPTCHA, platform risk control, unavailable worker, or stale cursor;
+- missing/invalid transcript or media verification failure;
+- stale review hashes, invalid creation contracts, or missing body payoff;
+- SQLite integrity, foreign-key, migration, or task-state conflicts;
+- unverified Windows certificate/worker cleanup;
+- any final publish action without explicit operator authorization.
