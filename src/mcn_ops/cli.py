@@ -11,6 +11,7 @@ from typing import Any
 from .adapters import list_platforms
 from .adb import AdbClient
 from .collection.channels.factory import build_channels_collection_registry
+from .collection.channels.session import ChannelsAcquisitionController
 from .collection.douyin.direct.client import cookie_looks_authenticated
 from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.factory import (
@@ -373,6 +374,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_cleanup_recover.add_argument("--task-id", required=True)
     task_cleanup_recover.add_argument("--json", action="store_true")
+    task_session_status = task_sub.add_parser(
+        "session-status",
+        help="Read the task-bound Windows acquisition session status",
+    )
+    task_session_status.add_argument("--task-id", required=True)
+    task_session_status.add_argument("--json", action="store_true")
+    task_session_recover = task_sub.add_parser(
+        "session-recover",
+        help="Recover the task-bound Windows worker once",
+    )
+    task_session_recover.add_argument("--task-id", required=True)
+    task_session_recover.add_argument("--json", action="store_true")
+    task_session_close = task_sub.add_parser(
+        "session-close",
+        help="Close and verify cleanup of the task-bound Windows session",
+    )
+    task_session_close.add_argument("--task-id", required=True)
+    task_session_close.add_argument("--reason", default="operator_session_close")
+    task_session_close.add_argument("--json", action="store_true")
 
     author = collect_sub.add_parser("author", help="Manage Douyin source authors")
     author_sub = author.add_subparsers(dest="author_command", required=True)
@@ -1308,6 +1328,20 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             json_print(report)
         else:
             print(format_task_show(report))
+        return 0
+
+    if args.task_command in {"session-status", "session-recover", "session-close"}:
+        controller = ChannelsAcquisitionController(store, args.task_id)
+        if args.task_command == "session-status":
+            result = controller.status()
+        elif args.task_command == "session-recover":
+            result = controller.recover()
+        else:
+            result = controller.close(reason=args.reason)
+        if args.json:
+            json_print(result)
+        else:
+            print(json.dumps(result, ensure_ascii=False))
         return 0
 
     raise ValueError(args.task_command)

@@ -53,6 +53,12 @@ def test_durable_channels_task_commands_are_exposed_by_the_cli() -> None:
             "scope_changed",
         ]
     ).task_command == "cancel"
+    assert parser.parse_args(
+        ["collect", "task", "session-status", "--task-id", "ctask-123"]
+    ).task_command == "session-status"
+    assert parser.parse_args(
+        ["collect", "task", "session-recover", "--task-id", "ctask-123"]
+    ).task_command == "session-recover"
 
 
 def _registry(search_calls: list[dict[str, Any]]) -> ToolRegistry:
