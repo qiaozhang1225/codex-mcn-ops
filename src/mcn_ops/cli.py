@@ -51,7 +51,11 @@ from .creation import (
     run_creation_stage,
 )
 from .feishu import build_publish_job_payload, write_payload
-from .migrations import migrate_collection_schema_v3, migrate_material_inventory_v1
+from .migrations import (
+    migrate_collection_schema_v3,
+    migrate_collection_task_orchestration_v1,
+    migrate_material_inventory_v1,
+)
 from .publisher import PublishRunner
 from .report import build_daily_report
 from .store import DEFAULT_DB_PATH, Store, loads
@@ -91,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add the reviewed IP-role material inventory schema to an existing v3 database",
     )
     db_migrate_inventory.add_argument("--json", action="store_true")
+    db_migrate_task_orchestration = db_sub.add_parser(
+        "migrate-collection-task-orchestration-v1",
+        help="Add durable task actions, frontiers, reviews, and Channels session leases",
+    )
+    db_migrate_task_orchestration.add_argument("--json", action="store_true")
 
     adb_parser = subparsers.add_parser("adb", help="ADB device utilities")
     adb_sub = adb_parser.add_subparsers(dest="adb_command", required=True)
@@ -2105,6 +2114,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.db_command == "migrate-material-inventory-v1":
                 report = migrate_material_inventory_v1(Path(args.db_path))
+            elif args.db_command == "migrate-collection-task-orchestration-v1":
+                report = migrate_collection_task_orchestration_v1(Path(args.db_path))
             else:
                 raise ValueError(args.db_command)
             if args.json:

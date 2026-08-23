@@ -1,15 +1,40 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from mcn_ops.cli import build_parser, main
 from mcn_ops.migrations import (
     COLLECTION_TASK_ORCHESTRATION_V1,
     migrate_collection_task_orchestration_v1,
 )
 from mcn_ops.store import Store
+
+
+def test_orchestration_migration_is_available_as_an_explicit_cli_command(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parsed = build_parser().parse_args(["db", "migrate-collection-task-orchestration-v1"])
+    assert parsed.db_command == "migrate-collection-task-orchestration-v1"
+
+    database = tmp_path / "mcn.sqlite"
+    Store(database).init_db()
+    assert main(
+        [
+            "--db-path",
+            str(database),
+            "db",
+            "migrate-collection-task-orchestration-v1",
+            "--json",
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["migration"] == COLLECTION_TASK_ORCHESTRATION_V1
+    assert report["status"] == "applied"
 
 
 def test_orchestration_migration_is_explicit_additive_and_idempotent(tmp_path: Path) -> None:
