@@ -200,7 +200,11 @@ function Start-WxInteractiveCleanupTask {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to dispatch the interactive Channels cleanup task"
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    # Interactive scheduled tasks can remain queued for longer than 30 seconds
+    # while the signed-in desktop is busy. Keep this below the Mac-side 120s SSH
+    # command timeout, but long enough to avoid reporting a false cleanup failure
+    # after the exact worker and listeners have already stopped.
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(90)
     do {
         Start-Sleep -Milliseconds 500
         $counts = Get-WxCertificateCounts

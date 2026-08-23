@@ -109,6 +109,7 @@ def test_production_cleanup_targets_only_pinned_resources() -> None:
     assert "certutil.exe -delstore Root $script:WxExpectedCertificateThumbprint" not in common
     assert "refusing cleanup because the pinned SunnyNet certificate exists in LocalMachine Root" in common
     assert "Start-WxInteractiveCleanupTask" in common
+    assert "AddSeconds(90)" in common
     assert 'workerTask.State -eq "Running"' in common
     assert "CodexWxChannelInteractiveCleanup" in common
     assert "Remove-WxPinnedCertificate" in _read("interactive_cleanup")
