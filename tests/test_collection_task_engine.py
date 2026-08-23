@@ -314,6 +314,28 @@ def test_author_feed_requires_both_plan_and_provider_live_poc_gates(
     )
 
 
+def test_author_inspection_is_blocked_until_a_real_profile_contract_is_verified(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task(store)
+    executor = FakeExecutor([])
+    engine = _engine(store, executor)
+    action = engine.plan_inspect_author(
+        task_id=task_id,
+        platform_author_id="finder-1",
+    )
+
+    outcome = engine.execute_one(task_id=task_id)
+
+    assert outcome.code == "author_inspection_live_poc_required"
+    assert outcome.blocked is True
+    assert executor.calls == []
+    frontier = store.get_collection_task_frontier(action["input"]["frontier_id"])
+    assert frontier["status"] == "open"
+    assert frontier["version"] == 0
+
+
 def test_state_proposal_never_completes_or_requests_cleanup(tmp_path: Path) -> None:
     store = _store(tmp_path)
     task_id = _task(store)

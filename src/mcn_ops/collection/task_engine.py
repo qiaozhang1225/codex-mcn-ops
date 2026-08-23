@@ -357,6 +357,14 @@ class CollectionTaskActionEngine:
             return self._fail(
                 action, frontier_id, "cursor_missing", True, frontier=frontier
             )
+        if action_type is CollectionActionType.INSPECT_AUTHOR:
+            return self._fail(
+                action,
+                frontier_id,
+                "author_inspection_live_poc_required",
+                True,
+                frontier=frontier,
+            )
         if action_type is CollectionActionType.COLLECT_AUTHOR_WORKS and not bool(
             action["input"].get("author_feed_live_poc_verified")
         ):
