@@ -3494,6 +3494,50 @@ class Store:
             ).fetchone()
         return _source_work_row_to_dict(row) if row else None
 
+    def set_source_work_public_url(
+        self,
+        *,
+        platform: str,
+        platform_work_id: str,
+        source_url: str,
+    ) -> dict[str, Any]:
+        platform = platform.strip().lower()
+        platform_work_id = platform_work_id.strip()
+        source_url = source_url.strip().rstrip("/")
+        if not platform or not platform_work_id or not source_url:
+            raise ValueError("platform, platform_work_id and source_url are required")
+        if platform == "wechat_channels" and not _is_public_channels_source_url(
+            source_url
+        ):
+            raise ValueError(
+                "WeChat Channels source_url must be a public "
+                "https://weixin.qq.com/sph/ link"
+            )
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM source_works WHERE platform = ? AND platform_work_id = ?",
+                (platform, platform_work_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"source work not found: {platform}:{platform_work_id}"
+                )
+            current = str(row["source_url"] or "").strip().rstrip("/")
+            if current and current != source_url:
+                raise ValueError(
+                    f"source work already has a different public URL: {platform}:{platform_work_id}"
+                )
+            conn.execute(
+                "UPDATE source_works SET source_url = ?, last_seen_at = ? WHERE id = ?",
+                (source_url, now_iso(), row["id"]),
+            )
+            updated = conn.execute(
+                "SELECT * FROM source_works WHERE id = ?", (row["id"],)
+            ).fetchone()
+        assert updated is not None
+        return _source_work_row_to_dict(updated)
+
     def list_source_works(self, *, author_id: str | None = None, platform: str | None = None) -> list[dict[str, Any]]:
         where: list[str] = []
         params: list[Any] = []

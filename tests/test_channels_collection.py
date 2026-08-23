@@ -80,6 +80,38 @@ def test_channels_collection_persists_candidates_material_and_understanding_idem
     assert matches[0]["decision"] == "accepted"
 
 
+def test_channels_public_url_backfill_is_validated_and_conflict_safe(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "mcn.sqlite")
+    store.init_db()
+    store.upsert_source_work(
+        platform="wechat_channels",
+        platform_work_id="work-1",
+        title="test",
+    )
+
+    updated = store.set_source_work_public_url(
+        platform="wechat_channels",
+        platform_work_id="work-1",
+        source_url="https://weixin.qq.com/sph/Abc123/",
+    )
+    assert updated["canonical_url"] == "https://weixin.qq.com/sph/Abc123"
+
+    with pytest.raises(ValueError, match="public"):
+        store.set_source_work_public_url(
+            platform="wechat_channels",
+            platform_work_id="work-1",
+            source_url="https://finder.video.qq.com/private",
+        )
+    with pytest.raises(ValueError, match="different"):
+        store.set_source_work_public_url(
+            platform="wechat_channels",
+            platform_work_id="work-1",
+            source_url="https://weixin.qq.com/sph/Different123",
+        )
+
+
 def _channels_tools() -> ToolRegistry:
     registry = ToolRegistry()
     packages = [
