@@ -24,7 +24,13 @@ from ..douyin.errors import (
     TranscriptionInputError,
 )
 from .cache import MemoryTranscriptionCache, cache_safe_provider_result, transcription_cache_key
-from .media import PreparedMedia, normalize_prepared_media, prepare_media, validate_public_https_url
+from .media import (
+    PreparedMedia,
+    normalize_prepared_media,
+    prepare_media,
+    split_prepared_media,
+    validate_public_https_url,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class HttpResponse:
 HttpTransport = Callable[[str, str, Mapping[str, str], Optional[bytes], float], HttpResponse]
 MediaPreparer = Callable[[str], PreparedMedia]
 MediaNormalizer = Callable[[PreparedMedia], PreparedMedia]
+MediaChunker = Callable[[PreparedMedia, float], list[PreparedMedia]]
 UrlUploader = Callable[[Path], str]
 UploadedUrlCleanup = Callable[[str], None]
 
@@ -62,6 +69,7 @@ class AliyunTranscriptionConfig:
     poll_interval_seconds: float = 2.0
     short_max_seconds: float = 300.0
     short_max_bytes: int = 10 * 1024 * 1024
+    local_chunk_seconds: float = 240.0
     unit_price_cny_per_second: float = 0.00022
     base_url: str | None = None
 
@@ -79,6 +87,9 @@ class AliyunTranscriptionConfig:
             enable_itn=os.environ.get("MCN_ASR_ENABLE_ITN", "false").lower() in {"1", "true", "yes"},
             short_model=os.environ.get("MCN_ASR_SHORT_MODEL", "qwen3-asr-flash").strip(),
             long_model=os.environ.get("MCN_ASR_LONG_MODEL", "qwen3-asr-flash-filetrans").strip(),
+            local_chunk_seconds=float(
+                os.environ.get("MCN_ASR_LOCAL_CHUNK_SECONDS", "240")
+            ),
         )
 
     def resolved_base_url(self) -> str:
@@ -91,6 +102,10 @@ class AliyunTranscriptionConfig:
             raise ProviderConfigError("Aliyun API key and workspace ID are required")
         if self.short_max_seconds <= 0 or self.short_max_bytes <= 0:
             raise ProviderConfigError("short-audio limits must be positive")
+        if self.local_chunk_seconds <= 0 or self.local_chunk_seconds > self.short_max_seconds:
+            raise ProviderConfigError(
+                "local audio chunk duration must be positive and within the short-audio limit"
+            )
         if self.poll_timeout_seconds <= 0 or self.poll_interval_seconds < 0:
             raise ProviderConfigError("polling configuration is invalid")
 
@@ -105,6 +120,7 @@ class AliyunTranscriptionProvider:
         transport: HttpTransport | None = None,
         media_preparer: MediaPreparer | None = None,
         media_normalizer: MediaNormalizer | None = None,
+        media_chunker: MediaChunker | None = None,
         cache: ResultCache | None = None,
         url_uploader: UrlUploader | None = None,
         uploaded_url_cleanup: UploadedUrlCleanup | None = None,
@@ -116,6 +132,7 @@ class AliyunTranscriptionProvider:
         self.transport = transport or urllib_transport
         self.media_preparer = media_preparer or prepare_media
         self.media_normalizer = media_normalizer or normalize_prepared_media
+        self.media_chunker = media_chunker or split_prepared_media
         self.cache = cache or MemoryTranscriptionCache()
         self.url_uploader = url_uploader
         self.uploaded_url_cleanup = uploaded_url_cleanup
@@ -143,12 +160,28 @@ class AliyunTranscriptionProvider:
                 prepared.duration_seconds <= self.config.short_max_seconds
                 and prepared.size_bytes <= self.config.short_max_bytes
             )
-            model = self.config.short_model if is_short else self.config.long_model
+            use_local_chunks = (
+                not is_short
+                and prepared.source_url is None
+                and self.url_uploader is None
+            )
+            chunked_model = (
+                f"{self.config.short_model}:chunked:{self.config.local_chunk_seconds:g}s"
+            )
+            model = (
+                self.config.short_model
+                if is_short
+                else chunked_model
+                if use_local_chunks
+                else self.config.long_model
+            )
             options = {
                 "enable_itn": self.config.enable_itn,
                 "enable_words": self.config.enable_words if not is_short else False,
                 "language": self.config.language,
             }
+            if use_local_chunks:
+                options["local_chunk_seconds"] = self.config.local_chunk_seconds
             cache_key = transcription_cache_key(
                 audio_sha256=prepared.sha256,
                 provider=self.provider_name,
@@ -164,6 +197,12 @@ class AliyunTranscriptionProvider:
 
             if is_short:
                 result = self._transcribe_short(prepared, package)
+            elif use_local_chunks:
+                result = self._transcribe_local_chunks(
+                    prepared,
+                    package,
+                    model=chunked_model,
+                )
             else:
                 pending_job = self._pending_job(cache_key) if use_cache else None
                 persisted_upload = str((pending_job or {}).get("uploaded_url") or "") or None
@@ -191,6 +230,76 @@ class AliyunTranscriptionProvider:
             prepared.cleanup()
             if original_media.temporary_directory != prepared.temporary_directory:
                 original_media.cleanup()
+
+    def _transcribe_local_chunks(
+        self,
+        media: PreparedMedia,
+        source_package: dict[str, Any],
+        *,
+        model: str,
+    ) -> ProviderResult:
+        chunks = self.media_chunker(media, self.config.local_chunk_seconds)
+        if not chunks:
+            raise TranscriptionInputError("long local audio splitting returned no chunks")
+        texts: list[str] = []
+        segments: list[dict[str, Any]] = []
+        request_ids: list[str] = []
+        language = self.config.language or ""
+        seconds = 0.0
+        try:
+            for index, chunk in enumerate(chunks):
+                if (
+                    chunk.duration_seconds > self.config.short_max_seconds
+                    or chunk.size_bytes > self.config.short_max_bytes
+                ):
+                    raise TranscriptionInputError(
+                        f"audio chunk {index + 1} exceeds the short-audio limit"
+                    )
+                result = self._transcribe_short(chunk, source_package)
+                normalized = (
+                    result.get("normalized")
+                    if isinstance(result.get("normalized"), dict)
+                    else {}
+                )
+                text = str(normalized.get("text") or "").strip()
+                if not text:
+                    raise ProviderResponseError(
+                        f"Aliyun chunk {index + 1} returned empty text"
+                    )
+                begin_ms = round(seconds * 1000)
+                chunk_seconds = _number(
+                    (result.get("usage") or {}).get("audio_seconds"),
+                    chunk.duration_seconds,
+                )
+                seconds += chunk_seconds
+                texts.append(text)
+                segments.append(
+                    {
+                        "text": text,
+                        "begin_time_ms": begin_ms,
+                        "end_time_ms": round(seconds * 1000),
+                        "chunk_index": index,
+                    }
+                )
+                language = str(normalized.get("language") or language)
+                raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+                request_id = str(raw.get("request_id") or "")
+                if request_id:
+                    request_ids.append(request_id)
+        finally:
+            for chunk in chunks:
+                chunk.cleanup()
+        endpoint = f"{self.config.resolved_base_url()}/compatible-mode/v1/chat/completions"
+        return self._result(
+            text="\n".join(texts),
+            model=model,
+            package=source_package,
+            language=language,
+            segments=segments,
+            seconds=seconds,
+            endpoint=endpoint,
+            raw={"chunk_count": len(chunks), "request_ids": request_ids},
+        )
 
     def _transcribe_short(self, media: PreparedMedia, source_package: dict[str, Any]) -> ProviderResult:
         encoded = base64.b64encode(media.read_bytes(max_bytes=self.config.short_max_bytes)).decode("ascii")

@@ -563,7 +563,24 @@ def scrub_for_storage(value: Any) -> Any:
         scrubbed: dict[str, Any] = {}
         for key, item in value.items():
             lowered = key.lower()
-            if any(token in lowered for token in ["secret", "cookie", "api_key", "apikey", "authorization"]):
+            if any(
+                token in lowered
+                for token in [
+                    "secret",
+                    "cookie",
+                    "api_key",
+                    "apikey",
+                    "authorization",
+                    "decodekey",
+                    "decode_key",
+                    "decryptkey",
+                    "decrypt_key",
+                    "sessionbuffer",
+                    "session_buffer",
+                    "urltoken",
+                    "url_token",
+                ]
+            ):
                 scrubbed[key] = "<redacted>"
             else:
                 scrubbed[key] = scrub_for_storage(item)
@@ -1109,28 +1126,43 @@ class Store:
         target_count_per_role: int,
         topic: str | None,
         parsed: dict[str, Any] | None = None,
+        status: str = "running",
     ) -> str:
+        normalized_status = str(status or "").strip()
+        if normalized_status != "running":
+            from .collection.task_contracts import CollectionTaskStatus
+
+            normalized_status = CollectionTaskStatus(normalized_status).value
         task_id = new_id("ctask")
+        timestamp = now_iso()
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO collection_tasks(
-                    id, command, target_scope, target_count_per_role, topic,
-                    status, parsed_json, started_at
+            task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(collection_tasks)")}
+            if "updated_at" in task_columns:
+                conn.execute(
+                    """
+                    INSERT INTO collection_tasks(
+                        id, command, target_scope, target_count_per_role, topic,
+                        status, parsed_json, started_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id, command, target_scope, target_count_per_role, topic,
+                        normalized_status, dumps(scrub_for_storage(parsed or {})), timestamp, timestamp,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    command,
-                    target_scope,
-                    target_count_per_role,
-                    topic,
-                    "running",
-                    dumps(scrub_for_storage(parsed or {})),
-                    now_iso(),
-                ),
-            )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO collection_tasks(
+                        id, command, target_scope, target_count_per_role, topic,
+                        status, parsed_json, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id, command, target_scope, target_count_per_role, topic,
+                        normalized_status, dumps(scrub_for_storage(parsed or {})), timestamp,
+                    ),
+                )
         return task_id
 
     def finish_collection_task(
@@ -1149,6 +1181,27 @@ class Store:
                 """,
                 (status, now_iso(), dumps(scrub_for_storage(summary)), error, task_id),
             )
+
+    def update_collection_task_progress(
+        self,
+        task_id: str,
+        status: str,
+        summary: dict[str, Any],
+        error: str | None = None,
+    ) -> None:
+        """Persist an open task checkpoint without marking the objective complete."""
+
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE collection_tasks
+                SET status = ?, completed_at = NULL, summary_json = ?, error = ?
+                WHERE id = ?
+                """,
+                (status, dumps(scrub_for_storage(summary)), error, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"collection task not found: {task_id}")
 
     def upsert_collection_task_role(
         self,
@@ -1217,6 +1270,1247 @@ class Store:
             row = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
         return _task_row_to_dict(row) if row else None
 
+    def compare_and_swap_collection_task(
+        self,
+        task_id: str,
+        *,
+        expected_state_version: int,
+        status: str,
+        summary: dict[str, Any] | None = None,
+        error: str | None = None,
+        event_type: str = "task_state_changed",
+        action_id: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+        completed_at: str | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import require_task_transition
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            current = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
+            if current is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            if int(current["state_version"] or 0) != int(expected_state_version):
+                raise RuntimeError(
+                    f"collection task state version conflict: expected {expected_state_version}, "
+                    f"found {current['state_version']}"
+                )
+            require_task_transition(str(current["status"]), status)
+            timestamp = now_iso()
+            next_summary = (
+                dumps(scrub_for_storage(summary))
+                if summary is not None
+                else str(current["summary_json"] or "{}")
+            )
+            cursor = conn.execute(
+                """
+                UPDATE collection_tasks
+                SET status = ?, state_version = state_version + 1, updated_at = ?,
+                    summary_json = ?, error = ?, completed_at = ?
+                WHERE id = ? AND state_version = ?
+                """,
+                (
+                    status,
+                    timestamp,
+                    next_summary,
+                    error,
+                    completed_at,
+                    task_id,
+                    expected_state_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"collection task state version conflict: {task_id}")
+            _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                action_id=action_id,
+                event_type=event_type,
+                from_status=str(current["status"]),
+                to_status=status,
+                payload=event_payload or {},
+            )
+            row = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
+        return _task_row_to_dict(row)
+
+    def update_collection_task_configuration(
+        self,
+        task_id: str,
+        *,
+        expected_state_version: int,
+        parsed: dict[str, Any],
+        event_type: str = "task_configuration_updated",
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update an open task configuration without changing its lifecycle state."""
+        from .collection.task_contracts import (
+            TERMINAL_TASK_STATUSES,
+            CollectionTaskStatus,
+        )
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            current = conn.execute(
+                "SELECT * FROM collection_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            if int(current["state_version"] or 0) != int(expected_state_version):
+                raise RuntimeError(
+                    f"collection task state version conflict: expected {expected_state_version}, "
+                    f"found {current['state_version']}"
+                )
+            status = CollectionTaskStatus(str(current["status"]))
+            if status in TERMINAL_TASK_STATUSES or status in {
+                CollectionTaskStatus.ACQUIRING,
+                CollectionTaskStatus.AWAITING_REVIEW,
+                CollectionTaskStatus.COMPLETING,
+                CollectionTaskStatus.CANCELLING,
+                CollectionTaskStatus.CLEANUP_REQUIRED,
+            }:
+                raise ValueError(
+                    f"collection task configuration cannot change in status {status.value}"
+                )
+            timestamp = now_iso()
+            cursor = conn.execute(
+                """
+                UPDATE collection_tasks
+                SET parsed_json = ?, state_version = state_version + 1, updated_at = ?
+                WHERE id = ? AND state_version = ?
+                """,
+                (
+                    dumps(scrub_for_storage(parsed)),
+                    timestamp,
+                    task_id,
+                    expected_state_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"collection task state version conflict: {task_id}")
+            _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                event_type=event_type,
+                from_status=status.value,
+                to_status=status.value,
+                payload=event_payload or {},
+            )
+            row = conn.execute(
+                "SELECT * FROM collection_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return _task_row_to_dict(row)
+
+    def create_collection_task_action(
+        self,
+        *,
+        task_id: str,
+        action_type: str,
+        idempotency_key: str,
+        input_payload: dict[str, Any],
+        reason: str = "",
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import CollectionActionStatus, CollectionActionType
+
+        normalized_action_type = CollectionActionType(action_type).value
+        normalized_key = str(idempotency_key or "").strip()
+        if not normalized_key:
+            raise ValueError("idempotency_key is required")
+        prepared_input = scrub_for_storage(input_payload)
+        input_json = dumps(prepared_input)
+        input_hash = hashlib.sha256(input_json.encode("utf-8")).hexdigest()
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            if conn.execute("SELECT 1 FROM collection_tasks WHERE id = ?", (task_id,)).fetchone() is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            existing = conn.execute(
+                """
+                SELECT * FROM collection_task_actions
+                WHERE task_id = ? AND idempotency_key = ?
+                """,
+                (task_id, normalized_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["input_hash"] != input_hash:
+                    raise ValueError(
+                        f"idempotency key conflict for collection task action: {normalized_key}"
+                    )
+                return _collection_task_action_row_to_dict(existing)
+            action_id = new_id("caction")
+            conn.execute(
+                """
+                INSERT INTO collection_task_actions(
+                    id, task_id, action_type, status, idempotency_key, input_hash,
+                    reason, input_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action_id,
+                    task_id,
+                    normalized_action_type,
+                    CollectionActionStatus.PLANNED.value,
+                    normalized_key,
+                    input_hash,
+                    str(reason or "").strip(),
+                    input_json,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                action_id=action_id,
+                event_type="action_planned",
+                payload={"action_type": normalized_action_type, "input_hash": input_hash},
+            )
+            row = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+        return _collection_task_action_row_to_dict(row)
+
+    def get_collection_task_action(self, action_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            row = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+        return _collection_task_action_row_to_dict(row) if row else None
+
+    def list_collection_task_actions(
+        self,
+        *,
+        task_id: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [task_id]
+        query = "SELECT * FROM collection_task_actions WHERE task_id = ?"
+        if status is not None:
+            from .collection.task_contracts import CollectionActionStatus
+
+            query += " AND status = ?"
+            params.append(CollectionActionStatus(status).value)
+        query += " ORDER BY created_at, id"
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_collection_task_action_row_to_dict(row) for row in rows]
+
+    def claim_collection_task_action(
+        self,
+        action_id: str,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        expected_task_state_version: int | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import (
+            CollectionActionStatus,
+            CollectionTaskStatus,
+            is_acquisition_action,
+            require_task_transition,
+        )
+
+        normalized_owner = str(lease_owner or "").strip()
+        if not normalized_owner:
+            raise ValueError("lease_owner is required")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            action = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+            if action is None:
+                raise KeyError(f"collection task action not found: {action_id}")
+            if action["status"] not in {
+                CollectionActionStatus.PLANNED.value,
+                CollectionActionStatus.INTERRUPTED.value,
+            }:
+                raise ValueError(f"collection task action is not claimable: {action_id} ({action['status']})")
+            task = conn.execute(
+                "SELECT * FROM collection_tasks WHERE id = ?", (action["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"collection task not found: {action['task_id']}")
+            if expected_task_state_version is not None:
+                if int(task["state_version"] or 0) != int(expected_task_state_version):
+                    raise RuntimeError(
+                        f"collection task state version conflict: expected {expected_task_state_version}, "
+                        f"found {task['state_version']}"
+                    )
+                if is_acquisition_action(action["action_type"]):
+                    require_task_transition(task["status"], CollectionTaskStatus.ACQUIRING.value)
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE collection_task_actions
+                    SET status = ?, lease_owner = ?, lease_expires_at = ?,
+                        attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?),
+                        updated_at = ?, completed_at = NULL
+                    WHERE id = ? AND status IN (?, ?)
+                    """,
+                    (
+                        CollectionActionStatus.CLAIMED.value,
+                        normalized_owner,
+                        lease_expires_at,
+                        timestamp,
+                        timestamp,
+                        action_id,
+                        CollectionActionStatus.PLANNED.value,
+                        CollectionActionStatus.INTERRUPTED.value,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise RuntimeError(
+                    f"collection task already has an active acquisition action: {action['task_id']}"
+                ) from exc
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"collection task action claim conflict: {action_id}")
+            if expected_task_state_version is not None and is_acquisition_action(action["action_type"]):
+                task_cursor = conn.execute(
+                    """
+                    UPDATE collection_tasks
+                    SET status = ?, state_version = state_version + 1, updated_at = ?
+                    WHERE id = ? AND state_version = ?
+                    """,
+                    (
+                        CollectionTaskStatus.ACQUIRING.value,
+                        timestamp,
+                        action["task_id"],
+                        expected_task_state_version,
+                    ),
+                )
+                if task_cursor.rowcount != 1:
+                    raise RuntimeError(f"collection task state version conflict: {action['task_id']}")
+            _append_collection_task_event_conn(
+                conn,
+                task_id=str(action["task_id"]),
+                action_id=action_id,
+                event_type="action_claimed",
+                from_status=str(task["status"]),
+                to_status=(
+                    CollectionTaskStatus.ACQUIRING.value
+                    if expected_task_state_version is not None
+                    and is_acquisition_action(action["action_type"])
+                    else str(task["status"])
+                ),
+                payload={"lease_owner": normalized_owner, "lease_expires_at": lease_expires_at},
+            )
+            row = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+        return _collection_task_action_row_to_dict(row)
+
+    def update_collection_task_action_status(
+        self,
+        action_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import CollectionActionStatus
+
+        target = CollectionActionStatus(status)
+        allowed = {
+            CollectionActionStatus.PLANNED: {CollectionActionStatus.CLAIMED, CollectionActionStatus.CANCELLED},
+            CollectionActionStatus.CLAIMED: {
+                CollectionActionStatus.RUNNING,
+                CollectionActionStatus.INTERRUPTED,
+                CollectionActionStatus.CANCELLED,
+            },
+            CollectionActionStatus.RUNNING: {
+                CollectionActionStatus.SUCCEEDED,
+                CollectionActionStatus.FAILED,
+                CollectionActionStatus.INTERRUPTED,
+                CollectionActionStatus.CANCELLED,
+            },
+            CollectionActionStatus.INTERRUPTED: {
+                CollectionActionStatus.CLAIMED,
+                CollectionActionStatus.CANCELLED,
+            },
+        }
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            current = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+            if current is None:
+                raise KeyError(f"collection task action not found: {action_id}")
+            current_status = CollectionActionStatus(current["status"])
+            if target not in allowed.get(current_status, set()):
+                raise ValueError(
+                    f"invalid collection action transition: {current_status.value} -> {target.value}"
+                )
+            terminal = target in {
+                CollectionActionStatus.SUCCEEDED,
+                CollectionActionStatus.FAILED,
+                CollectionActionStatus.CANCELLED,
+            }
+            conn.execute(
+                """
+                UPDATE collection_task_actions
+                SET status = ?, result_json = ?, error_json = ?, updated_at = ?,
+                    completed_at = ?, lease_owner = CASE WHEN ? THEN NULL ELSE lease_owner END,
+                    lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END
+                WHERE id = ?
+                """,
+                (
+                    target.value,
+                    dumps(scrub_for_storage(result or {})),
+                    dumps(scrub_for_storage(error or {})),
+                    timestamp,
+                    timestamp if terminal else None,
+                    int(terminal),
+                    int(terminal),
+                    action_id,
+                ),
+            )
+            _append_collection_task_event_conn(
+                conn,
+                task_id=str(current["task_id"]),
+                action_id=action_id,
+                event_type=f"action_{target.value}",
+                payload={"result": result or {}, "error": error or {}},
+            )
+            row = conn.execute("SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)).fetchone()
+        return _collection_task_action_row_to_dict(row)
+
+    def append_collection_task_event(
+        self,
+        *,
+        task_id: str,
+        event_type: str,
+        action_id: str | None = None,
+        from_status: str | None = None,
+        to_status: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            event_id = _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                action_id=action_id,
+                event_type=event_type,
+                from_status=from_status,
+                to_status=to_status,
+                payload=payload or {},
+            )
+            row = conn.execute("SELECT * FROM collection_task_events WHERE id = ?", (event_id,)).fetchone()
+        return _collection_task_event_row_to_dict(row)
+
+    def list_collection_task_events(self, *, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(
+                "SELECT * FROM collection_task_events WHERE task_id = ? ORDER BY event_seq",
+                (task_id,),
+            ).fetchall()
+        return [_collection_task_event_row_to_dict(row) for row in rows]
+
+    def upsert_collection_task_frontier(
+        self,
+        *,
+        task_id: str,
+        frontier_type: str,
+        frontier_key: str,
+        cursor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import CollectionFrontierStatus, CollectionFrontierType
+
+        normalized_type = CollectionFrontierType(frontier_type).value
+        normalized_key = str(frontier_key or "").strip()
+        if not normalized_key:
+            raise ValueError("frontier_key is required")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            if conn.execute("SELECT 1 FROM collection_tasks WHERE id = ?", (task_id,)).fetchone() is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            existing = conn.execute(
+                """
+                SELECT * FROM collection_task_frontiers
+                WHERE task_id = ? AND frontier_type = ? AND frontier_key = ?
+                """,
+                (task_id, normalized_type, normalized_key),
+            ).fetchone()
+            if existing is None:
+                frontier_id = new_id("cfrontier")
+                conn.execute(
+                    """
+                    INSERT INTO collection_task_frontiers(
+                        id, task_id, frontier_type, frontier_key, status, cursor_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        frontier_id,
+                        task_id,
+                        normalized_type,
+                        normalized_key,
+                        CollectionFrontierStatus.OPEN.value,
+                        dumps(scrub_for_storage(cursor or {})),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                existing = conn.execute(
+                    "SELECT * FROM collection_task_frontiers WHERE id = ?", (frontier_id,)
+                ).fetchone()
+        return _collection_task_frontier_row_to_dict(existing)
+
+    def get_collection_task_frontier(self, frontier_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM collection_task_frontiers WHERE id = ?", (frontier_id,)
+            ).fetchone()
+        return _collection_task_frontier_row_to_dict(row) if row else None
+
+    def list_collection_task_frontiers(
+        self,
+        *,
+        task_id: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [task_id]
+        query = "SELECT * FROM collection_task_frontiers WHERE task_id = ?"
+        if status is not None:
+            from .collection.task_contracts import CollectionFrontierStatus
+
+            query += " AND status = ?"
+            params.append(CollectionFrontierStatus(status).value)
+        query += " ORDER BY created_at, id"
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_collection_task_frontier_row_to_dict(row) for row in rows]
+
+    def advance_collection_task_frontier(
+        self,
+        frontier_id: str,
+        *,
+        action_id: str,
+        expected_version: int,
+        cursor: dict[str, Any],
+        source_exhausted: bool,
+        page_count_delta: int = 1,
+        result_count_delta: int = 0,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import CollectionActionStatus, CollectionFrontierStatus
+
+        if page_count_delta < 0 or result_count_delta < 0:
+            raise ValueError("frontier counters cannot move backwards")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            frontier = conn.execute(
+                "SELECT * FROM collection_task_frontiers WHERE id = ?", (frontier_id,)
+            ).fetchone()
+            if frontier is None:
+                raise KeyError(f"collection task frontier not found: {frontier_id}")
+            action = conn.execute(
+                "SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+            if action is None:
+                raise KeyError(f"collection task action not found: {action_id}")
+            if action["task_id"] != frontier["task_id"]:
+                raise ValueError("frontier and action belong to different collection tasks")
+            if action["status"] not in {
+                CollectionActionStatus.CLAIMED.value,
+                CollectionActionStatus.RUNNING.value,
+                CollectionActionStatus.SUCCEEDED.value,
+            }:
+                raise ValueError(f"action cannot advance a frontier in status {action['status']}")
+            candidate_ids: list[str] = []
+            for index, candidate in enumerate(candidates or []):
+                if not isinstance(candidate, dict):
+                    raise ValueError(f"frontier candidate at index {index} must be an object")
+                run_id = str(candidate.get("run_id") or "").strip()
+                source_work_id = str(candidate.get("source_work_id") or "").strip()
+                if not run_id or not source_work_id:
+                    raise ValueError(
+                        f"frontier candidate at index {index} requires run_id and source_work_id"
+                    )
+                run = conn.execute(
+                    "SELECT * FROM collection_runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if run is None:
+                    raise KeyError(f"collection run not found: {run_id}")
+                if run["task_id"] != frontier["task_id"]:
+                    raise ValueError("frontier candidate run belongs to another collection task")
+                if run["action_id"] not in (None, action_id):
+                    raise ValueError("frontier candidate run belongs to another collection action")
+                if conn.execute(
+                    "SELECT 1 FROM source_works WHERE id = ?", (source_work_id,)
+                ).fetchone() is None:
+                    raise KeyError(f"source work not found: {source_work_id}")
+                existing_candidate = conn.execute(
+                    """
+                    SELECT id FROM collection_candidates
+                    WHERE run_id = ? AND source_work_id = ?
+                    """,
+                    (run_id, source_work_id),
+                ).fetchone()
+                candidate_id = (
+                    str(existing_candidate["id"]) if existing_candidate else new_id("cand")
+                )
+                conn.execute(
+                    """
+                    INSERT INTO collection_candidates(
+                        id, run_id, task_id, role_id, source_work_id, status,
+                        selection_reason, skip_reason, skip_detail, threshold_mode,
+                        material_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id, source_work_id) DO UPDATE SET
+                        task_id = excluded.task_id,
+                        role_id = excluded.role_id,
+                        status = excluded.status,
+                        selection_reason = excluded.selection_reason,
+                        skip_reason = excluded.skip_reason,
+                        skip_detail = excluded.skip_detail,
+                        threshold_mode = excluded.threshold_mode,
+                        material_id = excluded.material_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        candidate_id, run_id, frontier["task_id"],
+                        candidate.get("role_id") or run["role_id"], source_work_id,
+                        str(candidate.get("status") or "discovered"),
+                        str(candidate.get("selection_reason") or ""),
+                        str(candidate.get("skip_reason") or ""),
+                        str(candidate.get("skip_detail") or ""),
+                        str(candidate.get("threshold_mode") or ""),
+                        candidate.get("material_id"),
+                        str(candidate.get("created_at") or timestamp), timestamp,
+                    ),
+                )
+                candidate_ids.append(candidate_id)
+            if frontier["last_action_id"] == action_id:
+                result = _collection_task_frontier_row_to_dict(frontier)
+                result["candidate_ids"] = candidate_ids
+                return result
+            if int(frontier["version"] or 0) != int(expected_version):
+                raise RuntimeError(
+                    f"collection frontier version conflict: expected {expected_version}, "
+                    f"found {frontier['version']}"
+                )
+            next_status = (
+                CollectionFrontierStatus.EXHAUSTED.value
+                if source_exhausted
+                else CollectionFrontierStatus.OPEN.value
+            )
+            updated = conn.execute(
+                """
+                UPDATE collection_task_frontiers
+                SET status = ?, cursor_json = ?, page_count = page_count + ?,
+                    result_count = result_count + ?, traversal_complete = ?,
+                    last_action_id = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (
+                    next_status,
+                    dumps(scrub_for_storage(cursor)),
+                    page_count_delta,
+                    result_count_delta,
+                    int(source_exhausted),
+                    action_id,
+                    timestamp,
+                    frontier_id,
+                    expected_version,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(f"collection frontier version conflict: {frontier_id}")
+            _append_collection_task_event_conn(
+                conn,
+                task_id=str(frontier["task_id"]),
+                action_id=action_id,
+                event_type="frontier_advanced",
+                payload={
+                    "frontier_id": frontier_id,
+                    "source_exhausted": bool(source_exhausted),
+                    "page_count_delta": page_count_delta,
+                    "result_count_delta": result_count_delta,
+                },
+            )
+            row = conn.execute(
+                "SELECT * FROM collection_task_frontiers WHERE id = ?", (frontier_id,)
+            ).fetchone()
+        result = _collection_task_frontier_row_to_dict(row)
+        result["candidate_ids"] = candidate_ids
+        return result
+
+    def record_collection_material_review(
+        self,
+        *,
+        task_id: str,
+        action_id: str,
+        material_id: str,
+        role_id: str,
+        outcome: str,
+        topic_direction: str,
+        content_mechanism: str,
+        evidence: dict[str, Any],
+        reviewer: str,
+        role_profile_version: int,
+        transcript_sha256: str,
+        fit_score: float | None = None,
+        knowledge_subtype: str | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import (
+            CollectionActionStatus,
+            CollectionActionType,
+            MaterialReviewOutcome,
+        )
+
+        normalized_outcome = MaterialReviewOutcome(outcome)
+        normalized_reviewer = str(reviewer or "").strip()
+        if not normalized_reviewer:
+            raise ValueError("reviewer is required")
+        if len(str(transcript_sha256 or "")) != 64:
+            raise ValueError("transcript_sha256 must be a SHA-256 hex digest")
+        if fit_score is not None and not 0 <= float(fit_score) <= 1:
+            raise ValueError("fit_score must be between 0 and 1")
+        if normalized_outcome is MaterialReviewOutcome.FORMAL_REWRITE_BASE:
+            role_decision, material_class, is_primary, review_status = (
+                "accepted", "formal_rewrite_base", True, "reviewed"
+            )
+        elif normalized_outcome is MaterialReviewOutcome.TOPIC_CLUE:
+            role_decision, material_class, is_primary, review_status = (
+                "accepted", "topic_clue", False, "reviewed"
+            )
+        else:
+            role_decision, material_class, is_primary, review_status = (
+                "rejected", "topic_clue", False, "rejected"
+            )
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            _require_material_inventory_schema(conn)
+            prior_for_action = conn.execute(
+                "SELECT * FROM collection_material_reviews WHERE action_id = ?", (action_id,)
+            ).fetchone()
+            if prior_for_action is not None:
+                return _collection_material_review_row_to_dict(prior_for_action)
+            task = conn.execute("SELECT * FROM collection_tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            action = conn.execute(
+                "SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+            if action is None:
+                raise KeyError(f"collection task action not found: {action_id}")
+            if action["task_id"] != task_id or action["action_type"] != CollectionActionType.REVIEW_MATERIAL.value:
+                raise ValueError("review action does not belong to the requested collection task")
+            if action["status"] not in {
+                CollectionActionStatus.CLAIMED.value,
+                CollectionActionStatus.RUNNING.value,
+            }:
+                raise ValueError(f"review action is not active: {action_id} ({action['status']})")
+            role = conn.execute("SELECT * FROM ip_roles WHERE id = ?", (role_id,)).fetchone()
+            if role is None:
+                raise KeyError(f"role not found: {role_id}")
+            if role["confirmation_status"] != "confirmed" or bool(role["needs_reconfirm"]):
+                raise ValueError(f"role must be confirmed before semantic review: {role_id}")
+            if int(role["profile_version"] or 0) != int(role_profile_version):
+                raise RuntimeError(
+                    f"role profile version conflict: expected {role_profile_version}, "
+                    f"found {role['profile_version']}"
+                )
+            material = conn.execute(
+                """
+                SELECT cm.*, mt.transcript_text
+                FROM collected_materials cm
+                JOIN material_transcriptions mt ON mt.id = cm.transcription_id
+                WHERE cm.id = ?
+                """,
+                (material_id,),
+            ).fetchone()
+            if material is None:
+                raise KeyError(f"material with transcription not found: {material_id}")
+            action_input = loads(action["input_json"], {})
+            linked_by_action = str(action_input.get("material_id") or "") == material_id
+            linked_by_task = material["task_id"] == task_id or conn.execute(
+                """
+                SELECT 1 FROM collection_candidates
+                WHERE task_id = ? AND source_work_id = ?
+                LIMIT 1
+                """,
+                (task_id, material["source_work_id"]),
+            ).fetchone() is not None
+            if not linked_by_task and not linked_by_action:
+                raise ValueError(f"material is not linked to collection task {task_id}: {material_id}")
+            transcript = str(material["transcript_text"] or "").strip()
+            actual_transcript_sha256 = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+            if not transcript or actual_transcript_sha256 != transcript_sha256:
+                raise RuntimeError(f"material transcript changed before review: {material_id}")
+            if material["status"] != "collected" or material["eligibility_status"] != "accepted":
+                raise ValueError(f"material is not eligible for semantic review: {material_id}")
+            like_floor = int(((loads(task["parsed_json"], {}) or {}).get("policy") or {}).get("viral_like_floor") or 0)
+            observed_like_count = _latest_source_work_like_count_conn(conn, str(material["source_work_id"]))
+            if like_floor > 0 and observed_like_count < like_floor:
+                raise ValueError(
+                    f"material is below the task viral floor: {observed_like_count} < {like_floor}"
+                )
+            if normalized_outcome is MaterialReviewOutcome.FORMAL_REWRITE_BASE:
+                used = conn.execute(
+                    """
+                    SELECT 1
+                    FROM material_creations mc
+                    JOIN collected_materials used_cm ON used_cm.id = mc.material_id
+                    WHERE used_cm.source_work_id = ? AND mc.role_id = ?
+                    LIMIT 1
+                    """,
+                    (material["source_work_id"], role_id),
+                ).fetchone()
+                if used is not None:
+                    raise ValueError(
+                        f"source work has already been used for role {role_id}: {material['source_work_id']}"
+                    )
+            prior = conn.execute(
+                """
+                SELECT * FROM collection_material_reviews
+                WHERE task_id = ? AND material_id = ? AND role_id = ?
+                ORDER BY review_revision DESC LIMIT 1
+                """,
+                (task_id, material_id, role_id),
+            ).fetchone()
+            review_revision = int(prior["review_revision"] or 0) + 1 if prior else 1
+            review_id = new_id("cmreview")
+            automatic_match = conn.execute(
+                """
+                SELECT * FROM material_role_matches
+                WHERE material_id = ? AND role_id = ? AND (task_id = ? OR task_id IS NULL)
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END, created_at DESC LIMIT 1
+                """,
+                (material_id, role_id, task_id, task_id),
+            ).fetchone()
+            automatic_snapshot = _role_match_row_to_dict(automatic_match) if automatic_match else {}
+            conn.execute(
+                """
+                INSERT INTO collection_material_reviews(
+                    id, task_id, action_id, material_id, role_id, source_work_id,
+                    review_revision, outcome, role_decision, fit_score, topic_direction,
+                    content_mechanism, material_class, is_primary, inventory_review_status,
+                    evidence_json, reviewer, role_profile_version, transcript_sha256,
+                    automatic_match_snapshot_json, supersedes_review_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id, task_id, action_id, material_id, role_id, material["source_work_id"],
+                    review_revision, normalized_outcome.value, role_decision, fit_score,
+                    str(topic_direction or "").strip(), str(content_mechanism or "").strip(),
+                    material_class, int(is_primary), review_status,
+                    dumps(scrub_for_storage(evidence)), normalized_reviewer, role_profile_version,
+                    transcript_sha256, dumps(scrub_for_storage(automatic_snapshot)),
+                    prior["id"] if prior else None, timestamp,
+                ),
+            )
+            existing_match = conn.execute(
+                """
+                SELECT id FROM material_role_matches
+                WHERE material_id = ? AND role_id = ? AND task_id = ?
+                """,
+                (material_id, role_id, task_id),
+            ).fetchone()
+            reasons = evidence.get("reasons") if isinstance(evidence.get("reasons"), list) else []
+            if existing_match:
+                conn.execute(
+                    """
+                    UPDATE material_role_matches
+                    SET fit_score = ?, decision = ?, reasons_json = ?, decision_source = ?,
+                        review_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        float(fit_score or 0), role_decision, dumps(_clean_list(reasons)),
+                        "full-transcript-semantic-review", review_id, timestamp, existing_match["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO material_role_matches(
+                        id, material_id, role_id, task_id, fit_score, decision, reasons_json,
+                        decision_source, review_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id("match"), material_id, role_id, task_id, float(fit_score or 0),
+                        role_decision, dumps(_clean_list(reasons)),
+                        "full-transcript-semantic-review", review_id, timestamp, timestamp,
+                    ),
+                )
+            classification_id = self._classify_material_inventory_conn(
+                conn,
+                material_id=material_id,
+                role_id=role_id,
+                topic_direction=topic_direction,
+                content_mechanism=content_mechanism,
+                knowledge_subtype=knowledge_subtype,
+                material_class=material_class,
+                is_primary=is_primary,
+                review_status=review_status,
+                reviewer=normalized_reviewer,
+                decision_source="full-transcript-semantic-review",
+                classification_reasons=reasons or [f"semantic review outcome: {normalized_outcome.value}"],
+            )
+            result = {
+                "review_id": review_id,
+                "classification_id": classification_id,
+                "outcome": normalized_outcome.value,
+                "source_work_id": material["source_work_id"],
+            }
+            conn.execute(
+                """
+                UPDATE collection_task_actions
+                SET status = ?, result_json = ?, error_json = '{}', updated_at = ?,
+                    completed_at = ?, lease_owner = NULL, lease_expires_at = NULL
+                WHERE id = ?
+                """,
+                (
+                    CollectionActionStatus.SUCCEEDED.value,
+                    dumps(result),
+                    timestamp,
+                    timestamp,
+                    action_id,
+                ),
+            )
+            _append_collection_task_event_conn(
+                conn,
+                task_id=task_id,
+                action_id=action_id,
+                event_type="material_reviewed",
+                payload=result,
+            )
+            row = conn.execute(
+                "SELECT * FROM collection_material_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        return _collection_material_review_row_to_dict(row)
+
+    def list_collection_material_reviews(
+        self,
+        *,
+        task_id: str | None = None,
+        material_id: str | None = None,
+        role_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        for column, value in (("task_id", task_id), ("material_id", material_id), ("role_id", role_id)):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        query = "SELECT * FROM collection_material_reviews"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at, id"
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_collection_material_review_row_to_dict(row) for row in rows]
+
+    def count_available_task_formal_bases(self, *, task_id: str, role_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            _require_material_inventory_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT DISTINCT cm.source_work_id
+                FROM material_inventory_classifications mic
+                JOIN collected_materials cm ON cm.id = mic.material_id
+                JOIN material_transcriptions mt ON mt.id = cm.transcription_id
+                WHERE mic.role_id = ?
+                  AND mic.material_class = 'formal_rewrite_base'
+                  AND mic.review_status = 'reviewed'
+                  AND mic.is_primary = 1
+                  AND cm.status = 'collected'
+                  AND cm.eligibility_status = 'accepted'
+                  AND length(trim(mt.transcript_text)) > 0
+                  AND EXISTS (
+                      SELECT 1 FROM material_role_matches mrm
+                      WHERE mrm.material_id = cm.id
+                        AND mrm.role_id = ?
+                        AND mrm.task_id = ?
+                        AND mrm.decision = 'accepted'
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM collection_material_reviews cmr
+                      WHERE cmr.task_id = ?
+                        AND cmr.material_id = cm.id
+                        AND cmr.role_id = ?
+                        AND cmr.outcome = 'formal_rewrite_base'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM material_creations mc
+                      JOIN collected_materials used_cm ON used_cm.id = mc.material_id
+                      WHERE used_cm.source_work_id = cm.source_work_id
+                        AND mc.role_id = ?
+                  )
+                ORDER BY cm.source_work_id
+                """,
+                (role_id, role_id, task_id, task_id, role_id, role_id),
+            ).fetchall()
+        source_work_ids = [str(row["source_work_id"]) for row in rows]
+        return {
+            "task_id": task_id,
+            "role_id": role_id,
+            "qualified_formal_base_count": len(source_work_ids),
+            "source_work_ids": source_work_ids,
+        }
+
+    def create_channels_acquisition_session(
+        self,
+        *,
+        task_id: str,
+        worker_key: str,
+        windows_host: str,
+        certificate_thumbprint: str,
+        worker_executable: str,
+        lease_expires_at: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import ChannelsSessionStatus
+
+        normalized_worker = str(worker_key or "").strip()
+        normalized_host = str(windows_host or "").strip()
+        normalized_thumbprint = str(certificate_thumbprint or "").strip().upper()
+        normalized_executable = str(worker_executable or "").strip()
+        if not all((normalized_worker, normalized_host, normalized_thumbprint, normalized_executable)):
+            raise ValueError("worker_key, windows_host, certificate_thumbprint and worker_executable are required")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            if conn.execute("SELECT 1 FROM collection_tasks WHERE id = ?", (task_id,)).fetchone() is None:
+                raise KeyError(f"collection task not found: {task_id}")
+            existing = conn.execute(
+                """
+                SELECT * FROM channels_acquisition_sessions
+                WHERE (task_id = ? OR worker_key = ?)
+                  AND status NOT IN ('cleaned', 'expired')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (task_id, normalized_worker),
+            ).fetchone()
+            if existing is not None:
+                same_identity = (
+                    existing["task_id"] == task_id
+                    and existing["worker_key"] == normalized_worker
+                    and existing["windows_host"] == normalized_host
+                    and existing["certificate_thumbprint"] == normalized_thumbprint
+                    and existing["worker_executable"] == normalized_executable
+                )
+                if not same_identity:
+                    raise RuntimeError(
+                        f"worker or task already has a non-terminal Channels acquisition session: {existing['id']}"
+                    )
+                return _channels_acquisition_session_row_to_dict(existing)
+            session_id = new_id("chsession")
+            conn.execute(
+                """
+                INSERT INTO channels_acquisition_sessions(
+                    id, task_id, worker_key, windows_host, status, certificate_thumbprint,
+                    worker_executable, lease_expires_at, state_version, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    session_id, task_id, normalized_worker, normalized_host,
+                    ChannelsSessionStatus.PROVISIONING.value, normalized_thumbprint,
+                    normalized_executable, lease_expires_at,
+                    dumps(scrub_for_storage(metadata or {})), timestamp, timestamp,
+                ),
+            )
+            _append_channels_acquisition_event_conn(
+                conn,
+                session_id=session_id,
+                task_id=task_id,
+                event_type="session_created",
+                to_status=ChannelsSessionStatus.PROVISIONING.value,
+                payload={"worker_key": normalized_worker, "lease_expires_at": lease_expires_at},
+            )
+            row = conn.execute(
+                "SELECT * FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return _channels_acquisition_session_row_to_dict(row)
+
+    def get_channels_acquisition_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return _channels_acquisition_session_row_to_dict(row) if row else None
+
+    def list_channels_acquisition_sessions(
+        self,
+        *,
+        task_id: str | None = None,
+        worker_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if task_id is not None:
+            where.append("task_id = ?")
+            params.append(task_id)
+        if worker_key is not None:
+            where.append("worker_key = ?")
+            params.append(worker_key)
+        query = "SELECT * FROM channels_acquisition_sessions"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at, id"
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_channels_acquisition_session_row_to_dict(row) for row in rows]
+
+    def update_channels_acquisition_session(
+        self,
+        session_id: str,
+        *,
+        expected_state_version: int,
+        status: str,
+        lease_expires_at: str | None = None,
+        heartbeat: bool = False,
+        cleanup_verified: bool = False,
+        metadata: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        event_type: str = "session_state_changed",
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from .collection.task_contracts import ChannelsSessionStatus
+
+        target = ChannelsSessionStatus(status)
+        transitions = {
+            ChannelsSessionStatus.PROVISIONING: {
+                ChannelsSessionStatus.ACTIVE,
+                ChannelsSessionStatus.DEGRADED,
+                ChannelsSessionStatus.CLEANUP_PENDING,
+                ChannelsSessionStatus.EXPIRED,
+            },
+            ChannelsSessionStatus.ACTIVE: {
+                ChannelsSessionStatus.ACTIVE,
+                ChannelsSessionStatus.DEGRADED,
+                ChannelsSessionStatus.CLEANUP_PENDING,
+                ChannelsSessionStatus.EXPIRED,
+            },
+            ChannelsSessionStatus.DEGRADED: {
+                ChannelsSessionStatus.ACTIVE,
+                ChannelsSessionStatus.DEGRADED,
+                ChannelsSessionStatus.CLEANUP_PENDING,
+                ChannelsSessionStatus.EXPIRED,
+            },
+            ChannelsSessionStatus.CLEANUP_PENDING: {
+                ChannelsSessionStatus.CLEANED,
+                ChannelsSessionStatus.CLEANUP_FAILED,
+            },
+            ChannelsSessionStatus.CLEANUP_FAILED: {
+                ChannelsSessionStatus.CLEANUP_PENDING,
+                ChannelsSessionStatus.CLEANUP_FAILED,
+            },
+        }
+        timestamp = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            current = conn.execute(
+                "SELECT * FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"Channels acquisition session not found: {session_id}")
+            if int(current["state_version"] or 0) != int(expected_state_version):
+                raise RuntimeError(
+                    f"Channels acquisition session state version conflict: expected {expected_state_version}, "
+                    f"found {current['state_version']}"
+                )
+            current_status = ChannelsSessionStatus(current["status"])
+            if target not in transitions.get(current_status, set()):
+                raise ValueError(
+                    f"invalid Channels acquisition session transition: {current_status.value} -> {target.value}"
+                )
+            if target is ChannelsSessionStatus.CLEANED and not cleanup_verified:
+                raise ValueError("cleanup verification is required before marking a session cleaned")
+            next_metadata = (
+                dumps(scrub_for_storage(metadata))
+                if metadata is not None
+                else str(current["metadata_json"] or "{}")
+            )
+            updated = conn.execute(
+                """
+                UPDATE channels_acquisition_sessions
+                SET status = ?, lease_expires_at = COALESCE(?, lease_expires_at),
+                    last_heartbeat_at = CASE WHEN ? THEN ? ELSE last_heartbeat_at END,
+                    cleanup_verified_at = CASE WHEN ? THEN ? ELSE cleanup_verified_at END,
+                    state_version = state_version + 1, metadata_json = ?, error_json = ?, updated_at = ?
+                WHERE id = ? AND state_version = ?
+                """,
+                (
+                    target.value, lease_expires_at, int(heartbeat), timestamp,
+                    int(cleanup_verified), timestamp, next_metadata,
+                    dumps(scrub_for_storage(error or {})), timestamp,
+                    session_id, expected_state_version,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(f"Channels acquisition session state version conflict: {session_id}")
+            _append_channels_acquisition_event_conn(
+                conn,
+                session_id=session_id,
+                task_id=str(current["task_id"]),
+                event_type=event_type,
+                from_status=current_status.value,
+                to_status=target.value,
+                payload=event_payload or {},
+            )
+            row = conn.execute(
+                "SELECT * FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return _channels_acquisition_session_row_to_dict(row)
+
+    def append_channels_acquisition_event(
+        self,
+        *,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            session = conn.execute(
+                "SELECT * FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if session is None:
+                raise KeyError(f"Channels acquisition session not found: {session_id}")
+            event_id = _append_channels_acquisition_event_conn(
+                conn,
+                session_id=session_id,
+                task_id=str(session["task_id"]),
+                event_type=event_type,
+                from_status=str(session["status"]),
+                to_status=str(session["status"]),
+                payload=payload or {},
+            )
+            row = conn.execute(
+                "SELECT * FROM channels_acquisition_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        return _channels_acquisition_event_row_to_dict(row)
+
+    def list_channels_acquisition_events(self, *, session_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            _require_collection_task_orchestration_schema(conn)
+            rows = conn.execute(
+                "SELECT * FROM channels_acquisition_events WHERE session_id = ? ORDER BY event_seq",
+                (session_id,),
+            ).fetchall()
+        return [_channels_acquisition_event_row_to_dict(row) for row in rows]
+
     def create_collection_run(
         self,
         *,
@@ -1227,30 +2521,48 @@ class Store:
         like_floor: int,
         super_like_threshold: int,
         tool_provider: str,
+        action_id: str | None = None,
     ) -> str:
         run_id = new_id("crun")
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO collection_runs(
-                    id, task_id, role_id, topic, target_count, like_floor,
-                    super_like_threshold, tool_provider, status, started_at
+            run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(collection_runs)")}
+            if action_id is not None:
+                if "action_id" not in run_columns:
+                    raise RuntimeError(
+                        "collection task orchestration schema is not installed; cannot bind a run to an action"
+                    )
+                action = conn.execute(
+                    "SELECT task_id FROM collection_task_actions WHERE id = ?", (action_id,)
+                ).fetchone()
+                if action is None:
+                    raise KeyError(f"collection task action not found: {action_id}")
+                if action["task_id"] != task_id:
+                    raise ValueError("collection run and action belong to different tasks")
+                conn.execute(
+                    """
+                    INSERT INTO collection_runs(
+                        id, task_id, role_id, topic, target_count, like_floor,
+                        super_like_threshold, tool_provider, status, started_at, action_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id, task_id, role_id, topic, target_count, like_floor,
+                        super_like_threshold, tool_provider, "running", now_iso(), action_id,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    task_id,
-                    role_id,
-                    topic,
-                    target_count,
-                    like_floor,
-                    super_like_threshold,
-                    tool_provider,
-                    "running",
-                    now_iso(),
-                ),
-            )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO collection_runs(
+                        id, task_id, role_id, topic, target_count, like_floor,
+                        super_like_threshold, tool_provider, status, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id, task_id, role_id, topic, target_count, like_floor,
+                        super_like_threshold, tool_provider, "running", now_iso(),
+                    ),
+                )
         return run_id
 
     def finish_collection_run(
@@ -1274,6 +2586,26 @@ class Store:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM collection_runs WHERE id = ?", (run_id,)).fetchone()
         return _collection_run_row_to_dict(row) if row else None
+
+    def bind_collection_run_action(self, run_id: str, action_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_collection_task_orchestration_schema(conn)
+            run = conn.execute("SELECT * FROM collection_runs WHERE id = ?", (run_id,)).fetchone()
+            if run is None:
+                raise KeyError(f"collection run not found: {run_id}")
+            action = conn.execute(
+                "SELECT * FROM collection_task_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+            if action is None:
+                raise KeyError(f"collection task action not found: {action_id}")
+            if run["task_id"] != action["task_id"]:
+                raise ValueError("collection run and action belong to different tasks")
+            if run["action_id"] not in (None, action_id):
+                raise ValueError(f"collection run is already bound to another action: {run_id}")
+            conn.execute("UPDATE collection_runs SET action_id = ? WHERE id = ?", (action_id, run_id))
+            row = conn.execute("SELECT * FROM collection_runs WHERE id = ?", (run_id,)).fetchone()
+        return _collection_run_row_to_dict(row)
 
     def list_collection_runs(self, *, task_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM collection_runs"
@@ -1304,7 +2636,11 @@ class Store:
             raise ValueError("source package has no authoritative platform work id")
 
         author_id: str | None = None
-        platform_author_id = str(source_package.get("author_sec_uid") or "").strip()
+        platform_author_id = str(
+            source_package.get("platform_author_id")
+            or source_package.get("author_sec_uid")
+            or ""
+        ).strip()
         display_name = str(source_package.get("author_name") or "").strip()
         if platform_author_id and display_name:
             author_id = self.upsert_source_author(
@@ -1340,6 +2676,13 @@ class Store:
                 "cover_url": source_package.get("cover_url"),
                 "video_url": source_package.get("video_url"),
                 "audio_url": source_package.get("audio_url"),
+            },
+            identity={
+                "detail_ref": source_package.get("detail_ref"),
+                "search_keyword": source_package.get("search_keyword"),
+                "matched_search_keywords": source_package.get("matched_search_keywords") or [],
+                "media_lease_available": source_package.get("media_lease_available"),
+                "media_evidence": source_package.get("media_evidence"),
             },
             raw=raw or {},
         )
@@ -1417,6 +2760,7 @@ class Store:
                 ).fetchone()
         payload = _row_json(observation, "payload_json", {}) if observation else {}
         media = payload.get("media") or {}
+        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
         return {
             "source_work_id": source_work_id,
             "work_id": work["platform_work_id"],
@@ -1431,7 +2775,13 @@ class Store:
             "duration_ms": work["duration_ms"],
             "cover_url": work["cover_url"] or media.get("cover_url"),
             "public_metrics": _row_json(observation, "metrics_json", {}) if observation else {},
+            "detail_ref": identity.get("detail_ref") or {},
+            "search_keyword": identity.get("search_keyword"),
+            "matched_search_keywords": identity.get("matched_search_keywords") or [],
+            "media_lease_available": bool(identity.get("media_lease_available")),
+            "media_evidence": identity.get("media_evidence") or {},
             "author_name": author["display_name"] if author else None,
+            "platform_author_id": author["platform_author_id"] if author else None,
             "author_sec_uid": author["platform_author_id"] if author and work["platform"] == "douyin" else None,
             "author_profile_url": author["profile_url"] if author else None,
             "author_douyin_id": author["account_id"] if author and work["platform"] == "douyin" else None,
@@ -1703,6 +3053,7 @@ class Store:
             "recommended_platforms": _row_json(row, "recommended_platforms_json", []),
             "next_collection_keywords": _row_json(row, "next_collection_keywords_json", []),
             "author_name": package.get("author_name"),
+            "platform_author_id": package.get("platform_author_id"),
             "author_sec_uid": package.get("author_sec_uid"),
             "author_profile_url": package.get("author_profile_url"),
             "author_douyin_id": package.get("author_douyin_id"),
@@ -2158,6 +3509,7 @@ class Store:
         run_id: str | None = None,
         metrics: dict[str, Any] | None = None,
         media: dict[str, Any] | None = None,
+        identity: dict[str, Any] | None = None,
         raw: dict[str, Any] | None = None,
         observed_at: str | None = None,
     ) -> str:
@@ -2180,7 +3532,16 @@ class Store:
                     f"runtime:{observation_kind}",
                     observation_id,
                     dumps(scrub_for_storage(metrics or {})),
-                    dumps(scrub_for_storage({"run_id": run_id, "media": media or {}, "raw": raw or {}})),
+                    dumps(
+                        scrub_for_storage(
+                            {
+                                "run_id": run_id,
+                                "media": media or {},
+                                "identity": identity or {},
+                                "raw": raw or {},
+                            }
+                        )
+                    ),
                     observed_at or timestamp,
                 ),
             )
@@ -2417,11 +3778,18 @@ class Store:
         avoidance_notes: list[str] | None = None,
     ) -> str:
         match_id = new_id("match")
+        timestamp = now_iso()
         with self.connect() as conn:
+            role_match_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(material_role_matches)")
+            }
+            has_review_provenance = {"decision_source", "review_id", "updated_at"}.issubset(
+                role_match_columns
+            )
             if task_id is None:
                 existing = conn.execute(
                     """
-                    SELECT id FROM material_role_matches
+                    SELECT * FROM material_role_matches
                     WHERE material_id = ? AND role_id = ? AND task_id IS NULL
                     """,
                     (material_id, role_id),
@@ -2429,53 +3797,75 @@ class Store:
             else:
                 existing = conn.execute(
                     """
-                    SELECT id FROM material_role_matches
+                    SELECT * FROM material_role_matches
                     WHERE material_id = ? AND role_id = ? AND task_id = ?
                     """,
                     (material_id, role_id, task_id),
                 ).fetchone()
             if existing:
                 match_id = existing["id"]
-                conn.execute(
-                    """
-                    UPDATE material_role_matches
-                    SET fit_score = ?, decision = ?, reasons_json = ?,
-                        matched_keywords_json = ?, avoidance_notes_json = ?,
-                        created_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        fit_score,
-                        decision,
-                        dumps(_clean_list(reasons)),
-                        dumps(_clean_list(matched_keywords)),
-                        dumps(_clean_list(avoidance_notes)),
-                        now_iso(),
-                        match_id,
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO material_role_matches(
-                        id, material_id, role_id, task_id, fit_score, decision,
-                        reasons_json, matched_keywords_json, avoidance_notes_json, created_at
+                if has_review_provenance and existing["review_id"]:
+                    return match_id
+                if has_review_provenance:
+                    conn.execute(
+                        """
+                        UPDATE material_role_matches
+                        SET fit_score = ?, decision = ?, reasons_json = ?,
+                            matched_keywords_json = ?, avoidance_notes_json = ?,
+                            decision_source = 'automatic_rules', review_id = NULL,
+                            created_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            fit_score, decision, dumps(_clean_list(reasons)),
+                            dumps(_clean_list(matched_keywords)), dumps(_clean_list(avoidance_notes)),
+                            timestamp, timestamp, match_id,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        match_id,
-                        material_id,
-                        role_id,
-                        task_id,
-                        fit_score,
-                        decision,
-                        dumps(_clean_list(reasons)),
-                        dumps(_clean_list(matched_keywords)),
-                        dumps(_clean_list(avoidance_notes)),
-                        now_iso(),
-                    ),
-                )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE material_role_matches
+                        SET fit_score = ?, decision = ?, reasons_json = ?,
+                            matched_keywords_json = ?, avoidance_notes_json = ?, created_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            fit_score, decision, dumps(_clean_list(reasons)),
+                            dumps(_clean_list(matched_keywords)), dumps(_clean_list(avoidance_notes)),
+                            timestamp, match_id,
+                        ),
+                    )
+            else:
+                if has_review_provenance:
+                    conn.execute(
+                        """
+                        INSERT INTO material_role_matches(
+                            id, material_id, role_id, task_id, fit_score, decision,
+                            reasons_json, matched_keywords_json, avoidance_notes_json,
+                            decision_source, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'automatic_rules', ?, ?)
+                        """,
+                        (
+                            match_id, material_id, role_id, task_id, fit_score, decision,
+                            dumps(_clean_list(reasons)), dumps(_clean_list(matched_keywords)),
+                            dumps(_clean_list(avoidance_notes)), timestamp, timestamp,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO material_role_matches(
+                            id, material_id, role_id, task_id, fit_score, decision,
+                            reasons_json, matched_keywords_json, avoidance_notes_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            match_id, material_id, role_id, task_id, fit_score, decision,
+                            dumps(_clean_list(reasons)), dumps(_clean_list(matched_keywords)),
+                            dumps(_clean_list(avoidance_notes)), timestamp,
+                        ),
+                    )
         return match_id
 
     def list_material_role_matches(
@@ -3913,6 +5303,161 @@ class Store:
         return [row["name"] for row in rows]
 
 
+def _require_collection_task_orchestration_schema(conn: sqlite3.Connection) -> None:
+    required = {
+        "collection_task_actions",
+        "collection_task_events",
+        "collection_task_frontiers",
+        "collection_material_reviews",
+        "channels_acquisition_sessions",
+        "channels_acquisition_events",
+    }
+    present = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+            f"({','.join('?' for _ in required)})",
+            tuple(sorted(required)),
+        )
+    }
+    missing = sorted(required - present)
+    if missing:
+        raise RuntimeError(
+            "collection task orchestration schema is not installed; run the explicit "
+            "collection_task_orchestration_v1 migration"
+        )
+
+
+def _append_collection_task_event_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    event_type: str,
+    action_id: str | None = None,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    if conn.execute("SELECT 1 FROM collection_tasks WHERE id = ?", (task_id,)).fetchone() is None:
+        raise KeyError(f"collection task not found: {task_id}")
+    if action_id is not None:
+        action = conn.execute(
+            "SELECT task_id FROM collection_task_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        if action is None:
+            raise KeyError(f"collection task action not found: {action_id}")
+        if action["task_id"] != task_id:
+            raise ValueError("collection task event action belongs to another task")
+    normalized_type = str(event_type or "").strip()
+    if not normalized_type:
+        raise ValueError("event_type is required")
+    event_seq = int(
+        conn.execute(
+            "SELECT COALESCE(MAX(event_seq), 0) + 1 FROM collection_task_events WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    )
+    event_id = new_id("ctevent")
+    conn.execute(
+        """
+        INSERT INTO collection_task_events(
+            id, task_id, action_id, event_seq, event_type, from_status,
+            to_status, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            task_id,
+            action_id,
+            event_seq,
+            normalized_type,
+            from_status,
+            to_status,
+            dumps(scrub_for_storage(payload or {})),
+            now_iso(),
+        ),
+    )
+    return event_id
+
+
+def _append_channels_acquisition_event_conn(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    task_id: str,
+    event_type: str,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    session = conn.execute(
+        "SELECT task_id FROM channels_acquisition_sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    if session is None:
+        raise KeyError(f"Channels acquisition session not found: {session_id}")
+    if session["task_id"] != task_id:
+        raise ValueError("Channels acquisition session belongs to another task")
+    normalized_type = str(event_type or "").strip()
+    if not normalized_type:
+        raise ValueError("event_type is required")
+    event_seq = int(
+        conn.execute(
+            "SELECT COALESCE(MAX(event_seq), 0) + 1 FROM channels_acquisition_events WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+    )
+    event_id = new_id("chevent")
+    conn.execute(
+        """
+        INSERT INTO channels_acquisition_events(
+            id, session_id, task_id, event_seq, event_type,
+            from_status, to_status, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            session_id,
+            task_id,
+            event_seq,
+            normalized_type,
+            from_status,
+            to_status,
+            dumps(scrub_for_storage(payload or {})),
+            now_iso(),
+        ),
+    )
+    return event_id
+
+
+def _metric_like_count(value: Any) -> int:
+    keys = {"likes", "like_count", "likecount", "digg_count", "diggcount"}
+    best = 0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in keys:
+                try:
+                    best = max(best, int(float(item)))
+                except (TypeError, ValueError):
+                    pass
+            best = max(best, _metric_like_count(item))
+    elif isinstance(value, list):
+        for item in value:
+            best = max(best, _metric_like_count(item))
+    return best
+
+
+def _latest_source_work_like_count_conn(conn: sqlite3.Connection, source_work_id: str) -> int:
+    rows = conn.execute(
+        """
+        SELECT metrics_json FROM source_observations
+        WHERE source_work_id = ?
+        ORDER BY observed_at DESC, id DESC
+        """,
+        (source_work_id,),
+    ).fetchall()
+    return max((_metric_like_count(loads(row["metrics_json"], {})) for row in rows), default=0)
+
+
 def _clean_list(values: list[str] | None) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -4407,6 +5952,7 @@ def _role_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "command": row["command"],
@@ -4419,6 +5965,123 @@ def _task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "completed_at": row["completed_at"],
         "summary": _row_json(row, "summary_json", {}),
         "error": row["error"],
+        "state_version": int(row["state_version"] or 0) if "state_version" in keys else 0,
+        "updated_at": row["updated_at"] if "updated_at" in keys else row["started_at"],
+    }
+
+
+def _collection_task_action_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "action_type": row["action_type"],
+        "status": row["status"],
+        "idempotency_key": row["idempotency_key"],
+        "input_hash": row["input_hash"],
+        "reason": row["reason"],
+        "input": _row_json(row, "input_json", {}),
+        "result": _row_json(row, "result_json", {}),
+        "error": _row_json(row, "error_json", {}),
+        "lease_owner": row["lease_owner"],
+        "lease_expires_at": row["lease_expires_at"],
+        "attempt_count": int(row["attempt_count"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _collection_task_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "action_id": row["action_id"],
+        "event_seq": int(row["event_seq"]),
+        "event_type": row["event_type"],
+        "from_status": row["from_status"],
+        "to_status": row["to_status"],
+        "payload": _row_json(row, "payload_json", {}),
+        "created_at": row["created_at"],
+    }
+
+
+def _collection_task_frontier_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "frontier_type": row["frontier_type"],
+        "frontier_key": row["frontier_key"],
+        "status": row["status"],
+        "cursor": _row_json(row, "cursor_json", {}),
+        "page_count": int(row["page_count"]),
+        "result_count": int(row["result_count"]),
+        "traversal_complete": bool(row["traversal_complete"]),
+        "last_action_id": row["last_action_id"],
+        "version": int(row["version"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _collection_material_review_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "action_id": row["action_id"],
+        "material_id": row["material_id"],
+        "role_id": row["role_id"],
+        "source_work_id": row["source_work_id"],
+        "review_revision": int(row["review_revision"]),
+        "outcome": row["outcome"],
+        "role_decision": row["role_decision"],
+        "fit_score": row["fit_score"],
+        "topic_direction": row["topic_direction"],
+        "content_mechanism": row["content_mechanism"],
+        "material_class": row["material_class"],
+        "is_primary": bool(row["is_primary"]),
+        "inventory_review_status": row["inventory_review_status"],
+        "evidence": _row_json(row, "evidence_json", {}),
+        "reviewer": row["reviewer"],
+        "role_profile_version": int(row["role_profile_version"]),
+        "transcript_sha256": row["transcript_sha256"],
+        "automatic_match_snapshot": _row_json(row, "automatic_match_snapshot_json", {}),
+        "supersedes_review_id": row["supersedes_review_id"],
+        "created_at": row["created_at"],
+    }
+
+
+def _channels_acquisition_session_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "worker_key": row["worker_key"],
+        "windows_host": row["windows_host"],
+        "status": row["status"],
+        "certificate_thumbprint": row["certificate_thumbprint"],
+        "worker_executable": row["worker_executable"],
+        "lease_expires_at": row["lease_expires_at"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "cleanup_verified_at": row["cleanup_verified_at"],
+        "state_version": int(row["state_version"]),
+        "metadata": _row_json(row, "metadata_json", {}),
+        "error": _row_json(row, "error_json", {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _channels_acquisition_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "task_id": row["task_id"],
+        "event_seq": int(row["event_seq"]),
+        "event_type": row["event_type"],
+        "from_status": row["from_status"],
+        "to_status": row["to_status"],
+        "payload": _row_json(row, "payload_json", {}),
+        "created_at": row["created_at"],
     }
 
 
@@ -4438,6 +6101,7 @@ def _task_role_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _collection_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "task_id": row["task_id"],
@@ -4452,6 +6116,7 @@ def _collection_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "completed_at": row["completed_at"],
         "summary": _row_json(row, "summary_json", {}),
         "error": row["error"],
+        "action_id": row["action_id"] if "action_id" in keys else None,
     }
 
 
@@ -4554,6 +6219,7 @@ def _source_work_to_douyin_compat(work: dict[str, Any], author_sec_uid: str) -> 
 
 
 def _role_match_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "material_id": row["material_id"],
@@ -4565,6 +6231,9 @@ def _role_match_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "matched_keywords": _row_json(row, "matched_keywords_json", []),
         "avoidance_notes": _row_json(row, "avoidance_notes_json", []),
         "created_at": row["created_at"],
+        "decision_source": row["decision_source"] if "decision_source" in keys else "automatic_rules",
+        "review_id": row["review_id"] if "review_id" in keys else None,
+        "updated_at": row["updated_at"] if "updated_at" in keys else row["created_at"],
     }
 
 

@@ -37,6 +37,12 @@ class CollectionConfig:
     understanding_provider: str = DEFAULT_UNDERSTANDING_PROVIDER
     understanding_model: str = DEFAULT_UNDERSTANDING_MODEL
     reuse_existing: bool = True
+    run_id: str | None = None
+    preloaded_candidates: list[dict[str, Any]] | None = None
+    preloaded_traversal: dict[str, Any] | None = None
+
+
+CHANNELS_MIN_VIRAL_DIGG_COUNT = 2000
 
 
 @dataclass
@@ -86,7 +92,10 @@ class LoggedToolExecutor:
     def run(self, tool_name: str, arguments: dict[str, Any], use_cache: bool = True) -> dict[str, Any]:
         fingerprint = request_fingerprint(tool_name, arguments, provider=self.provider)
         started = time.monotonic()
-        outer_cache_enabled = use_cache and tool_name != "douyin_extract_video_text"
+        outer_cache_enabled = use_cache and tool_name not in {
+            "douyin_extract_video_text",
+            "channels_extract_video_text",
+        }
         if outer_cache_enabled:
             cached = self.store.get_cached_collection_call(fingerprint)
             if cached is not None:
@@ -143,19 +152,48 @@ class TopicCollectionRunner:
             raise ValueError("topic is required.")
         if config.target_count < 1:
             raise ValueError("target_count must be >= 1.")
+        if (
+            config.tool_provider == "wechat_channels_remote"
+            and config.like_floor < CHANNELS_MIN_VIRAL_DIGG_COUNT
+        ):
+            raise ValueError(
+                "WeChat Channels formal collection requires like_floor >= "
+                f"{CHANNELS_MIN_VIRAL_DIGG_COUNT}."
+            )
 
-        run_id = self.store.create_collection_run(
-            task_id=config.task_id,
-            role_id=config.role_id,
-            topic=topic,
-            target_count=config.target_count,
-            like_floor=config.like_floor,
-            super_like_threshold=config.super_like_threshold,
-            tool_provider=config.tool_provider,
-        )
+        run_id = config.run_id
+        if run_id is None:
+            run_id = self.store.create_collection_run(
+                task_id=config.task_id,
+                role_id=config.role_id,
+                topic=topic,
+                target_count=config.target_count,
+                like_floor=config.like_floor,
+                super_like_threshold=config.super_like_threshold,
+                tool_provider=config.tool_provider,
+            )
+        else:
+            stored_run = self.store.get_collection_run(run_id)
+            if stored_run is None:
+                raise KeyError(f"collection run not found: {run_id}")
+            if stored_run.get("task_id") != config.task_id:
+                raise ValueError("preloaded collection run belongs to another task")
         executor = LoggedToolExecutor(self.tools, self.store, run_id, provider=config.tool_provider)
         try:
-            discovered_items, traversal = self._search_candidates(executor, config)
+            if config.preloaded_candidates is None:
+                discovered_items, traversal = self._search_candidates(executor, config)
+            else:
+                discovered_items = [dict(item) for item in config.preloaded_candidates]
+                traversal = {
+                    "captured_pages": 0,
+                    "captured_items": len(discovered_items),
+                    "has_next": False,
+                    "requested_pages": 0,
+                    "stop_reason": "preloaded_action_candidates",
+                    "request_satisfied": True,
+                    "source_exhausted": False,
+                    **(config.preloaded_traversal or {}),
+                }
             discovered = dedupe_candidates(discovered_items)
             for candidate in discovered:
                 candidate = self._candidate_with_context(candidate, config)
@@ -167,7 +205,12 @@ class TopicCollectionRunner:
                 max_seconds=config.max_duration_seconds,
             )
             role_candidates, role_skipped = filter_candidates_for_role(duration_candidates, config.role_profile)
-            candidates, relevance_skipped = filter_candidates_for_relevance(role_candidates, config.role_profile, topic)
+            candidates, relevance_skipped = filter_candidates_for_relevance(
+                role_candidates,
+                config.role_profile,
+                topic,
+                search_keywords=config.search_keywords,
+            )
             for skipped in duration_skipped + role_skipped + relevance_skipped:
                 matched = _candidate_by_skip(discovered, skipped)
                 if matched:
@@ -429,9 +472,55 @@ class TopicCollectionRunner:
     def _search_candidates(
         self, executor: LoggedToolExecutor, config: CollectionConfig
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if self.tools.has("channels_search_videos"):
+            return self._search_channels_candidates(executor, config)
         if self.tools.has("douyin_search_videos"):
             return self._search_provider_candidates(executor, config)
         return self._search_mock_candidates(executor, config)
+
+    def _search_channels_candidates(
+        self, executor: LoggedToolExecutor, config: CollectionConfig
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        captured_pages = 0
+        any_has_next = False
+        all_source_exhausted = True
+        stop_reasons: list[str] = []
+        keywords = _unique_strings(config.search_keywords or [config.topic])
+        for keyword in keywords:
+            result = executor.run(
+                "channels_search_videos",
+                {
+                    "keyword": keyword,
+                    "max_pages": max(1, config.max_search_pages),
+                    "page_size": max(1, config.page_size),
+                },
+                use_cache=False,
+            )
+            page_candidates = candidates_from_provider_result(result)
+            for candidate in page_candidates:
+                package = candidate.setdefault("source_package", {})
+                notes = list(package.get("collection_notes") or [])
+                notes.append({"type": "search_keyword", "value": keyword})
+                package["collection_notes"] = notes
+            candidates.extend(page_candidates)
+            paging = result.get("paging") or {}
+            captured_pages += int(paging.get("captured_pages") or 1)
+            any_has_next = any_has_next or bool(paging.get("has_next"))
+            source_exhausted = bool(paging.get("source_exhausted"))
+            all_source_exhausted = all_source_exhausted and source_exhausted
+            stop_reasons.append(str(paging.get("stop_reason") or "provider_stopped"))
+        stop_reason = "source_exhausted" if all_source_exhausted else (
+            stop_reasons[0] if len(set(stop_reasons)) == 1 else "mixed_keyword_boundaries"
+        )
+        return candidates, _traversal_contract(
+            captured_pages=captured_pages,
+            captured_items=len(candidates),
+            has_next=any_has_next,
+            requested_pages=max(1, config.max_search_pages) * len(keywords),
+            stop_reason=stop_reason,
+            source_exhausted=all_source_exhausted,
+        )
 
     def _search_provider_candidates(
         self, executor: LoggedToolExecutor, config: CollectionConfig
@@ -524,13 +613,24 @@ class TopicCollectionRunner:
         candidate: dict[str, Any],
         config: CollectionConfig,
     ) -> dict[str, Any]:
-        if not self.tools.has("douyin_fetch_video_detail"):
+        has_channels_detail = self.tools.has("channels_fetch_video_detail")
+        if not has_channels_detail and not self.tools.has("douyin_fetch_video_detail"):
             return candidate
         source_package = dict(candidate.get("source_package") or {})
-        source_link = str(source_package.get("source_link") or "").strip()
-        if not source_link:
-            raise ToolExecutionError("Candidate has no source link for detail verification.")
-        detail_result = executor.run("douyin_fetch_video_detail", {"url": source_link})
+        if has_channels_detail:
+            detail_ref = source_package.get("detail_ref")
+            if not isinstance(detail_ref, dict) or not detail_ref:
+                raise ToolExecutionError("Channels candidate has no stable detail reference.")
+            detail_result = executor.run(
+                "channels_fetch_video_detail",
+                {"detail_ref": detail_ref},
+                use_cache=False,
+            )
+        else:
+            source_link = str(source_package.get("source_link") or "").strip()
+            if not source_link:
+                raise ToolExecutionError("Candidate has no source link for detail verification.")
+            detail_result = executor.run("douyin_fetch_video_detail", {"url": source_link})
         if not detail_result.get("ok", True):
             raise ToolExecutionError(str(detail_result.get("error") or "Detail provider rejected the candidate."))
         normalized = detail_result.get("normalized") if isinstance(detail_result.get("normalized"), dict) else {}
@@ -548,7 +648,12 @@ class TopicCollectionRunner:
             max_seconds=config.max_duration_seconds,
         )
         role_ok, role_skipped = filter_candidates_for_role(duration_ok, config.role_profile)
-        relevance_ok, relevance_skipped = filter_candidates_for_relevance(role_ok, config.role_profile, config.topic)
+        relevance_ok, relevance_skipped = filter_candidates_for_relevance(
+            role_ok,
+            config.role_profile,
+            config.topic,
+            search_keywords=config.search_keywords,
+        )
         rejected = duration_skipped + role_skipped + relevance_skipped
         if rejected:
             raise ToolExecutionError(str(rejected[0].get("detail") or rejected[0].get("reason") or "Detail verification rejected candidate."))
@@ -560,6 +665,19 @@ class TopicCollectionRunner:
     def _extract_text(self, executor: LoggedToolExecutor, candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         source_package = candidate["source_package"]
         source_link = source_package.get("source_link")
+        if self.tools.has("channels_extract_video_text"):
+            result = executor.run(
+                "channels_extract_video_text",
+                {"source_package": source_package},
+                use_cache=False,
+            )
+            normalized = result.get("normalized") or {}
+            text = str(
+                normalized.get("text")
+                or normalized.get("source_package", {}).get("transcript_text")
+                or ""
+            )
+            return text, result
         if self.tools.has("douyin_extract_video_text"):
             if not source_link:
                 raise ToolExecutionError("Candidate has no source link for video_to_text.")
@@ -614,15 +732,44 @@ def request_fingerprint(
 
 
 def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
+    seen: dict[str, dict[str, Any]] = {}
     unique: list[dict[str, Any]] = []
     for candidate in candidates:
         key = _candidate_key(candidate)
         if key in seen:
+            _merge_candidate_discovery_context(seen[key], candidate)
             continue
-        seen.add(key)
+        seen[key] = candidate
+        _merge_candidate_discovery_context(candidate, candidate)
         unique.append(candidate)
     return unique
+
+
+def _merge_candidate_discovery_context(
+    target: dict[str, Any],
+    incoming: dict[str, Any],
+) -> None:
+    target_package = target.setdefault("source_package", {})
+    incoming_package = incoming.get("source_package") or {}
+    notes = list(target_package.get("collection_notes") or [])
+    for note in incoming_package.get("collection_notes") or []:
+        if note not in notes:
+            notes.append(note)
+    target_package["collection_notes"] = notes
+    keywords = list(target_package.get("matched_search_keywords") or [])
+    for value in [
+        target_package.get("search_keyword"),
+        incoming_package.get("search_keyword"),
+        *[
+            note.get("value")
+            for note in notes
+            if isinstance(note, dict) and note.get("type") == "search_keyword"
+        ],
+    ]:
+        keyword = str(value or "").strip()
+        if keyword and keyword not in keywords:
+            keywords.append(keyword)
+    target_package["matched_search_keywords"] = keywords
 
 
 def find_existing_material_for_candidate(store: Store, candidate: dict[str, Any]) -> dict[str, Any] | None:
@@ -630,7 +777,12 @@ def find_existing_material_for_candidate(store: Store, candidate: dict[str, Any]
     work_id = str(source_package.get("work_id") or "").strip()
     source_url = str(source_package.get("source_link") or "").strip()
     title = str(source_package.get("clean_title") or source_package.get("title") or "").strip()
-    author = str(source_package.get("author_sec_uid") or source_package.get("author_name") or "").strip()
+    author = str(
+        source_package.get("platform_author_id")
+        or source_package.get("author_sec_uid")
+        or source_package.get("author_name")
+        or ""
+    ).strip()
     title_author_key = (title, author) if title and author else None
     for material in store.list_collected_materials():
         if work_id and str(material.get("work_id") or "").strip() == work_id:
@@ -639,7 +791,12 @@ def find_existing_material_for_candidate(store: Store, candidate: dict[str, Any]
             return material
         if title_author_key:
             existing_title = str(material.get("clean_title") or material.get("title") or "").strip()
-            existing_author = str(material.get("author_sec_uid") or material.get("author_name") or "").strip()
+            existing_author = str(
+                material.get("platform_author_id")
+                or material.get("author_sec_uid")
+                or material.get("author_name")
+                or ""
+            ).strip()
             if (existing_title, existing_author) == title_author_key:
                 return material
     return None
@@ -708,7 +865,12 @@ def prefilter_candidates_for_transcription(
         min_seconds=config.min_duration_seconds,
         max_seconds=config.max_duration_seconds,
     )
-    relevant_candidates, _ = filter_candidates_for_relevance(duration_candidates, config.role_profile, config.topic)
+    relevant_candidates, _ = filter_candidates_for_relevance(
+        duration_candidates,
+        config.role_profile,
+        config.topic,
+        search_keywords=config.search_keywords,
+    )
     return [
         candidate
         for candidate in sorted(relevant_candidates, key=viral_sort_key, reverse=True)
@@ -764,14 +926,16 @@ def repeated_authors(candidates: list[dict[str, Any]], min_count: int = 2) -> li
     for candidate in candidates:
         source_package = candidate.get("source_package") or {}
         author_name = source_package.get("author_name")
+        platform_author_id = source_package.get("platform_author_id")
         author_sec_uid = source_package.get("author_sec_uid")
-        identity_key = author_sec_uid or author_name
+        identity_key = platform_author_id or author_sec_uid or author_name
         if not identity_key:
             continue
         key = str(identity_key)
         counts[key] = counts.get(key, 0) + 1
         author_meta[key] = {
             "author_name": author_name,
+            "platform_author_id": platform_author_id,
             "author_sec_uid": author_sec_uid,
             "author_profile_url": source_package.get("author_profile_url"),
         }
@@ -873,6 +1037,8 @@ def filter_candidates_for_relevance(
     candidates: list[dict[str, Any]],
     role_profile: dict[str, Any] | None,
     topic: str,
+    *,
+    search_keywords: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     accepted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -885,9 +1051,12 @@ def filter_candidates_for_relevance(
                 source_package.get("platform_caption"),
                 source_package.get("author_name"),
                 source_package.get("transcript_text"),
+                source_package.get("search_keyword"),
+                " ".join(source_package.get("matched_search_keywords") or []),
             ]
         )
         positive_terms = _topic_terms(topic)
+        positive_terms.extend(search_keywords or [])
         if role_profile:
             positive_terms.extend(role_profile.get("search_keywords") or [])
             positive_terms.extend(role_profile.get("target_directions") or [])

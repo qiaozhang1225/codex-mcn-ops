@@ -8,10 +8,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .adb import AdbClient
 from .adapters import list_platforms
-from .collection.douyin.doctor import DoctorCheck, run_doctor
+from .adb import AdbClient
+from .collection.channels.factory import build_channels_collection_registry
+from .collection.channels.session import ChannelsAcquisitionController
 from .collection.douyin.direct.client import cookie_looks_authenticated
+from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.factory import (
     build_collection_provider,
     build_data_provider,
@@ -20,7 +22,13 @@ from .collection.douyin.factory import (
 )
 from .collection.douyin.registry import build_douyin_registry
 from .collection.mock_tools import build_mock_source_registry
-from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
+from .collection.review import TaskReviewService
+from .collection.runner import (
+    CollectionConfig,
+    TopicCollectionRunner,
+    engagement_score,
+    metric_value,
+)
 from .collection.tools import parse_json_object
 from .collection.understanding import (
     DEFAULT_UNDERSTANDING_MODEL,
@@ -53,10 +61,14 @@ from .creation import (
 )
 from .creation.knowledge import validate_role_knowledge
 from .feishu import build_publish_job_payload, write_payload
-from .migrations import migrate_collection_schema_v3, migrate_material_inventory_v1
+from .migrations import (
+    migrate_collection_schema_v3,
+    migrate_collection_task_orchestration_v1,
+    migrate_material_inventory_v1,
+)
 from .publisher import PublishRunner
 from .report import build_daily_report
-from .store import DEFAULT_DB_PATH, Store, loads
+from .store import DEFAULT_DB_PATH, Store
 
 
 def json_print(value: Any) -> None:
@@ -93,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add the reviewed IP-role material inventory schema to an existing v3 database",
     )
     db_migrate_inventory.add_argument("--json", action="store_true")
+    db_migrate_task_orchestration = db_sub.add_parser(
+        "migrate-collection-task-orchestration-v1",
+        help="Add durable task actions, frontiers, reviews, and Channels session leases",
+    )
+    db_migrate_task_orchestration.add_argument("--json", action="store_true")
 
     adb_parser = subparsers.add_parser("adb", help="ADB device utilities")
     adb_sub = adb_parser.add_subparsers(dest="adb_command", required=True)
@@ -264,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "direct"],
+        choices=["mock", "direct", "wechat_channels_remote"],
         default="direct",
     )
     task_keyword.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
@@ -274,6 +291,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
     task_keyword.add_argument("--max-search-pages", type=int, default=3)
     task_keyword.add_argument("--page-size", type=int, default=10)
+    task_keyword.add_argument(
+        "--max-materials-per-iteration",
+        type=int,
+        default=5,
+        help="Cap transcription/materialization before the task pauses for semantic review",
+    )
     task_keyword.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
     task_keyword.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_keyword.add_argument("--json", action="store_true")
@@ -325,6 +348,86 @@ def build_parser() -> argparse.ArgumentParser:
     task_resume = task_sub.add_parser("resume", help="Resume a collection task from stored task parameters")
     task_resume.add_argument("--task-id", required=True)
     task_resume.add_argument("--json", action="store_true")
+    task_review = task_sub.add_parser(
+        "review",
+        help="Record one evidence-bearing full-transcript semantic review",
+    )
+    task_review.add_argument("--task-id", required=True)
+    task_review.add_argument("--material-id", required=True)
+    task_review.add_argument("--role-id", required=True)
+    task_review.add_argument(
+        "--outcome",
+        required=True,
+        choices=["formal_rewrite_base", "topic_clue", "rejected"],
+    )
+    task_review.add_argument("--topic-direction", required=True)
+    task_review.add_argument("--content-mechanism", required=True)
+    task_review.add_argument("--reason", action="append", required=True)
+    task_review.add_argument("--reviewer", default="codex-full-transcript-review")
+    task_review.add_argument("--fit-score", type=float)
+    task_review.add_argument("--knowledge-subtype")
+    task_review.add_argument("--idempotency-key")
+    task_review.add_argument("--json", action="store_true")
+    task_plan = task_sub.add_parser(
+        "plan",
+        help="Persist one bounded Channels search strategy action",
+    )
+    task_plan.add_argument("--task-id", required=True)
+    task_plan.add_argument("--keyword", required=True)
+    task_plan.add_argument("--continue-frontier", action="store_true")
+    task_plan.add_argument("--origin-keyword")
+    task_plan.add_argument("--max-pages", type=int, default=1)
+    task_plan.add_argument("--page-size", type=int, default=20)
+    task_plan.add_argument("--strategy-iteration", type=int, default=0)
+    task_plan.add_argument("--reason", default="codex-strategy-decision")
+    task_plan.add_argument("--json", action="store_true")
+    task_step = task_sub.add_parser(
+        "step",
+        help="Execute one persisted Channels action and materialize its candidates",
+    )
+    task_step.add_argument("--task-id", required=True)
+    task_step.add_argument("--json", action="store_true")
+    task_tune = task_sub.add_parser(
+        "tune",
+        help="Adjust bounded materialization policy for an open Channels task",
+    )
+    task_tune.add_argument("--task-id", required=True)
+    task_tune.add_argument("--min-duration-seconds", type=int)
+    task_tune.add_argument("--max-duration-seconds", type=int)
+    task_tune.add_argument("--max-materials-per-iteration", type=int)
+    task_tune.add_argument("--json", action="store_true")
+    task_cancel = task_sub.add_parser(
+        "cancel",
+        help="Cancel a durable Channels task and verify Windows cleanup",
+    )
+    task_cancel.add_argument("--task-id", required=True)
+    task_cancel.add_argument("--reason", required=True)
+    task_cancel.add_argument("--json", action="store_true")
+    task_cleanup_recover = task_sub.add_parser(
+        "recover-cleanup",
+        help="Retry verified cleanup for a task in cleanup_required",
+    )
+    task_cleanup_recover.add_argument("--task-id", required=True)
+    task_cleanup_recover.add_argument("--json", action="store_true")
+    task_session_status = task_sub.add_parser(
+        "session-status",
+        help="Read the task-bound Windows acquisition session status",
+    )
+    task_session_status.add_argument("--task-id", required=True)
+    task_session_status.add_argument("--json", action="store_true")
+    task_session_recover = task_sub.add_parser(
+        "session-recover",
+        help="Recover the task-bound Windows worker once",
+    )
+    task_session_recover.add_argument("--task-id", required=True)
+    task_session_recover.add_argument("--json", action="store_true")
+    task_session_close = task_sub.add_parser(
+        "session-close",
+        help="Close and verify cleanup of the task-bound Windows session",
+    )
+    task_session_close.add_argument("--task-id", required=True)
+    task_session_close.add_argument("--reason", default="operator_session_close")
+    task_session_close.add_argument("--json", action="store_true")
 
     author = collect_sub.add_parser("author", help="Manage Douyin source authors")
     author_sub = author.add_subparsers(dest="author_command", required=True)
@@ -425,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "direct"],
+        choices=["mock", "direct", "wechat_channels_remote"],
         default="direct",
     )
     collect_run.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
@@ -1252,6 +1355,97 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             print(format_task_show(report))
         return 0
 
+    if args.task_command == "review":
+        result = TaskReviewService(store).review(
+            task_id=args.task_id,
+            material_id=args.material_id,
+            role_id=args.role_id,
+            outcome=args.outcome,
+            topic_direction=args.topic_direction,
+            content_mechanism=args.content_mechanism,
+            evidence={"reasons": args.reason},
+            reviewer=args.reviewer,
+            idempotency_key=(
+                args.idempotency_key
+                or f"review:{args.material_id}:{args.role_id}:{args.outcome}"
+            ),
+            fit_score=args.fit_score,
+            knowledge_subtype=args.knowledge_subtype,
+        )
+        if args.json:
+            json_print(result)
+        else:
+            print(format_task_show(orchestrator.build_task_report(args.task_id)))
+        return 0
+
+    if args.task_command == "plan":
+        action = orchestrator.plan_channels_keyword_action(
+            task_id=args.task_id,
+            keyword=args.keyword,
+            continue_frontier=args.continue_frontier,
+            origin_keyword=args.origin_keyword,
+            max_pages=args.max_pages,
+            page_size=args.page_size,
+            strategy_iteration=args.strategy_iteration,
+            reason=args.reason,
+        )
+        if args.json:
+            json_print(action)
+        else:
+            print(action["id"])
+        return 0
+
+    if args.task_command == "step":
+        report = orchestrator.step_channels_task(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "tune":
+        result = orchestrator.tune_channels_task_policy(
+            task_id=args.task_id,
+            min_duration_seconds=args.min_duration_seconds,
+            max_duration_seconds=args.max_duration_seconds,
+            max_materials_per_iteration=args.max_materials_per_iteration,
+        )
+        if args.json:
+            json_print(result)
+        else:
+            print(json.dumps(result, ensure_ascii=False))
+        return 0
+
+    if args.task_command == "cancel":
+        report = orchestrator.cancel_channels_task(args.task_id, reason=args.reason)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command == "recover-cleanup":
+        report = orchestrator.recover_channels_task_cleanup(args.task_id)
+        if args.json:
+            json_print(report)
+        else:
+            print(format_task_show(report))
+        return 0
+
+    if args.task_command in {"session-status", "session-recover", "session-close"}:
+        controller = ChannelsAcquisitionController(store, args.task_id)
+        if args.task_command == "session-status":
+            result = controller.status()
+        elif args.task_command == "session-recover":
+            result = controller.recover()
+        else:
+            result = controller.close(reason=args.reason)
+        if args.json:
+            json_print(result)
+        else:
+            print(json.dumps(result, ensure_ascii=False))
+        return 0
+
     raise ValueError(args.task_command)
 
 
@@ -1262,6 +1456,7 @@ def _collection_policy_from_args(args: argparse.Namespace) -> CollectionPolicy:
         max_duration_seconds=int(getattr(args, "max_duration_seconds", 300)),
         max_search_pages=int(getattr(args, "max_search_pages", 3)),
         page_size=int(getattr(args, "page_size", 10)),
+        max_materials_per_iteration=int(getattr(args, "max_materials_per_iteration", 5)),
     )
 
 
@@ -2177,6 +2372,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.db_command == "migrate-material-inventory-v1":
                 report = migrate_material_inventory_v1(Path(args.db_path))
+            elif args.db_command == "migrate-collection-task-orchestration-v1":
+                report = migrate_collection_task_orchestration_v1(Path(args.db_path))
             else:
                 raise ValueError(args.db_command)
             if args.json:
@@ -2254,6 +2451,10 @@ def _build_collection_tools(
         return build_douyin_registry(resolved)
     if provider == "mock":
         return build_mock_source_registry()
+    if provider == "wechat_channels_remote":
+        return build_channels_collection_registry(
+            transcription_provider_name=transcription_provider,
+        )
     raise ValueError(f"unknown collection tool provider: {provider}")
 
 
