@@ -108,8 +108,8 @@ def _run_until_publish_format(store: Store, task_id: str, knowledge_root: Path) 
         "risk_cleanup",
     ]:
         result = run_creation_stage(store, task_id, stage_key=stage, knowledge_root=knowledge_root)
-        assert result["stage_run"]["provider"] == "codex-agent"
-        assert result["stage_run"]["model"] == "gpt-5.5"
+        assert result["stage_run"]["provider"] == "rules-fallback"
+        assert result["stage_run"]["model"] == "deterministic-v1"
         confirm_creation_stage(store, task_id, stage_key=stage)
     return run_creation_stage(store, task_id, stage_key="publish_format", knowledge_root=knowledge_root)
 

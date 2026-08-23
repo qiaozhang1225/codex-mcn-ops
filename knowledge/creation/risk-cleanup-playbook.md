@@ -7,6 +7,7 @@
 - Replace only exact ultra-high-risk promises or unsupported certainty claims.
 - Preserve the source hook, subject, quantity hook, authority posture, emotion, rhythm, and propagation tension.
 - Record source-carried and edge terms for observation when they are part of the IP context.
+- Review complete claims for unsupported diagnosis, single-cause explanations, universalization, fabricated evidence, and outcome promises even when no keyword is matched.
 
 ## Core Principle
 

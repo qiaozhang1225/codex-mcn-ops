@@ -12,6 +12,7 @@
 
 ## Hard Boundaries
 
-- `final_copy` must equal the `risk_cleanup.cleaned_body`.
+- For methodology v3, `final_copy` must equal the latest Script Writer body passed by both Quality Review and Risk Review.
+- For legacy methodology v2 tasks, `final_copy` must equal `risk_cleanup.cleaned_body`.
 - Do not improve, shorten, expand, reorder, or re-risk-clean the body.
 - If the body has a problem, send the task back to the earliest invalid stage instead of fixing it here.

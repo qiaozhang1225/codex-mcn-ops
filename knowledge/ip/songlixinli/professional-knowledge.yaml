@@ -1,0 +1,68 @@
+[
+  {
+    "id": "songli_relationship_before_behavior_001",
+    "claim": "处理学习、手机、睡眠等表层行为前，应先理解关系状态、情绪状态和行为承担的功能。",
+    "functions": ["causal_explanation", "diagnostic_boundary"],
+    "applicable_scenes": ["厌学", "手机冲突", "睡眠问题", "拒绝沟通"],
+    "not_applicable_when": ["需要立即处理人身安全或明确现实边界"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["先问行为在替孩子逃避什么、争取什么或保护什么"],
+    "risk_note": "不得把表层问题全部归因于亲子关系，也要承认能力、学校、同伴和医疗变量。",
+    "sources": ["青春期父母课程四节干货总结"]
+  },
+  {
+    "id": "songli_person_and_event_002",
+    "claim": "处理错误与责任时应把人和事分开，避免用羞辱、人格否定和标签推动改变。",
+    "functions": ["action_boundary", "communication_support"],
+    "applicable_scenes": ["犯错", "撒谎", "成绩下滑", "亲子冲突"],
+    "not_applicable_when": ["需要明确行为后果与责任"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["描述事实、理解担心、再谈补救和责任"],
+    "risk_note": "理解行为不等于免除责任。",
+    "sources": ["青春期父母课程四节干货总结"]
+  },
+  {
+    "id": "songli_autonomy_and_boundary_003",
+    "claim": "控制可能换来短期服从，长期能力需要在边界内逐步归还与年龄匹配的决定权。",
+    "functions": ["causal_explanation", "micro_action"],
+    "applicable_scenes": ["青春期对抗", "拖延", "学习安排", "手机管理"],
+    "not_applicable_when": ["高风险行为或孩子暂时缺少基本承担能力"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["从低风险小事开始归还选择，并保留明确后果"],
+    "risk_note": "自主不等于无边界，也不能一次性撤掉所有支持。",
+    "sources": ["青春期父母课程四节干货总结"]
+  },
+  {
+    "id": "songli_intrinsic_motivation_004",
+    "claim": "奖励、惩罚和外部压力可能带来短期行动，但不能替代胜任感、选择感和意义感形成的内在动力。",
+    "functions": ["causal_explanation", "action_boundary"],
+    "applicable_scenes": ["厌学", "拖延", "奖励学习", "考试动力"],
+    "not_applicable_when": ["建立最低生活与学习边界"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["先恢复可完成的小目标、选择空间和能力感"],
+    "risk_note": "不把所有学习问题归因于父母控制。",
+    "sources": ["青春期父母课程四节干货总结"]
+  },
+  {
+    "id": "songli_respectful_communication_005",
+    "claim": "沟通的底层是尊重、具体表达和关系修复，不是背诵固定话术。",
+    "functions": ["communication_support", "micro_action"],
+    "applicable_scenes": ["孩子不说话", "争吵", "家长道歉", "倾听"],
+    "not_applicable_when": ["单纯用柔和话术掩盖控制意图"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["先确认孩子想被倾听还是一起想办法"],
+    "risk_note": "不能保证一句话术即可修复长期关系。",
+    "sources": ["青春期父母课程四节干货总结"]
+  },
+  {
+    "id": "songli_parent_self_work_006",
+    "claim": "父母先调整自己的状态和互动方式，是改变家庭循环的重要入口。",
+    "functions": ["causal_explanation", "action_direction"],
+    "applicable_scenes": ["父母焦虑", "反复催促", "家庭冲突", "教育分歧"],
+    "not_applicable_when": ["孩子需要独立医疗、学校或社会支持"],
+    "evidence_level": "lecturer_stable_position",
+    "usable_support": ["先识别自己的恐惧如何推动控制和升级冲突"],
+    "risk_note": "不得把孩子所有问题单一归因于父母。",
+    "sources": ["青春期父母课程四节干货总结"]
+  }
+]

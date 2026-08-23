@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 from ..store import Store
+from .knowledge import load_professional_knowledge, load_role_knowledge_config
 
 
 DEFAULT_CREATION_PROVIDER = "codex-agent"
 DEFAULT_CREATION_MODEL = "gpt-5.5"
+RULES_FALLBACK_PROVIDER = "rules-fallback"
+RULES_FALLBACK_MODEL = "deterministic-v1"
 DRAFT_LOCAL_CREATION_STATUS = "draft_local_creation"
-CREATION_METHODOLOGY_VERSION = "creation-methodology-v2"
-CREATION_STAGE_CONTRACT_VERSION = "creation-stage-contract-v1"
+LEGACY_CREATION_METHODOLOGY_VERSION = "creation-methodology-v2"
+CREATION_METHODOLOGY_VERSION = "creation-methodology-v3"
+CREATION_STAGE_CONTRACT_VERSION = "creation-stage-contract-v2"
 DEFAULT_TARGET_LENGTH_RANGE = (300, 500)
 
-CREATION_STAGES = [
+LEGACY_CREATION_STAGES = [
     "material_selection",
     "creation_brief",
     "rewrite_draft",
@@ -24,6 +29,18 @@ CREATION_STAGES = [
     "publish_format",
     "delivery",
 ]
+
+CREATION_STAGES = [
+    "material_selection",
+    "creation_brief",
+    "script_writing",
+    "quality_review",
+    "risk_review",
+    "publish_format",
+    "delivery",
+]
+
+ALL_CREATION_STAGES = list(dict.fromkeys([*LEGACY_CREATION_STAGES, *CREATION_STAGES]))
 
 VIEWER_COPY_OUTPUT_KEYS = {
     "body",
@@ -35,11 +52,14 @@ VIEWER_COPY_OUTPUT_KEYS = {
 }
 
 STAGE_KNOWLEDGE_KEYS = {
-    "material_selection": ["material_selection_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
-    "creation_brief": ["creation_brief_playbook", "global_rewrite_playbook", "ip_creation_playbook", "ip_recent_creation_memory", "ip_feedback_learnings"],
-    "rewrite_draft": ["global_rewrite_playbook", "ip_creation_playbook", "ip_recent_creation_memory", "ip_feedback_learnings"],
+    "material_selection": ["material_selection_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_role_profile", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory"],
+    "creation_brief": ["creation_brief_playbook", "global_rewrite_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory", "ip_feedback_learnings"],
+    "rewrite_draft": ["global_rewrite_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory", "ip_feedback_learnings"],
     "hook_enhancement": ["hook_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
-    "risk_cleanup": ["global_risk_lexicon", "risk_cleanup_playbook", "ip_feedback_learnings"],
+    "risk_cleanup": ["global_risk_lexicon", "risk_cleanup_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_professional_knowledge", "ip_feedback_learnings"],
+    "script_writing": ["script_writer_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_professional_knowledge", "ip_recent_creation_memory", "ip_feedback_learnings"],
+    "quality_review": ["quality_review_playbook", "five_affliction_review_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
+    "risk_review": ["global_risk_lexicon", "risk_review_playbook", "domain_common_playbook", "domain_specific_playbook", "ip_professional_knowledge", "ip_feedback_learnings"],
     "publish_format": ["publish_format_playbook", "ip_creation_playbook", "ip_recent_creation_memory"],
     "delivery": ["publish_format_playbook"],
 }
@@ -294,10 +314,13 @@ def create_creation_task(
     provider: str = DEFAULT_CREATION_PROVIDER,
     model: str = DEFAULT_CREATION_MODEL,
     allow_reuse_material: bool = False,
+    creation_mode: str = "adaptation",
 ) -> dict[str, Any]:
     role = _confirmed_role(store, role_id)
     if target_count < 1:
         raise ValueError("--target-count must be >= 1")
+    if creation_mode not in {"adaptation", "half_original", "original"}:
+        raise ValueError("creation_mode must be adaptation, half_original, or original")
     task_id = store.create_creation_task(
         role_id=role["id"],
         topic=topic,
@@ -310,6 +333,7 @@ def create_creation_task(
         context={
             "role_name": role["name"],
             "creation_methodology_version": CREATION_METHODOLOGY_VERSION,
+            "creation_mode": creation_mode,
             "rewrite_requirements": {
                 "target_length_range": list(DEFAULT_TARGET_LENGTH_RANGE),
                 "target_length_strategy": "upper_bound_for_long_source",
@@ -331,8 +355,10 @@ def run_creation_stage(
     knowledge_root: Path,
     note: str = "",
 ) -> dict[str, Any]:
-    if stage_key not in CREATION_STAGES:
+    if stage_key not in ALL_CREATION_STAGES:
         raise ValueError(f"unknown creation stage: {stage_key}")
+    if stage_key in {"script_writing", "quality_review", "risk_review"}:
+        raise ValueError(f"{stage_key} is agent-reviewed; use create stage prepare/submit instead of the rules fallback")
     task = _task(store, task_id)
     _confirmed_role(store, str(task["role_id"]))
     _assert_previous_stage_confirmed(store, task_id, stage_key)
@@ -351,14 +377,16 @@ def run_creation_stage(
     else:
         output, markdown = _run_delivery(store, task)
     upstream_stage_run_ids = _upstream_stage_run_ids(store, task_id, stage_key)
+    output["creation_mode"] = "rules_fallback_v1"
+    output["formal_agent_output"] = False
     output = _attach_stage_contract(store, task, stage_key, output, upstream_stage_run_ids)
     status = str(output.get("status") or "needs_confirmation")
     stage_run_id = store.insert_creation_stage_run(
         task_id=task_id,
         stage_key=stage_key,
         status=status,
-        provider=str(task.get("provider") or DEFAULT_CREATION_PROVIDER),
-        model=str(task.get("model") or DEFAULT_CREATION_MODEL),
+        provider=RULES_FALLBACK_PROVIDER,
+        model=RULES_FALLBACK_MODEL,
         input_data={
             "task_id": task_id,
             "stage_key": stage_key,
@@ -383,7 +411,7 @@ def run_creation_stage(
 
 
 def confirm_creation_stage(store: Store, task_id: str, *, stage_key: str) -> dict[str, Any]:
-    if stage_key not in CREATION_STAGES:
+    if stage_key not in ALL_CREATION_STAGES:
         raise ValueError(f"unknown creation stage: {stage_key}")
     stage = store.latest_creation_stage_run(task_id, stage_key)
     if not stage:
@@ -405,12 +433,14 @@ def build_creation_context_packet(
     stage_key: str | None = None,
     include_transcript: bool = False,
 ) -> dict[str, Any]:
-    if stage_key is not None and stage_key not in CREATION_STAGES:
+    if stage_key is not None and stage_key not in ALL_CREATION_STAGES:
         raise ValueError(f"unknown creation stage: {stage_key}")
     task = _task(store, task_id)
     role = _confirmed_role(store, str(task["role_id"]))
     all_knowledge_files = ensure_knowledge_pack(knowledge_root, role)
     knowledge_files = _knowledge_files_for_stage(all_knowledge_files, stage_key)
+    knowledge_config = load_role_knowledge_config(knowledge_root, role)
+    professional_cards = load_professional_knowledge(Path(all_knowledge_files["ip_professional_knowledge"]))
     selected = _selected_materials(store, task_id)
     selection_output = _latest_output(store, task_id, "material_selection")
     source_analysis = selection_output.get("source_analysis") or {}
@@ -439,6 +469,12 @@ def build_creation_context_packet(
         "persona_packet": role.get("persona_packet") or {},
         "knowledge_files": knowledge_files,
         "knowledge": {key: Path(path).read_text(encoding="utf-8") for key, path in knowledge_files.items()},
+        "knowledge_config": {
+            "role_slug": knowledge_config["role_slug"],
+            "domain_pack": knowledge_config["domain_pack"],
+            "professional_alignment_enabled": knowledge_config["professional_alignment_enabled"],
+        },
+        "professional_knowledge_cards": professional_cards,
         "selected_materials": materials,
         "source_analysis": source_analysis,
         "brief": _latest_output(store, task_id, "creation_brief").get("brief") or {},
@@ -538,6 +574,18 @@ def _stage_contract_descriptor(stage_key: str | None) -> dict[str, Any]:
             "allowed_outputs": ["cleaned_body", "high_risk_replacements", "unchanged_source_risk_terms", "risk_replacement_scope"],
             "forbidden_outputs": ["cover_title_4", "video_title_18", "publish_package"],
         },
+        "script_writing": {
+            "allowed_outputs": ["writing_mode", "creation_mode", "body", "opening", "body_contract", "source_mapping", "new_claims", "changed_spans"],
+            "forbidden_outputs": ["quality_verdict", "risk_verdict", "publish_package"],
+        },
+        "quality_review": {
+            "allowed_outputs": ["reviewed_script_run_id", "reviewed_body_hash", "verdict", "quality_dimensions", "opening_scope_review", "five_affliction_review", "source_mechanism_review", "body_contract_review", "revision_request"],
+            "forbidden_outputs": sorted(VIEWER_COPY_OUTPUT_KEYS | {"replacement_copy", "suggested_copy"}),
+        },
+        "risk_review": {
+            "allowed_outputs": ["reviewed_script_run_id", "reviewed_body_hash", "verdict", "issues", "overall_risk", "revision_request"],
+            "forbidden_outputs": sorted(VIEWER_COPY_OUTPUT_KEYS | {"replacement_copy", "suggested_copy"}),
+        },
         "publish_format": {
             "allowed_outputs": ["publish_package", "body_char_count"],
             "forbidden_outputs": ["cleaned_body", "high_risk_replacements"],
@@ -551,11 +599,12 @@ def _stage_contract_descriptor(stage_key: str | None) -> dict[str, Any]:
 
 
 def _upstream_stage_run_ids(store: Store, task_id: str, stage_key: str | None) -> list[str]:
-    if not stage_key or stage_key not in CREATION_STAGES:
+    if not stage_key or stage_key not in ALL_CREATION_STAGES:
         return []
-    index = CREATION_STAGES.index(stage_key)
+    stages = _stage_sequence_for_task(store, task_id, stage_key)
+    index = stages.index(stage_key)
     ids: list[str] = []
-    for upstream in CREATION_STAGES[:index]:
+    for upstream in stages[:index]:
         stage = store.latest_creation_stage_run(task_id, upstream)
         if stage:
             ids.append(str(stage["id"]))
@@ -594,24 +643,31 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
         forbidden = sorted((VIEWER_COPY_OUTPUT_KEYS - {"draft"}) & set(output))
         replacement_keys = [key for key in brief if "replacement" in str(key).lower()]
         checks["no_viewer_copy"] = {"passed": not forbidden, "forbidden_keys": forbidden}
-        checks["risk_policy_deferred"] = {"passed": brief.get("risk_policy") == "defer_to_risk_cleanup", "risk_policy": brief.get("risk_policy")}
+        checks["risk_policy_deferred"] = {"passed": brief.get("risk_policy") in {"defer_to_risk_cleanup", "defer_to_risk_review"}, "risk_policy": brief.get("risk_policy")}
         checks["no_replacement_phrases"] = {"passed": not replacement_keys, "replacement_keys": replacement_keys}
     elif stage_key == "rewrite_draft":
         draft_text = str(output.get("draft_text") or (output.get("draft") or {}).get("draft_text") or "")
-        submitted_opening = ((output.get("quality_checks") or {}).get("opening_preservation") or {})
-        source_opening = _confirmed_source_opening(store, str(task["id"]))
-        derived_opening = _opening_preservation_status(
-            draft_text,
-            source_opening,
-            _rewrite_requirements(task, store.get_ip_role(str(task["role_id"])) or {}),
-        )
-        checks["opening_preserved"] = {
-            "passed": bool(derived_opening.get("passed")),
-            "mode": derived_opening.get("mode"),
-            "submitted_passed": bool(submitted_opening.get("passed")),
-            "source_opening_text": source_opening,
-            "body_opening_preview": derived_opening.get("body_opening_preview"),
-        }
+        formal_submission = str(output.get("submission_mode") or output.get("creation_mode") or "").startswith("codex_stage_submission_")
+        if formal_submission:
+            checks["opening_preserved"] = {
+                "passed": output.get("source_hook_mechanism_preserved") is True,
+                "mode": "agent_source_mapping",
+            }
+        else:
+            submitted_opening = ((output.get("quality_checks") or {}).get("opening_preservation") or {})
+            source_opening = _confirmed_source_opening(store, str(task["id"]))
+            derived_opening = _opening_preservation_status(
+                draft_text,
+                source_opening,
+                _rewrite_requirements(task, store.get_ip_role(str(task["role_id"])) or {}),
+            )
+            checks["opening_preserved"] = {
+                "passed": bool(derived_opening.get("passed")),
+                "mode": derived_opening.get("mode"),
+                "submitted_passed": bool(submitted_opening.get("passed")),
+                "source_opening_text": source_opening,
+                "body_opening_preview": derived_opening.get("body_opening_preview"),
+            }
         checks["no_cleanup_outputs"] = {
             "passed": not any(key in output for key in ["high_risk_replacements", "risk_replacement_scope"]),
             "forbidden_keys": [key for key in ["high_risk_replacements", "risk_replacement_scope"] if key in output],
@@ -619,37 +675,92 @@ def _validate_stage_contract(store: Store, task: dict[str, Any], stage_key: str,
         leaked = _rewrite_risk_replacement_leaks(store, task["id"], draft_text)
         checks["risk_replacement_not_done"] = {"passed": not leaked, "leaked_replacements": leaked}
     elif stage_key == "hook_enhancement":
-        source_opening = _confirmed_source_opening(store, str(task["id"]))
-        hook_validation = _validate_hook_enhancement(
-            source_opening=source_opening,
-            selected_hook=str(output.get("selected_hook") or ""),
-            original_body=_latest_stage_body(store, str(task["id"]), "rewrite_draft"),
-            enhanced_body=str(output.get("body") or ""),
-        )
-        checks["minimal_hook_diff"] = {
-            "passed": bool(hook_validation.get("passed")) and output.get("hook_diff_type") != "replaced",
-            "hook_diff_type": hook_validation.get("diff_type"),
-            "submitted_hook_diff_type": output.get("hook_diff_type"),
-            "mechanism_preserved": hook_validation.get("mechanism_preserved"),
-        }
+        formal_submission = str(output.get("submission_mode") or output.get("creation_mode") or "").startswith("codex_stage_submission_")
+        if formal_submission:
+            formal_validation = output.get("validation") or {}
+            checks["minimal_hook_diff"] = {
+                "passed": (
+                    output.get("mechanism_preserved") is True
+                    and (
+                        output.get("hook_diff_type") != "replaced"
+                        or bool(str(output.get("incompatibility_reason") or "").strip())
+                    )
+                    and bool(formal_validation.get("passed"))
+                ),
+                "hook_diff_type": output.get("hook_diff_type"),
+                "mechanism_preserved": output.get("mechanism_preserved"),
+            }
+        else:
+            source_opening = _confirmed_source_opening(store, str(task["id"]))
+            hook_validation = _validate_hook_enhancement(
+                source_opening=source_opening,
+                selected_hook=str(output.get("selected_hook") or ""),
+                original_body=_latest_stage_body(store, str(task["id"]), "rewrite_draft"),
+                enhanced_body=str(output.get("body") or ""),
+            )
+            checks["minimal_hook_diff"] = {
+                "passed": bool(hook_validation.get("passed")) and output.get("hook_diff_type") != "replaced",
+                "hook_diff_type": hook_validation.get("diff_type"),
+                "submitted_hook_diff_type": output.get("hook_diff_type"),
+                "mechanism_preserved": hook_validation.get("mechanism_preserved"),
+            }
     elif stage_key == "risk_cleanup":
         scope = output.get("risk_replacement_scope") or {}
         checks["localized_replacement_only"] = {"passed": bool(scope.get("passed", True)), "scope": scope}
         checks["has_cleaned_body"] = {"passed": bool(str(output.get("cleaned_body") or "").strip())}
+    elif stage_key == "script_writing":
+        body = str(output.get("body") or "")
+        checks["has_complete_body"] = {"passed": bool(body.strip())}
+        checks["writer_is_only_copy_owner"] = {
+            "passed": not any(key in output for key in ["quality_verdict", "risk_verdict", "publish_package"]),
+        }
+    elif stage_key in {"quality_review", "risk_review"}:
+        forbidden = sorted(VIEWER_COPY_OUTPUT_KEYS & set(output))
+        checks["review_is_read_only"] = {"passed": not forbidden, "forbidden_keys": forbidden}
+        try:
+            _assert_review_matches_latest_script(store, str(task["id"]), output, stage_key)
+            current = True
+        except ValueError:
+            current = False
+        checks["reviews_latest_script"] = {
+            "passed": current,
+            "reviewed_script_run_id": output.get("reviewed_script_run_id"),
+            "reviewed_body_hash": output.get("reviewed_body_hash"),
+        }
     elif stage_key == "publish_format":
         package = output.get("publish_package") or {}
-        risk = _latest_output(store, task["id"], "risk_cleanup")
-        cleaned_body = str(risk.get("cleaned_body") or "")
+        stages = _stage_sequence_for_task(store, str(task["id"]), "publish_format")
+        if stages == CREATION_STAGES:
+            script = _latest_confirmed_script_run(store, str(task["id"])) or {}
+            script_output = dict(script.get("output") or {})
+            cleaned_body = str(script_output.get("body") or "")
+            quality = _latest_output(store, task["id"], "quality_review")
+            risk = _latest_output(store, task["id"], "risk_review")
+            reviews_current = (
+                quality.get("verdict") == "pass"
+                and risk.get("verdict") == "pass"
+                and quality.get("reviewed_script_run_id") == script.get("id")
+                and risk.get("reviewed_script_run_id") == script.get("id")
+                and quality.get("reviewed_body_hash") == script_output.get("body_hash")
+                and risk.get("reviewed_body_hash") == script_output.get("body_hash")
+            )
+            checks["quality_and_risk_pass_same_script"] = {"passed": reviews_current}
+        else:
+            risk = _latest_output(store, task["id"], "risk_cleanup")
+            cleaned_body = str(risk.get("cleaned_body") or "")
         final_copy = str(package.get("final_copy") or "")
-        checks["final_copy_matches_risk_cleaned_body"] = {
+        copy_match_key = "final_copy_matches_approved_script" if stages == CREATION_STAGES else "final_copy_matches_risk_cleaned_body"
+        checks[copy_match_key] = {
             "passed": final_copy == cleaned_body,
             "final_copy_hash": _content_hash(final_copy) if final_copy else "",
-            "risk_cleaned_hash": _content_hash(cleaned_body) if cleaned_body else "",
+            "approved_body_hash": _content_hash(cleaned_body) if cleaned_body else "",
         }
-        checks["has_publish_fields"] = {
-            "passed": all(package.get(key) for key in ["cover_title_4", "video_title_18", "description_100", "pinned_comment", "final_copy"]),
-            "missing": [key for key in ["cover_title_4", "video_title_18", "description_100", "pinned_comment", "final_copy"] if not package.get(key)],
-        }
+        description_key = "video_description" if "video_description" in package else "description_100"
+        required_nonempty = ["cover_title_4", "video_title_18", description_key, "final_copy"]
+        missing = [key for key in required_nonempty if not package.get(key)]
+        if "pinned_comment" not in package:
+            missing.append("pinned_comment")
+        checks["has_publish_fields"] = {"passed": not missing, "missing": missing}
     else:
         checks["delivery_only"] = {"passed": "delivery_markdown" in output}
     passed = all(check.get("passed") for check in checks.values())
@@ -686,6 +797,8 @@ def _stage_body_text(stage_key: str, output: dict[str, Any]) -> str:
         return str(output.get("body") or "")
     if stage_key == "risk_cleanup":
         return str(output.get("cleaned_body") or "")
+    if stage_key == "script_writing":
+        return str(output.get("body") or "")
     if stage_key == "publish_format":
         package = output.get("publish_package") or {}
         return str(package.get("final_copy") or "")
@@ -761,7 +874,9 @@ def apply_learning_update(store: Store, update_id: str) -> dict[str, Any]:
 
 
 def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
-    role_slug = _role_slug(role)
+    knowledge_config = load_role_knowledge_config(root, role)
+    role_slug = knowledge_config["role_slug"]
+    domain_pack = knowledge_config["domain_pack"]
     files = {
         "material_selection_playbook": root / "creation" / "material-selection-playbook.md",
         "creation_brief_playbook": root / "creation" / "creation-brief-playbook.md",
@@ -769,20 +884,36 @@ def ensure_knowledge_pack(root: Path, role: dict[str, Any]) -> dict[str, str]:
         "global_risk_lexicon": root / "creation" / "global-risk-lexicon.md",
         "risk_cleanup_playbook": root / "creation" / "risk-cleanup-playbook.md",
         "hook_playbook": root / "creation" / "hook-playbook.md",
+        "script_writer_playbook": root / "creation" / "script-writer-playbook.md",
+        "quality_review_playbook": root / "creation" / "quality-review-playbook.md",
+        "five_affliction_review_playbook": root / "creation" / "five-affliction-quality-review.md",
+        "risk_review_playbook": root / "creation" / "risk-review-playbook.md",
         "publish_format_playbook": root / "creation" / "publish-format-playbook.md",
+        "domain_common_playbook": root / "domains" / "common" / "playbook.md",
+        "domain_specific_playbook": root / "domains" / domain_pack / "playbook.md",
+        "ip_role_profile": root / "ip" / role_slug / "role-profile.json",
         "ip_creation_playbook": root / "ip" / role_slug / "creation-playbook.md",
+        "ip_professional_knowledge": root / "ip" / role_slug / "professional-knowledge.yaml",
         "ip_feedback_learnings": root / "ip" / role_slug / "feedback-learnings.md",
         "ip_recent_creation_memory": root / "ip" / role_slug / "recent-creation-memory.md",
     }
     defaults = {
         "material_selection_playbook": "# Material Selection Playbook\n\n- 判断受众与 IP 适配、源内容任务、传播机制、说话者兼容性和可改写余量。\n- 只有下游必须另造一个内容任务才能成立时，才判为不适合二创。\n- 只输出选择依据；不改写正文，不生成发布文案，不提前做风险替换。\n",
-        "creation_brief_playbook": "# Creation Brief Playbook\n\n- 只把素材转成写作任务说明：留人机制、必须保留元素、正文逻辑计划、CTA 适配判断和风险后置策略。\n- 风险字段只记录 `risk_policy: defer_to_risk_cleanup` 和观察词，不给替换句。\n- brief 不能写出完整正文，也不能把风险意识改写成开头方向。\n",
+        "creation_brief_playbook": "# Creation Brief Playbook\n\n- 只把任务转成写作契约：留人机制、必须保留元素、正文逻辑计划、CTA 适配判断和风险后置策略。\n- v3 风险字段只记录 `risk_policy: defer_to_risk_review` 和观察词，不给替换句。\n- brief 不能写出完整正文，也不能把风险意识改写成开头方向。\n",
         "global_rewrite_playbook": DEFAULT_GLOBAL_REWRITE_PLAYBOOK,
         "global_risk_lexicon": "# Global Risk Lexicon\n\n- 超高风险：保证发财、保证有效、百分百有效、立马见效、一定成功、必定成功、必能转运、注定发财、逆天改命、明确医疗/金融/法律/宗教结果承诺。\n- 源文案携带风险：改命、改运、转运、自带财运等，默认记录并后置，不在 rewrite_draft 或 hook_enhancement 阶段替换。\n- 边缘观察：财运、财气、好运、招财、旺财、福报、因果、气场、开悟、命运、贵人、修行、能量、磁场。\n- risk_cleanup 只局部替换超高风险词；源文案携带词和边缘词默认观察，不机械删除。\n",
         "risk_cleanup_playbook": "# Risk Cleanup Playbook\n\n- 只处理超高风险表达，且只替换命中的短语。\n- 不重写整句，不改变钩子机制，不把风险软化成解释性降温。\n- 原文案携带的财运、命运、贵人、磁场、能量、福报等语境词默认记录观察。\n- 如果风险词位于开头，只替换风险短语，保留原开头的主体、数量钩子、节奏和情绪力度。\n- 风险表达同时承载核心态度时，先用主体、对象、条件或场景限定其含义；只有限定后仍不可发布，才删除立场本身。\n",
         "hook_playbook": "# Hook Playbook\n\n- 保护原钩子的传播任务和强度，不以改动幅度衡量二创质量。\n- 原说话者与目标 IP 兼容时优先保留；不兼容时做 `perspective_translation`，重建可信入口而不是照搬身份。\n- 反感、异议或反常识可能就是留人机制，不要在开头主动消解。\n- 通过 strength parity 检查冲突、具体性、受众入口、态度强度和继续观看理由。\n\n## Five-Affliction Attention Lens\n\n- 用贪、瞋、痴、慢、疑作为创作者侧的注意力分析框架：利益欲望、反感反驳、认知错觉、身份比较、信息缺口。强钩子通常应自然激活 at least three distinct drivers，但每项必须指向同一个正文承诺，禁止靠无关刺激词硬凑。\n- 输出 driver_map、active_driver_count 和 body_contract；原开头已有三项以上且说话者兼容时，逐字或近似逐字保留。\n- 当留人机制是鲜明立场时，不能用警示、信息差或中性后果替换。\n- 本阶段不重写正文，也不承担风险清理。\n",
+        "script_writer_playbook": "# Script Writer Playbook\n\n- Script Writer 是唯一可以生成或修改观众可见文案的角色。\n- 初稿返回完整正文；修订也返回完整新版本，并逐项声明 changed_spans。\n- 严格遵守 revision_scope、protected_spans 和 max_edit_boundary。\n- 二创保护源内容任务与传播机制；原创也必须让开头承诺与正文交付一致。\n- 不自行宣布质量或风险审核通过。\n",
+        "quality_review_playbook": "# Quality Review Playbook\n\n- 只审核，不输出或修改任何观众可见文案。\n- 分别审核内容任务、传播机制、IP 适配、论证链、口播完整性、观众价值、五毒注意力和正文兑现。\n- 五毒开头证据范围严格限定为口播第一句和第二句；第三句开始是承接，不能倒算为开头命中。\n- 第一、第二句都必须达到 strong，且各自至少承载一个 strong 五毒证据；两句合计至少三个自然 strong，并逐字列出至少四个与主题相关的高刺激关键词或短语。\n- 第二句必须升级冲突、损失、误区、身份压力或信息缺口，不能只是中性解释第一句。\n- 对 `越……越……` 等递进句先识别两个可分级变量，再验证前者增强是否会真实推动后者，并要求文案写出可见的因果桥梁；不能靠审查者脑补前提。\n- 不把欲望、恐惧、身份压力、结果风险等多个不同变量硬绑成一个递进；口播能用受众处境、冲突、提问和判断直接表达时，优先判定直接表达是否更顺。\n- 自然的时间变化或累积递进可以保留；只为节奏、力度、五毒命中或模仿爆款句式而存在的递进，属于强行递进，必须退回 Script Writer 局部修订。\n- 失败时返回结构化 revision_request，明确 revision_scope、问题、方向、保护内容和最大修改边界。\n- 不用总分平均掉任一硬失败。\n",
+        "five_affliction_review_playbook": "# Five-Affliction Quality Review\n\n- 对贪、瞋、痴、慢、疑五项逐项审核，状态只能是 strong、weak、absent、artificial。\n- 开头证据范围严格限定为口播第一句和第二句；第三句开始是承接，不能作为五毒证据。\n- strong、weak、artificial 必须引用前两句中的 evidence_span；strong 必须给出正文中的 body_payoff_span。\n- 五项自然强命中是最高目标；通过时前两句必须各自达到 strong、各自至少有一个 strong 证据，两句合计至少三个 strong，并逐字列出至少四个主题相关的高刺激关键词或短语。\n- 禁止为凑数增加虚假身份、结果承诺或正文无法兑现的刺激；少于五项 strong 而通过时，必须解释为什么不应强加缺失驱动。\n- 二创比较源开头与当前开头，丢失强驱动属于传播机制损失。\n",
+        "risk_review_playbook": "# Risk Review Playbook\n\n- 只审核风险，不输出 cleaned_body、replacement_copy 或完整替代稿。\n- 对每个问题引用原文 span，记录 risk_type、severity、reason、repair_boundary、protected_elements 和 revision_direction。\n- 风险修订必须返回 Script Writer；任何语义修改后重新经过 Quality Review。\n- 保留可发布张力，只处理真实不安全的片段。\n",
         "publish_format_playbook": "# Publish Format Playbook\n\n- 只根据 risk cleanup 后正文生成发布包装。\n- 输出四字封面标题、十八字视频标题、视频描述、置顶评论、最终可复制文案和正文字数。\n- 最终可复制文案必须等于 risk cleanup 后正文；不得在发布包装阶段重写正文逻辑。\n",
+        "domain_common_playbook": "# Common Domain Playbook\n\n- Separate observed source facts, IP opinion, professional experience, and externally verified fact.\n- Do not invent identity, cases, credentials, evidence, or guaranteed outcomes.\n- Preserve source propagation value only inside publishable and professionally defensible boundaries.\n",
+        "domain_specific_playbook": "# Domain Playbook\n\n- No domain-specific rules have been configured. Apply the common domain playbook and IP boundaries.\n",
+        "ip_role_profile": json.dumps({"name": role.get("name") or role_slug, "domain_pack": domain_pack, "professional_alignment_enabled": False}, ensure_ascii=False, indent=2) + "\n",
         "ip_creation_playbook": f"# {role.get('name') or role_slug} Creation Playbook\n\n- 只记录相对于全局规则真正不同的角色定位、受众张力、专业解释方式和禁区。\n- 不固化开头句式、正文组件、案例结构或 CTA 模板。\n",
+        "ip_professional_knowledge": "[]\n",
         "ip_feedback_learnings": f"# {role.get('name') or role_slug} Feedback Learnings\n\n- 发布后的作品层和词汇层反馈写在这里。\n",
         "ip_recent_creation_memory": f"# {role.get('name') or role_slug} Recent Creation Memory\n\n- 记录近期已写主题、论据和结构，避免重复。\n",
     }
@@ -1148,7 +1279,26 @@ def _persist_stage_artifacts(
     stage_run_id: str,
     output: dict[str, Any],
 ) -> None:
-    if stage_key == "rewrite_draft":
+    if stage_key == "script_writing":
+        store.insert_creation_draft(
+            task_id=task["id"],
+            stage_run_id=stage_run_id,
+            draft_type="script_writing",
+            title=str(output.get("opening") or task["topic"])[:80],
+            body=str(output.get("body") or ""),
+            metadata={
+                "writing_mode": output.get("writing_mode"),
+                "creation_mode": output.get("creation_mode"),
+                "body_contract": output.get("body_contract"),
+                "base_script_run_id": output.get("base_script_run_id"),
+                "revision_request_stage_run_id": output.get("revision_request_stage_run_id"),
+                "changed_spans": output.get("changed_spans") or [],
+                "protected_elements": output.get("protected_elements") or [],
+                "source_mapping": output.get("source_mapping") or [],
+                "new_claims": output.get("new_claims") or [],
+            },
+        )
+    elif stage_key == "rewrite_draft":
         draft = output.get("draft") or {}
         store.insert_creation_draft(
             task_id=task["id"],
@@ -1192,12 +1342,59 @@ def _persist_stage_artifacts(
 
 
 def _assert_previous_stage_confirmed(store: Store, task_id: str, stage_key: str) -> None:
-    index = CREATION_STAGES.index(stage_key)
+    stages = _stage_sequence_for_task(store, task_id, stage_key)
+    index = stages.index(stage_key)
     if index == 0:
         return
-    previous = store.latest_creation_stage_run(task_id, CREATION_STAGES[index - 1])
+    task = _task(store, task_id)
+    creation_mode = str((task.get("context") or {}).get("creation_mode") or "adaptation")
+    if stage_key == "creation_brief" and creation_mode == "original":
+        return
+    previous_key = stages[index - 1]
+    previous = store.latest_creation_stage_run(task_id, previous_key)
     if not previous or previous.get("status") != "confirmed":
-        raise ValueError(f"confirm stage {CREATION_STAGES[index - 1]} before running {stage_key}")
+        raise ValueError(f"confirm stage {previous_key} before running {stage_key}")
+
+    if stage_key == "risk_review":
+        quality = dict(previous.get("output") or {})
+        if quality.get("verdict") != "pass":
+            raise ValueError("quality_review must pass before running risk_review")
+        _assert_review_matches_latest_script(store, task_id, quality, "quality_review")
+    elif stage_key == "publish_format" and stages == CREATION_STAGES:
+        risk = dict(previous.get("output") or {})
+        if risk.get("verdict") != "pass":
+            raise ValueError("risk_review must pass before running publish_format")
+        _assert_review_matches_latest_script(store, task_id, risk, "risk_review")
+
+
+def _stage_sequence_for_task(store: Store, task_id: str, stage_key: str) -> list[str]:
+    if stage_key in {"rewrite_draft", "hook_enhancement", "risk_cleanup"}:
+        return LEGACY_CREATION_STAGES
+    if stage_key in {"script_writing", "quality_review", "risk_review"}:
+        return CREATION_STAGES
+    runs = store.list_creation_stage_runs(task_id)
+    if any(run.get("stage_key") in {"script_writing", "quality_review", "risk_review"} for run in runs):
+        return CREATION_STAGES
+    if any(run.get("stage_key") in {"rewrite_draft", "hook_enhancement", "risk_cleanup"} for run in runs):
+        return LEGACY_CREATION_STAGES
+    task = _task(store, task_id)
+    version = str((task.get("context") or {}).get("creation_methodology_version") or LEGACY_CREATION_METHODOLOGY_VERSION)
+    return CREATION_STAGES if version == CREATION_METHODOLOGY_VERSION else LEGACY_CREATION_STAGES
+
+
+def _latest_confirmed_script_run(store: Store, task_id: str) -> dict[str, Any] | None:
+    runs = store.list_creation_stage_runs(task_id, stage_key="script_writing")
+    confirmed = [run for run in runs if run.get("status") == "confirmed"]
+    return confirmed[-1] if confirmed else None
+
+
+def _assert_review_matches_latest_script(store: Store, task_id: str, review: dict[str, Any], stage_key: str) -> None:
+    script = _latest_confirmed_script_run(store, task_id)
+    if not script:
+        raise ValueError(f"{stage_key} requires a confirmed script_writing version")
+    script_output = dict(script.get("output") or {})
+    if review.get("reviewed_script_run_id") != script.get("id") or review.get("reviewed_body_hash") != script_output.get("body_hash"):
+        raise ValueError(f"{stage_key} is stale; review the latest script_writing version")
 
 
 def _confirmed_role(store: Store, role_id: str) -> dict[str, Any]:

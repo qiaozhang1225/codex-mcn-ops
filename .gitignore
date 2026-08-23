@@ -15,6 +15,7 @@ data/*.sqlite
 data/*.sqlite-*
 data/backups/
 data/browser-profiles/
+data/runtime/
 runs/*
 !runs/.gitkeep
 

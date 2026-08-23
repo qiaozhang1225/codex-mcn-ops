@@ -1,143 +1,97 @@
-# Workflow: Create Script
+# Content Creation Workflow v3
 
-## Intent
+Use one session with three linear roles. Do not create persistent role agents. Script Writer is the only role allowed to modify viewer-facing copy.
 
-Generate publish-ready five-part oral script copy from accepted collected materials, a confirmed IP persona, and the evolving Markdown creation knowledge pack.
+## Stage chain
 
-This workflow does not replace material collection. It starts after material understanding and role matching have produced a usable source-material pool.
+Adaptation and half-original work:
 
-## Inputs
+```text
+material_selection → creation_brief → script_writing → quality_review → risk_review → publish_format → delivery
+```
 
-- confirmed `ip_roles` profile and `persona_packet_json`
-- `collected_materials.status='collected'`
-- `collected_materials.eligibility_status='accepted'`
-- promoted material understanding columns
-- global creation knowledge files under `knowledge/creation/`
-- IP-specific creation knowledge files under `knowledge/ip/<role_slug>/`
-- target topic, goal, platform, and target material count
+Original work starts at `creation_brief`.
 
-## Stages
-
-Run and confirm stages in order:
+## Task
 
 ```bash
 mcn create task new \
   --role-id role_xxxxxxxxxxxx \
-  --topic 财运 \
-  --goal "生成一条知识型五段式口播" \
+  --topic "topic" \
+  --goal "goal" \
   --platform douyin \
-  --target-count 3
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage material_selection
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage material_selection
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage creation_brief
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage creation_brief
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage rewrite_draft
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage rewrite_draft
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage hook_enhancement
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage hook_enhancement
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage risk_cleanup
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage risk_cleanup
-
-mcn create task run --task-id createtask_xxxxxxxxxxxx --stage publish_format
-mcn create task confirm --task-id createtask_xxxxxxxxxxxx --stage publish_format
-
-mcn create task export --task-id createtask_xxxxxxxxxxxx --output data/creation-task.md
+  --target-count 1 \
+  --creation-mode adaptation
 ```
 
-Use `mcn create task retry --stage ... --note "..."` when a stage needs revision. Retry keeps the previous version and writes a new `creation_stage_runs.version`.
+Use `half_original` when IP knowledge supplies a material part of the main argument. Use `original` when no source remains the drafting spine.
 
-## Material Selection
+## Formal stage execution
 
-`material_selection` reads only accepted formal materials. It does not select broad candidates, rejected materials, missing transcript rows, or materials already used by the same IP role unless `--allow-reuse-material` is set at task creation.
-
-Selection ranking uses:
-
-- role-match score from `material_role_matches`
-- topic hit in promoted material understanding fields
-- role keywords and fit themes
-- knowledge-core score
-
-After selecting materials, the stage also writes source analysis:
-
-- original or corrected source hook
-- viral reasoning
-- authority frame
-- must-keep source elements
-- discard elements
-- ASR corrections such as `挂失 -> 卦师`
-
-`rewrite_draft` must use this analysis. A draft is marked `needs_retry` when the source content task or propagation mechanism is lost without reason, an incompatible speaker perspective is fabricated, the task-specific length guardrail is broken without justification, or the body no longer fulfils the opening.
-
-## Knowledge Packet
-
-Audit the exact context with:
+For every stage, prepare a packet, produce one JSON result, submit it, inspect both validation reports, and confirm only a structurally valid result.
 
 ```bash
-mcn create knowledge packet --task-id createtask_xxxxxxxxxxxx --json
+mcn create stage prepare --task-id TASK_ID --stage STAGE --knowledge-root knowledge --output /tmp/packet.json --json
+mcn create stage submit --task-id TASK_ID --stage STAGE --knowledge-root knowledge --input /tmp/result.json --json
+mcn create task confirm --task-id TASK_ID --stage STAGE --json
 ```
 
-The packet includes persona, global playbooks, IP playbooks, selected material understanding, and the current task brief. It does not include full transcripts by default.
+Do not use `mcn create task run` for `script_writing`, `quality_review`, or `risk_review`.
 
-The packet also includes rewrite requirements, source analysis, and recent stage feedback. This is what keeps human correction notes available during retry without putting the full raw transcript into every prompt.
+## Script Writer
 
-For `rewrite_draft`, `knowledge/creation/global-rewrite-playbook.md` is the cross-IP methodology. It preserves content task, propagation mechanism, speaker credibility, internal logic, and stage boundaries without prescribing a fixed script structure. IP-specific playbooks should contain only genuine role differences.
+Load the prepared source, brief, IP, domain, professional knowledge, current script, and pending revision request. Produce a complete script. On revision, bind to the base script and review run, obey the declared scope, preserve exact protected spans, and declare changes that mechanically reconstruct the new body.
 
-For `hook_enhancement`, analyze the opening with the creator-side `贪、瞋、痴、慢、疑` lens in `knowledge/creation/hook-playbook.md`. Record which desires, objections, misconceptions, identity comparisons, and information gaps are active. A high-retention candidate should normally activate at least three organically, but all active drivers must create one coherent promise that the unchanged body can fulfil. Preserve a compatible source opening that already does this; do not replace it with a calmer summary or stack unrelated stimulation merely to raise the count.
+For adaptation, preserve a compatible source opening literally or near-literally when it already provides the propagation mechanism. Do not flatten it into a calmer summary or stack unrelated stimulation. The opening and body must share one body contract that Quality Review can verify with exact evidence.
 
-## Professional-IP Knowledge Integration
+Writing modes:
 
-For professional IPs, organize collected books, courses, videos, and audio into role-specific knowledge before using them in creation. Keep each reusable claim tied to its applicable scene, non-applicable boundary, evidence strength, usable explanation, and risk note. Do not place raw transcripts into every generation prompt.
+- `initial_draft`;
+- `opening_only`;
+- `opening_and_bridge`;
+- `localized_body_revision`;
+- `risk_localized_revision`;
+- `full_rewrite`.
 
-Use the knowledge in three ways only:
+## Professional-IP knowledge integration
 
-1. **Guardrail:** at `material_selection`, classify the source as aligned, acceptable variance, repairable conflict, or hard conflict. Keep, locally repair, reclassify, or reject accordingly.
-2. **Support:** at `creation_brief`, decide whether the draft needs no explicit theory, guardrail-only handling, or one support point. State what the support explains and where it belongs.
-3. **Review:** at `risk_cleanup`, verify professional claims, qualify uncertain causal language, and retain medical, legal, or other practice boundaries.
+Organize collected books, courses, videos, and audio into role-specific knowledge before using them in creation. Keep each reusable claim tied to its applicable scene, non-applicable boundary, evidence strength, usable explanation, and risk note. Do not place raw transcripts into every generation prompt.
 
-The source's verified content task and propagation mechanism remain the drafting spine. A professional point may strengthen one weak link, but it must not turn a thin topic clue into a formal rewrite base or turn the draft into a lecture summary. When the professional corpus supplies most of the argument, handle the work as an explicit original or half-original task rather than source adaptation.
+Use professional knowledge in three bounded ways:
 
-## Output
+1. At `material_selection`, classify the source as `aligned`, `acceptable_variance`, `repairable_conflict`, or `hard_conflict` and keep, locally repair, reclassify, or reject it accordingly.
+2. At `creation_brief` and `script_writing`, use at most one directly relevant support point when it strengthens a formal rewrite base without replacing the source's content task or propagation mechanism.
+3. At `risk_review`, verify professional claims, qualify uncertain causal language, and retain medical, legal, financial, and other practice boundaries.
 
-`publish_format` creates:
+When professional knowledge supplies most of the argument, use `half_original` or `original` rather than disguising the result as adaptation.
 
-- a `content_packages` draft
-- `material_creations` rows linking selected materials to this IP and content package
-- a `creation_delivery_packages` row with the five-part publish structure
+## Quality Review
 
-## Feedback Learning
+Do not output copy. Review content task, viewer value, source mechanism, IP voice, speaker credibility, reasoning, oral integrity, opening attention, and body payoff.
 
-After publication, add lightweight feedback:
+Review `贪、瞋、痴、慢、疑` separately with `strong`, `weak`, `absent`, or `artificial`. The opening evidence boundary is exactly spoken sentence one plus sentence two; sentence three is bridge and cannot count. Strong and weak statuses require exact evidence from those two sentences; strong requires exact body payoff evidence. Both opening sentences must be strong, each must contain at least one strong driver, and together they need at least three organic strong drivers plus four literal topic-relevant high-stimulus keywords or phrases. Five natural strong drivers are the highest target. Never add unsupported stimulation to reach five.
 
-```bash
-mcn create feedback add \
-  --content-id cpkg_xxxxxxxxxxxx \
-  --platform douyin \
-  --metrics-json '{"likes":1200,"comments":35,"shares":18}' \
-  --human-note "开头有效，但财运表达略重"
+Return `pass`, `revise`, or `return_upstream`. A non-pass result must give a bounded revision request and exact protected spans.
+
+## Risk Review
+
+Do not output cleaned copy. Review the latest quality-approved body for diagnosis, single-cause claims, universalization, fabricated identity or evidence, professional conflict, regulated claims, certainty, outcome promises, and platform risk.
+
+Return `pass`, `revise`, `return_upstream`, or `reject`. Every issue must quote an exact span and give the maximum repair boundary. Repairs return to Script Writer.
+
+## Revision routing
+
+```text
+Quality revise → Script Writer → Quality Review
+Risk revise → Script Writer → Quality Review → Risk Review
 ```
 
-Before publication, add stage feedback when a draft or hook needs revision:
+Every review binds to the Script Writer stage run ID and body hash. A new body invalidates all earlier review passes.
 
-```bash
-mcn create feedback add \
-  --task-id createtask_xxxxxxxxxxxx \
-  --role-id role_xxxxxxxxxxxx \
-  --stage rewrite_draft \
-  --platform douyin \
-  --judgment rejected \
-  --human-note "开头变弱、字数太长、太像讲大道理"
-```
+## Publish gate
 
-Generate but do not automatically apply learning:
+`publish_format.final_copy` must exactly equal the latest Script Writer body passed by both Quality Review and Risk Review. Delivery formats confirmed artifacts only and never rewrites the body.
 
-```bash
-mcn create learning propose --role-id role_xxxxxxxxxxxx
-mcn create learning apply --proposal-id clearn_xxxxxxxxxxxx
-```
+## Legacy
 
-This keeps SQLite as the event/audit source and Markdown as the human-readable creation knowledge source.
+Methodology-v2 stages `rewrite_draft`, `hook_enhancement`, and `risk_cleanup` remain available for historical task reading and export. Do not use them for new tasks.
