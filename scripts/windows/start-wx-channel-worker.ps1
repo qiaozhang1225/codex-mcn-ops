@@ -1,30 +1,40 @@
 $ErrorActionPreference = "Stop"
 
-$workDir = "D:\wx-channel-poc"
-$exePath = Join-Path $workDir "wx_channel_cloud_hardened_v5.6.9.exe"
-$configPath = Join-Path $workDir "config.yaml"
-$consoleLog = Join-Path $workDir "worker-console.log"
-$expectedSha256 = "C5CFF437248220EDD113403987E6C3005136A23AEE2B410E09736DD26BD2B0EA"
+. (Join-Path $PSScriptRoot "wx-channel-session-common.ps1")
 
-if (!(Test-Path $exePath) -or !(Test-Path $configPath)) {
-    throw "worker executable or config is missing"
+$consoleLog = Join-Path $script:WxWorkDir "worker-console.log"
+$mutex = $null
+try {
+    $mutex = Enter-WxSessionMutex
+    $lease = Read-WxLease
+    if ($null -eq $lease) {
+        throw "Channels worker cannot start without a lease"
+    }
+    if ([string]$lease.state -notin @("provisioning", "active")) {
+        throw "Channels worker cannot start from lease state $($lease.state)"
+    }
+    if (Test-WxLeaseExpired -Lease $lease) {
+        throw "Channels worker cannot start with an expired lease"
+    }
+    Assert-WxPinnedArtifacts
+    $certificateCounts = Get-WxCertificateCounts
+    if ([int]$certificateCounts.current_user -ne 1 -or [int]$certificateCounts.local_machine -ne 0) {
+        throw "Channels worker cannot start without the isolated CurrentUser certificate"
+    }
+    if (!(Test-Path -LiteralPath $script:WxConfigPath)) {
+        throw "Channels worker config is missing"
+    }
+    foreach ($process in (Get-WxPinnedWorkerProcesses)) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+    }
+    New-Item -ItemType Directory -Path (Join-Path $script:WxWorkDir "logs") -Force | Out-Null
+    Set-Content -LiteralPath $consoleLog -Value "" -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $script:WxWorkDir "logs\wx_channel.log") -Value "" -Encoding utf8
+} finally {
+    Exit-WxSessionMutex -Mutex $mutex
 }
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $exePath).Hash -ne $expectedSha256) {
-    throw "worker executable SHA256 mismatch"
-}
 
-$blockRule = Get-NetFirewallRule -Name "Codex-WxChannel-PoC-Block-Inbound" -ErrorAction Stop
-if (!$blockRule.Enabled -or [string]$blockRule.Action -ne "Block") {
-    throw "required inbound block rule is not enabled"
-}
-
-Get-Process -Name wx_channel_cloud,wx_channel_cloud_hardened_v5.6.9 -ErrorAction SilentlyContinue |
-    Stop-Process -Force
-New-Item -ItemType Directory -Path (Join-Path $workDir "logs") -Force | Out-Null
-Set-Content -LiteralPath $consoleLog -Value "" -Encoding utf8
-Set-Content -LiteralPath (Join-Path $workDir "logs\wx_channel.log") -Value "" -Encoding utf8
-
-Set-Location $workDir
+Set-Location $script:WxWorkDir
 "[$(Get-Date -Format o)] hardened worker starting" | Add-Content -LiteralPath $consoleLog -Encoding utf8
-& $exePath *>> $consoleLog
+& $script:WxWorkerPath *>> $consoleLog
 "[$(Get-Date -Format o)] worker exited with code $LASTEXITCODE" | Add-Content -LiteralPath $consoleLog -Encoding utf8
