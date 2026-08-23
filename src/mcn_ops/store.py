@@ -563,7 +563,24 @@ def scrub_for_storage(value: Any) -> Any:
         scrubbed: dict[str, Any] = {}
         for key, item in value.items():
             lowered = key.lower()
-            if any(token in lowered for token in ["secret", "cookie", "api_key", "apikey", "authorization"]):
+            if any(
+                token in lowered
+                for token in [
+                    "secret",
+                    "cookie",
+                    "api_key",
+                    "apikey",
+                    "authorization",
+                    "decodekey",
+                    "decode_key",
+                    "decryptkey",
+                    "decrypt_key",
+                    "sessionbuffer",
+                    "session_buffer",
+                    "urltoken",
+                    "url_token",
+                ]
+            ):
                 scrubbed[key] = "<redacted>"
             else:
                 scrubbed[key] = scrub_for_storage(item)
@@ -1150,6 +1167,27 @@ class Store:
                 (status, now_iso(), dumps(scrub_for_storage(summary)), error, task_id),
             )
 
+    def update_collection_task_progress(
+        self,
+        task_id: str,
+        status: str,
+        summary: dict[str, Any],
+        error: str | None = None,
+    ) -> None:
+        """Persist an open task checkpoint without marking the objective complete."""
+
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE collection_tasks
+                SET status = ?, completed_at = NULL, summary_json = ?, error = ?
+                WHERE id = ?
+                """,
+                (status, dumps(scrub_for_storage(summary)), error, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"collection task not found: {task_id}")
+
     def upsert_collection_task_role(
         self,
         *,
@@ -1304,7 +1342,11 @@ class Store:
             raise ValueError("source package has no authoritative platform work id")
 
         author_id: str | None = None
-        platform_author_id = str(source_package.get("author_sec_uid") or "").strip()
+        platform_author_id = str(
+            source_package.get("platform_author_id")
+            or source_package.get("author_sec_uid")
+            or ""
+        ).strip()
         display_name = str(source_package.get("author_name") or "").strip()
         if platform_author_id and display_name:
             author_id = self.upsert_source_author(
@@ -1340,6 +1382,13 @@ class Store:
                 "cover_url": source_package.get("cover_url"),
                 "video_url": source_package.get("video_url"),
                 "audio_url": source_package.get("audio_url"),
+            },
+            identity={
+                "detail_ref": source_package.get("detail_ref"),
+                "search_keyword": source_package.get("search_keyword"),
+                "matched_search_keywords": source_package.get("matched_search_keywords") or [],
+                "media_lease_available": source_package.get("media_lease_available"),
+                "media_evidence": source_package.get("media_evidence"),
             },
             raw=raw or {},
         )
@@ -1417,6 +1466,7 @@ class Store:
                 ).fetchone()
         payload = _row_json(observation, "payload_json", {}) if observation else {}
         media = payload.get("media") or {}
+        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
         return {
             "source_work_id": source_work_id,
             "work_id": work["platform_work_id"],
@@ -1431,7 +1481,13 @@ class Store:
             "duration_ms": work["duration_ms"],
             "cover_url": work["cover_url"] or media.get("cover_url"),
             "public_metrics": _row_json(observation, "metrics_json", {}) if observation else {},
+            "detail_ref": identity.get("detail_ref") or {},
+            "search_keyword": identity.get("search_keyword"),
+            "matched_search_keywords": identity.get("matched_search_keywords") or [],
+            "media_lease_available": bool(identity.get("media_lease_available")),
+            "media_evidence": identity.get("media_evidence") or {},
             "author_name": author["display_name"] if author else None,
+            "platform_author_id": author["platform_author_id"] if author else None,
             "author_sec_uid": author["platform_author_id"] if author and work["platform"] == "douyin" else None,
             "author_profile_url": author["profile_url"] if author else None,
             "author_douyin_id": author["account_id"] if author and work["platform"] == "douyin" else None,
@@ -1703,6 +1759,7 @@ class Store:
             "recommended_platforms": _row_json(row, "recommended_platforms_json", []),
             "next_collection_keywords": _row_json(row, "next_collection_keywords_json", []),
             "author_name": package.get("author_name"),
+            "platform_author_id": package.get("platform_author_id"),
             "author_sec_uid": package.get("author_sec_uid"),
             "author_profile_url": package.get("author_profile_url"),
             "author_douyin_id": package.get("author_douyin_id"),
@@ -2158,6 +2215,7 @@ class Store:
         run_id: str | None = None,
         metrics: dict[str, Any] | None = None,
         media: dict[str, Any] | None = None,
+        identity: dict[str, Any] | None = None,
         raw: dict[str, Any] | None = None,
         observed_at: str | None = None,
     ) -> str:
@@ -2180,7 +2238,16 @@ class Store:
                     f"runtime:{observation_kind}",
                     observation_id,
                     dumps(scrub_for_storage(metrics or {})),
-                    dumps(scrub_for_storage({"run_id": run_id, "media": media or {}, "raw": raw or {}})),
+                    dumps(
+                        scrub_for_storage(
+                            {
+                                "run_id": run_id,
+                                "media": media or {},
+                                "identity": identity or {},
+                                "raw": raw or {},
+                            }
+                        )
+                    ),
                     observed_at or timestamp,
                 ),
             )

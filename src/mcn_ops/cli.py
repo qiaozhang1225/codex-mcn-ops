@@ -10,6 +10,7 @@ from typing import Any
 
 from .adb import AdbClient
 from .adapters import list_platforms
+from .collection.channels.factory import build_channels_collection_registry
 from .collection.douyin.doctor import DoctorCheck, run_doctor
 from .collection.douyin.direct.client import cookie_looks_authenticated
 from .collection.douyin.factory import (
@@ -238,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "direct"],
+        choices=["mock", "direct", "wechat_channels_remote"],
         default="direct",
     )
     task_keyword.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
@@ -248,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_keyword.add_argument("--max-duration-seconds", type=int, default=300)
     task_keyword.add_argument("--max-search-pages", type=int, default=3)
     task_keyword.add_argument("--page-size", type=int, default=10)
+    task_keyword.add_argument(
+        "--max-materials-per-iteration",
+        type=int,
+        default=5,
+        help="Cap transcription/materialization before the task pauses for semantic review",
+    )
     task_keyword.add_argument("--understanding-provider", default=DEFAULT_UNDERSTANDING_PROVIDER)
     task_keyword.add_argument("--understanding-model", default=DEFAULT_UNDERSTANDING_MODEL)
     task_keyword.add_argument("--json", action="store_true")
@@ -399,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-provider",
         "--tool-provider",
         dest="data_provider",
-        choices=["mock", "direct"],
+        choices=["mock", "direct", "wechat_channels_remote"],
         default="direct",
     )
     collect_run.add_argument("--transcription-provider", choices=["aliyun", "none"], default="aliyun")
@@ -1182,6 +1189,7 @@ def _collection_policy_from_args(args: argparse.Namespace) -> CollectionPolicy:
         max_duration_seconds=int(getattr(args, "max_duration_seconds", 300)),
         max_search_pages=int(getattr(args, "max_search_pages", 3)),
         page_size=int(getattr(args, "page_size", 10)),
+        max_materials_per_iteration=int(getattr(args, "max_materials_per_iteration", 5)),
     )
 
 
@@ -2174,6 +2182,10 @@ def _build_collection_tools(
         return build_douyin_registry(resolved)
     if provider == "mock":
         return build_mock_source_registry()
+    if provider == "wechat_channels_remote":
+        return build_channels_collection_registry(
+            transcription_provider_name=transcription_provider,
+        )
     raise ValueError(f"unknown collection tool provider: {provider}")
 
 

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from ..store import Store
+from .channels.factory import build_channels_collection_registry
 from .eligibility import evaluate_material_eligibility, is_material_eligible
 from .mock_tools import build_mock_source_registry
 from .douyin.contracts import DouyinProvider
@@ -43,6 +44,7 @@ class CollectionPolicy:
     max_search_pages: int = 3
     page_size: int = 10
     stop_after_nonviral_pages: int = 2
+    max_materials_per_iteration: int = 5
 
 
 class CollectionTaskOrchestrator:
@@ -103,8 +105,49 @@ class CollectionTaskOrchestrator:
                 topic=topic,
                 parsed=parsed,
             )
+        task_record = self.store.get_collection_task(task_id)
+        if task_record is None:
+            raise KeyError(f"collection task not found: {task_id}")
+        previous_summary = (
+            task_record.get("summary") if isinstance(task_record.get("summary"), dict) else {}
+        )
+        current_report = self.build_task_report(task_id)
+        if _task_goal_count(current_report) >= target_count:
+            completed_summary = {
+                **previous_summary,
+                "entrypoint": "keyword",
+                "target_count": target_count,
+                "goal_metric": current_report["goal_metric"],
+                "qualified_formal_base_count": current_report["qualified_formal_base_count"],
+                "remaining_count": 0,
+                "goal_satisfied": True,
+                "pause_reason": None,
+            }
+            self.store.finish_collection_task(task_id, "completed", completed_summary)
+            return self.build_task_report(task_id)
+        if (
+            role_id
+            and current_report["runs"]
+            and current_report["inventory_handoff"]["pending_review_count"] > 0
+        ):
+            checkpoint = {
+                **previous_summary,
+                "entrypoint": "keyword",
+                "target_count": target_count,
+                "goal_metric": current_report["goal_metric"],
+                "qualified_formal_base_count": current_report["qualified_formal_base_count"],
+                "remaining_count": current_report["remaining_count"],
+                "goal_satisfied": False,
+                "pause_reason": "semantic_review_required",
+            }
+            self.store.update_collection_task_progress(task_id, "awaiting_review", checkpoint)
+            return self.build_task_report(task_id)
         if tool_provider == "mock":
             tools = build_mock_source_registry()
+        elif tool_provider == "wechat_channels_remote":
+            tools = build_channels_collection_registry(
+                transcription_provider_name=transcription_provider,
+            )
         else:
             provider = build_collection_provider(
                 tool_provider,
@@ -113,19 +156,34 @@ class CollectionTaskOrchestrator:
             )
             tools = build_douyin_registry(provider, include_user_post_tools=False)
         runner = TopicCollectionRunner(tools, self.store)
+        exhausted_keywords = _unique_strings(previous_summary.get("exhausted_keywords") or [])
+        pending_keywords = _unique_strings(previous_summary.get("pending_keywords") or [])
         queue = _unique_strings(
-            [topic, *(keywords or []), *(related_keywords or []), *_role_collection_keywords(role_profile, topic)]
+            [
+                *pending_keywords,
+                topic,
+                *(keywords or []),
+                *(related_keywords or []),
+                *_role_collection_keywords(role_profile, topic),
+            ]
         )
-        exhausted_keywords: list[str] = []
-        keyword_errors: list[dict[str, str]] = []
+        queue = [keyword for keyword in queue if keyword not in exhausted_keywords]
+        keyword_errors: list[dict[str, str]] = list(previous_summary.get("keyword_errors") or [])
         run_summaries: list[dict[str, Any]] = []
         error: str | None = None
+        iteration_limit = 1 if tool_provider == "wechat_channels_remote" else max(len(queue), 1)
+        iterations = 0
         try:
-            while _task_saved_count(self.build_task_report(task_id)) < target_count and queue:
+            while _task_goal_count(self.build_task_report(task_id)) < target_count and queue:
+                if iterations >= iteration_limit:
+                    break
+                iterations += 1
                 keyword = queue.pop(0)
                 if keyword in exhausted_keywords:
                     continue
-                remaining = max(1, target_count - _task_saved_count(self.build_task_report(task_id)))
+                remaining = max(1, target_count - _task_goal_count(self.build_task_report(task_id)))
+                if tool_provider == "wechat_channels_remote":
+                    remaining = min(remaining, max(1, policy.max_materials_per_iteration))
                 try:
                     result = runner.run(
                         CollectionConfig(
@@ -161,21 +219,44 @@ class CollectionTaskOrchestrator:
                 )
             report = self.build_task_report(task_id)
             saved_count = _task_saved_count(report)
-            status = _workflow_goal_status(saved_count, target_count)
-            if not run_summaries and keyword_errors:
+            goal_count = _task_goal_count(report)
+            goal_satisfied = goal_count >= target_count
+            pending_review_count = int(report["inventory_handoff"]["pending_review_count"] or 0)
+            if goal_satisfied:
+                status = "completed"
+            elif pending_review_count > 0:
+                status = "awaiting_review"
+            elif queue:
+                status = "ready_for_search"
+            elif not run_summaries and keyword_errors and saved_count == 0:
                 status = "failed"
+            else:
+                status = "awaiting_strategy"
             summary = {
                 "entrypoint": "keyword",
                 "target_count": target_count,
+                "goal_metric": report["goal_metric"],
+                "qualified_formal_base_count": report["qualified_formal_base_count"],
                 "saved_count": saved_count,
-                "remaining_count": max(target_count - saved_count, 0),
+                "remaining_count": max(target_count - goal_count, 0),
                 "exhausted_keywords": exhausted_keywords,
+                "pending_keywords": queue,
                 "keyword_errors": keyword_errors,
                 "runs": run_summaries,
-                "goal_satisfied": saved_count >= target_count,
+                "goal_satisfied": goal_satisfied,
+                "pause_reason": (
+                    "semantic_review_required"
+                    if status == "awaiting_review"
+                    else "strategy_decision_required"
+                    if status == "awaiting_strategy"
+                    else None
+                ),
                 "understanding": report["understanding_summary"],
             }
-            self.store.finish_collection_task(task_id, status, summary)
+            if status in {"completed", "failed"}:
+                self.store.finish_collection_task(task_id, status, summary)
+            else:
+                self.store.update_collection_task_progress(task_id, status, summary)
             return self.build_task_report(task_id)
         except Exception as exc:
             error = str(exc)
@@ -561,23 +642,84 @@ class CollectionTaskOrchestrator:
             ]
         )
         pending_by_role: list[dict[str, Any]] = []
+        goal_by_role: list[dict[str, Any]] = []
         inventory_schema_ready = True
+        task_source_work_ids = {
+            str(material.get("source_work_id") or "")
+            for material in saved_materials
+            if material.get("source_work_id")
+        }
         for role_id in role_ids:
             try:
-                pending = self.store.list_pending_material_inventory(role_id=role_id, task_id=task_id)
+                inventory = self.store.list_material_inventory(role_id=role_id, include_used=True)
             except RuntimeError as exc:
                 if "migrate-material-inventory-v1" not in str(exc):
                     raise
                 inventory_schema_ready = False
-                pending = []
+                inventory = []
+            reviewed_source_work_ids = {
+                str(item.get("source_work_id") or "")
+                for item in inventory
+                if item.get("review_status") == "reviewed"
+            }
+            formal_source_work_ids = {
+                str(item.get("source_work_id") or "")
+                for item in inventory
+                if item.get("formal_usable")
+                and item.get("is_primary")
+                and not item.get("used")
+                and item.get("source_work_id") in task_source_work_ids
+            }
+            semantic_review_queue: list[dict[str, Any]] = []
+            seen_review_source_works: set[str] = set()
+            for material in saved_materials:
+                source_work_id = str(material.get("source_work_id") or "")
+                if (
+                    not source_work_id
+                    or source_work_id in reviewed_source_work_ids
+                    or source_work_id in seen_review_source_works
+                    or not str(material.get("transcript_text") or "").strip()
+                ):
+                    continue
+                seen_review_source_works.add(source_work_id)
+                role_matches = self.store.list_material_role_matches(
+                    material_id=str(material["id"]),
+                    role_id=role_id,
+                )
+                semantic_review_queue.append(
+                    {
+                        "material_id": material["id"],
+                        "source_work_id": source_work_id,
+                        "title": material.get("title") or material.get("clean_title"),
+                        "automatic_role_decision": (
+                            role_matches[0].get("decision") if role_matches else "not_evaluated"
+                        ),
+                        "automatic_fit_score": (
+                            role_matches[0].get("fit_score") if role_matches else None
+                        ),
+                    }
+                )
             pending_by_role.append(
                 {
                     "role_id": role_id,
-                    "pending_count": len(pending),
-                    "material_ids": [item["material_id"] for item in pending],
+                    "pending_count": len(semantic_review_queue),
+                    "material_ids": [item["material_id"] for item in semantic_review_queue],
+                    "materials": semantic_review_queue,
+                    "review_scope": "all_task_materials_regardless_of_automatic_role_match",
                     "next_inventory_command": (
-                        f"mcn material inventory pending --role-id {role_id} --task-id {task_id} --json"
+                        f"mcn material inventory pending --role-id {role_id} "
+                        f"--task-id {task_id} --json"
                     ),
+                }
+            )
+            goal_by_role.append(
+                {
+                    "role_id": role_id,
+                    "target_count": _target_count(task),
+                    "qualified_formal_base_count": len(formal_source_work_ids),
+                    "remaining_count": max(_target_count(task) - len(formal_source_work_ids), 0),
+                    "goal_satisfied": len(formal_source_work_ids) >= _target_count(task),
+                    "source_work_ids": sorted(formal_source_work_ids),
                 }
             )
         call_summary = self.store.task_call_summary(task_id)
@@ -610,6 +752,17 @@ class CollectionTaskOrchestrator:
             if not isinstance(contract, dict):
                 contract = summary.get("expand") if isinstance(summary.get("expand"), dict) else {}
             traversal.append({"run_id": run["id"], **contract})
+        role_targeted_goal = bool(goal_by_role)
+        qualified_formal_base_count = (
+            min(item["qualified_formal_base_count"] for item in goal_by_role)
+            if role_targeted_goal
+            else len(saved_materials)
+        )
+        goal_satisfied = (
+            all(item["goal_satisfied"] for item in goal_by_role)
+            if role_targeted_goal
+            else len(saved_materials) >= _target_count(task)
+        )
         return {
             "task": task,
             "runs": runs,
@@ -617,7 +770,15 @@ class CollectionTaskOrchestrator:
             "saved_count": len(saved_materials),
             "created_material_count": len(created_materials),
             "existing_reused_count": len(existing_reused),
-            "remaining_count": max(_target_count(task) - len(saved_materials), 0) if _target_count(task) else 0,
+            "qualified_formal_base_count": qualified_formal_base_count,
+            "goal_metric": (
+                "available_reviewed_primary_formal_rewrite_base"
+                if role_targeted_goal
+                else "saved_material"
+            ),
+            "goal_satisfied": goal_satisfied,
+            "goal_by_role": goal_by_role,
+            "remaining_count": max(_target_count(task) - qualified_formal_base_count, 0),
             "saved_materials": saved_materials,
             "skipped_candidates": skipped,
             "newly_discovered_source_works": len(
@@ -1114,7 +1275,8 @@ def format_task_show(report: dict[str, Any]) -> str:
         [
             f"Task {task['id']} [{task['status']}]",
             f"scope={task['target_scope']} topic={task.get('topic') or ''}",
-            f"saved={report['saved_count']} created={report['created_material_count']} reused={report['existing_reused_count']} remaining={report['remaining_count']}",
+            f"goal={report['qualified_formal_base_count']}/{report['target_count']} metric={report['goal_metric']} remaining={report['remaining_count']}",
+            f"material_results={report['saved_count']} created={report['created_material_count']} reused={report['existing_reused_count']}",
             f"runs={len(report['runs'])} skipped={len(report['skipped_candidates'])} api_calls={report['collection_call_summary']['total_calls']} cache_hits={report['collection_call_summary']['cache_hits']}",
             f"inventory_pending={report['inventory_handoff']['pending_review_count']} automatic_formal_classification=false",
             f"understanding metadata_ready={understanding['metadata_ready_count']} codex_default={understanding['final_codex_count']} rules_draft={understanding['draft_local_count']} pending_material={understanding['pending_material_understanding_count']}",
@@ -1131,6 +1293,9 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
         f"- status: {task['status']}",
         f"- topic: {task.get('topic') or ''}",
         f"- target_count: {report['target_count']}",
+        f"- goal_metric: {report['goal_metric']}",
+        f"- qualified_formal_base_count: {report['qualified_formal_base_count']}",
+        f"- goal_satisfied: {str(report['goal_satisfied']).lower()}",
         f"- saved_count: {report['saved_count']}",
         f"- created_material_count: {report['created_material_count']}",
         f"- existing_reused_count: {report['existing_reused_count']}",
@@ -1173,7 +1338,8 @@ def format_task_report_markdown(report: dict[str, Any]) -> str:
     lines.append("- automatic_formal_classification: false")
     for role in handoff["roles"]:
         lines.append(
-            f"- role={role['role_id']} pending={role['pending_count']} next=`{role['next_inventory_command']}`"
+            f"- role={role['role_id']} pending_semantic_review={role['pending_count']} "
+            f"scope={role['review_scope']}"
         )
     lines.extend(["", "## Source Authors Discovered", ""])
     for author in report["source_authors_discovered"][:30]:
@@ -1434,6 +1600,12 @@ def _target_count(task: dict[str, Any]) -> int:
 
 def _task_saved_count(report: dict[str, Any]) -> int:
     return int(report.get("saved_count") or 0)
+
+
+def _task_goal_count(report: dict[str, Any]) -> int:
+    if report.get("goal_by_role"):
+        return int(report.get("qualified_formal_base_count") or 0)
+    return _task_saved_count(report)
 
 
 def _understanding_summary(materials: list[dict[str, Any]]) -> dict[str, Any]:

@@ -9,14 +9,22 @@ description = "Codex-first MCN operations with SQLite, Feishu handoff, and ADB p
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "OPC" }]
-dependencies = []
+dependencies = [
+  "websockets>=17.0.1,<18",
+]
 
 [project.scripts]
 mcn = "mcn_ops.cli:main"
+mcn-channels-probe = "mcn_ops.collection.channels.probe:main"
+mcn-channels-matrix = "mcn_ops.collection.channels.matrix:main"
+mcn-channels-reconnect-probe = "mcn_ops.collection.channels.reconnect:main"
+mcn-channels-media-probe = "mcn_ops.collection.channels.media_probe:main"
+mcn-channels-provider-search = "mcn_ops.collection.channels.provider_cli:main"
+mcn-channels-transcribe-candidate = "mcn_ops.collection.channels.transcribe_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 testpaths = ["tests"]
