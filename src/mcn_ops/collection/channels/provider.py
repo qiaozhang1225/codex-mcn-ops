@@ -6,7 +6,7 @@ import os
 import re
 import ssl
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 from ..douyin.contracts import ProviderResult, build_provider_result, normalize_paging
 from ..douyin.errors import ProviderConfigError, ProviderInputError, ProviderResponseError
@@ -28,9 +28,22 @@ class ChannelsRemoteConfig:
     allow_insecure_lan: bool = False
 
     @classmethod
-    def from_env(cls) -> "ChannelsRemoteConfig":
-        worker_id = os.environ.get("CHANNELS_WORKER_ID", "").strip()
-        shared_secret = os.environ.get("CHANNELS_HUB_SECRET", "").strip()
+    def from_env(
+        cls,
+        *,
+        worker_id_override: str | None = None,
+        shared_secret_override: str | None = None,
+    ) -> "ChannelsRemoteConfig":
+        worker_id = str(
+            worker_id_override
+            if worker_id_override is not None
+            else os.environ.get("CHANNELS_WORKER_ID", "")
+        ).strip()
+        shared_secret = str(
+            shared_secret_override
+            if shared_secret_override is not None
+            else os.environ.get("CHANNELS_HUB_SECRET", "")
+        ).strip()
         if not worker_id:
             raise ProviderConfigError("CHANNELS_WORKER_ID is required")
         if not shared_secret:
@@ -57,12 +70,30 @@ class ChannelsMediaLease:
     file_size: int
 
 
+class ChannelsSessionGuard(Protocol):
+    @property
+    def worker_id(self) -> str: ...
+
+    @property
+    def shared_secret(self) -> str: ...
+
+    def ensure_active(self) -> dict[str, Any]: ...
+
+
 class ChannelsRemoteProvider:
     provider_name = "wechat_channels_remote"
 
-    def __init__(self, config: ChannelsRemoteConfig) -> None:
+    def __init__(
+        self,
+        config: ChannelsRemoteConfig,
+        *,
+        session_guard: ChannelsSessionGuard | None = None,
+    ) -> None:
         self.config = config
+        self.session_guard = session_guard
         _validate_config(config)
+        if session_guard is not None and session_guard.worker_id != config.worker_id:
+            raise ProviderConfigError("Channels session guard worker_id must match provider config")
 
     def call(
         self,
@@ -257,10 +288,16 @@ class ChannelsRemoteProvider:
             await hub.stop()
 
     async def _start_hub(self) -> tuple[ChannelsHub, ssl.SSLContext | None]:
+        shared_secret = self.config.shared_secret
+        worker_id = self.config.worker_id
+        if self.session_guard is not None:
+            self.session_guard.ensure_active()
+            shared_secret = self.session_guard.shared_secret
+            worker_id = self.session_guard.worker_id
         ssl_context = _server_ssl_context(self.config.tls_cert, self.config.tls_key)
         hub = ChannelsHub(
-            shared_secret=self.config.shared_secret,
-            allowed_worker_ids={self.config.worker_id},
+            shared_secret=shared_secret,
+            allowed_worker_ids={worker_id},
         )
         await hub.start(self.config.host, self.config.port, ssl_context=ssl_context)
         return hub, ssl_context
