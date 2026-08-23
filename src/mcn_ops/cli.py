@@ -21,6 +21,7 @@ from .collection.douyin.factory import (
 )
 from .collection.douyin.registry import build_douyin_registry
 from .collection.mock_tools import build_mock_source_registry
+from .collection.review import TaskReviewService
 from .collection.runner import CollectionConfig, TopicCollectionRunner, engagement_score, metric_value
 from .collection.tools import parse_json_object
 from .collection.understanding import (
@@ -315,6 +316,26 @@ def build_parser() -> argparse.ArgumentParser:
     task_resume = task_sub.add_parser("resume", help="Resume a collection task from stored task parameters")
     task_resume.add_argument("--task-id", required=True)
     task_resume.add_argument("--json", action="store_true")
+    task_review = task_sub.add_parser(
+        "review",
+        help="Record one evidence-bearing full-transcript semantic review",
+    )
+    task_review.add_argument("--task-id", required=True)
+    task_review.add_argument("--material-id", required=True)
+    task_review.add_argument("--role-id", required=True)
+    task_review.add_argument(
+        "--outcome",
+        required=True,
+        choices=["formal_rewrite_base", "topic_clue", "rejected"],
+    )
+    task_review.add_argument("--topic-direction", required=True)
+    task_review.add_argument("--content-mechanism", required=True)
+    task_review.add_argument("--reason", action="append", required=True)
+    task_review.add_argument("--reviewer", default="codex-full-transcript-review")
+    task_review.add_argument("--fit-score", type=float)
+    task_review.add_argument("--knowledge-subtype")
+    task_review.add_argument("--idempotency-key")
+    task_review.add_argument("--json", action="store_true")
 
     author = collect_sub.add_parser("author", help="Manage Douyin source authors")
     author_sub = author.add_subparsers(dest="author_command", required=True)
@@ -1186,6 +1207,29 @@ def handle_collect_task(args: argparse.Namespace, store: Store) -> int:
             json_print(report)
         else:
             print(format_task_show(report))
+        return 0
+
+    if args.task_command == "review":
+        result = TaskReviewService(store).review(
+            task_id=args.task_id,
+            material_id=args.material_id,
+            role_id=args.role_id,
+            outcome=args.outcome,
+            topic_direction=args.topic_direction,
+            content_mechanism=args.content_mechanism,
+            evidence={"reasons": args.reason},
+            reviewer=args.reviewer,
+            idempotency_key=(
+                args.idempotency_key
+                or f"review:{args.material_id}:{args.role_id}:{args.outcome}"
+            ),
+            fit_score=args.fit_score,
+            knowledge_subtype=args.knowledge_subtype,
+        )
+        if args.json:
+            json_print(result)
+        else:
+            print(format_task_show(orchestrator.build_task_report(args.task_id)))
         return 0
 
     raise ValueError(args.task_command)

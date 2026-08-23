@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from mcn_ops.cli import main
 from mcn_ops.collection.review import TaskReviewService
 from mcn_ops.migrations import migrate_collection_task_orchestration_v1
 from mcn_ops.store import Store
@@ -146,6 +148,45 @@ def test_automatic_rejection_can_be_semantically_accepted_and_goal_moves_to_comp
     )[0]
     assert match["decision"] == "accepted"
     assert match["decision_source"] == "full-transcript-semantic-review"
+
+
+def test_review_cli_records_evidence_and_returns_durable_progress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = _store(tmp_path)
+    role_id = _role(store)
+    task_id = _task(store, role_id=role_id, target_count=1)
+    material_id = _material(store, task_id=task_id, role_id=role_id, work_id="cli-review")
+
+    assert main(
+        [
+            "--db-path",
+            str(store.db_path),
+            "collect",
+            "task",
+            "review",
+            "--task-id",
+            task_id,
+            "--material-id",
+            material_id,
+            "--role-id",
+            role_id,
+            "--outcome",
+            "formal_rewrite_base",
+            "--topic-direction",
+            "亲子沟通",
+            "--content-mechanism",
+            "父母焦虑影响沟通顺序",
+            "--reason",
+            "完整转写包含目标家长、冲突和心理机制",
+            "--json",
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["review"]["outcome"] == "formal_rewrite_base"
+    assert result["action"]["status"] == "succeeded"
+    assert result["task"]["status"] == "completing"
 
 
 def test_successful_review_retry_is_idempotent_and_repairs_post_commit_state_gap(
