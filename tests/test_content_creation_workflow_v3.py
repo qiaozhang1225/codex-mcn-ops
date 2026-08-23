@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -122,13 +123,26 @@ def _quality_result(packet: dict[str, object], *, verdict: str = "pass", revisio
     assert isinstance(script, dict)
     opening = str(script["opening"])
     body = str(script["body"])
+    sentences = [part.strip() for part in re.findall(r".+?(?:[。！？?!]+|$)", opening) if part.strip()]
+    sentence_1 = sentences[0] if sentences else ""
+    sentence_2 = sentences[1] if len(sentences) > 1 else ""
     return {
         "reviewed_script_run_id": script["stage_run_id"],
         "reviewed_body_hash": script["body_hash"],
         "verdict": verdict,
         "quality_dimensions": {"content_task": "pass", "oral_integrity": "pass"},
+        "opening_scope_review": {
+            "opening_sentence_1": sentence_1,
+            "opening_sentence_2": sentence_2,
+            "bridge_starts_at_sentence": 3,
+            "sentence_1_hook_task": "推翻孩子没话的误读",
+            "sentence_2_hook_task": "升级继续逼问带来的沟通损失",
+            "sentence_1_strength": "strong" if sentence_1 else "absent",
+            "sentence_2_strength": "strong" if sentence_2 else "absent",
+            "high_stimulus_keywords": ["孩子", "沟通", "被否定", "把话藏得更深"] if sentence_2 else ["孩子", "沟通"],
+        },
         "five_affliction_review": {
-            "贪": {"status": "strong", "evidence_span": opening[:8], "reason": "希望恢复沟通", "body_payoff": True, "body_payoff_span": "先听完", "revision_direction": ""},
+            "贪": {"status": "strong", "evidence_span": "把话藏得更深" if sentence_2 else opening[:8], "reason": "避免沟通进一步关闭", "body_payoff": True, "body_payoff_span": "先听完", "revision_direction": ""},
             "瞋": {"status": "absent", "evidence_span": "", "reason": "无需强加对立", "body_payoff": False, "body_payoff_span": "", "revision_direction": ""},
             "痴": {"status": "strong", "evidence_span": "不是因为他没话", "reason": "推翻没话的误读", "body_payoff": True, "body_payoff_span": "担心一开口就被否定", "revision_direction": ""},
             "慢": {"status": "absent", "evidence_span": "", "reason": "无需身份比较", "body_payoff": False, "body_payoff_span": "", "revision_direction": ""},
@@ -146,7 +160,7 @@ def _quality_result(packet: dict[str, object], *, verdict: str = "pass", revisio
 
 def test_v3_linear_roles_publish_the_same_double_reviewed_script(tmp_path: Path) -> None:
     store, task_id, _, root = _task(tmp_path)
-    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。"
+    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。家长再逼着问，只会让他把话藏得更深。"
     body = opening + "家长急着给答案，孩子感受到的却是自己的想法不重要。下一次他开口时，先听完，再问：你想让我听你说，还是和你一起想办法？"
     submit_creation_stage(store, task_id, stage_key="script_writing", result=_script_result(body, opening), knowledge_root=root)
     confirm_creation_stage(store, task_id, stage_key="script_writing")
@@ -223,9 +237,26 @@ def test_quality_review_is_read_only_and_drives_bounded_writer_revision(tmp_path
         prepare_creation_stage(store, task_id, stage_key="risk_review", knowledge_root=root)
 
 
+def test_quality_review_packet_checks_real_progression_and_spoken_directness(tmp_path: Path) -> None:
+    store, task_id, _, root = _task(tmp_path)
+    opening = "孩子越来越沉默，家长先别急着替他回答。"
+    body = opening + "先听完，再问他想被倾听还是一起想办法。"
+    submit_creation_stage(store, task_id, stage_key="script_writing", result=_script_result(body, opening), knowledge_root=root)
+    confirm_creation_stage(store, task_id, stage_key="script_writing")
+
+    packet = prepare_creation_stage(store, task_id, stage_key="quality_review", knowledge_root=root)
+    playbook = packet["knowledge"]["quality_review_playbook"]
+
+    assert "两个可分级变量" in playbook
+    assert "可见的因果桥梁" in playbook
+    assert "直接表达" in playbook
+    assert "自然的时间变化或累积递进可以保留" in playbook
+    assert "强行递进" in playbook
+
+
 def test_risk_revision_invalidates_old_quality_pass(tmp_path: Path) -> None:
     store, task_id, _, root = _task(tmp_path)
-    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。"
+    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。家长再逼着问，只会让他把话藏得更深。"
     risky = opening + "家长先听完，这样做一定能让孩子恢复正常，再问他想被倾听还是一起想办法。"
     submit_creation_stage(store, task_id, stage_key="script_writing", result=_script_result(risky, opening), knowledge_root=root)
     confirm_creation_stage(store, task_id, stage_key="script_writing")
@@ -311,7 +342,7 @@ def test_original_work_starts_at_creation_brief_without_material_selection(tmp_p
 
 def test_artificial_five_affliction_driver_blocks_quality_pass(tmp_path: Path) -> None:
     store, task_id, _, root = _task(tmp_path)
-    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。"
+    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。家长再逼着问，只会让他把话藏得更深。"
     body = opening + "家长急着给答案，孩子感受到的却是自己的想法不重要。下一次他开口时，先听完，再问他想被倾听还是一起想办法。"
     submit_creation_stage(store, task_id, stage_key="script_writing", result=_script_result(body, opening), knowledge_root=root)
     confirm_creation_stage(store, task_id, stage_key="script_writing")
@@ -328,3 +359,31 @@ def test_artificial_five_affliction_driver_blocks_quality_pass(tmp_path: Path) -
     submitted = submit_creation_stage(store, task_id, stage_key="quality_review", result=result, knowledge_root=root)
     assert submitted["output"]["status"] == "needs_retry"
     assert "quality pass cannot contain artificial five-affliction drivers" in submitted["output"]["validation"]["gate_failures"]
+
+
+def test_quality_pass_rejects_third_sentence_evidence_weak_sentence_two_and_sparse_keywords(tmp_path: Path) -> None:
+    store, task_id, _, root = _task(tmp_path)
+    opening = "孩子不愿意沟通，不是因为他没话，而是担心一开口就被否定。家长再逼着问，只会让他把话藏得更深。真正原因，看三个信号。"
+    body = opening + "家长先听完，再问他想被倾听还是一起想办法。"
+    submit_creation_stage(store, task_id, stage_key="script_writing", result=_script_result(body, opening), knowledge_root=root)
+    confirm_creation_stage(store, task_id, stage_key="script_writing")
+    packet = prepare_creation_stage(store, task_id, stage_key="quality_review", knowledge_root=root)
+    result = _quality_result(packet)
+    result["opening_scope_review"]["sentence_2_strength"] = "weak"
+    result["opening_scope_review"]["high_stimulus_keywords"] = ["孩子", "沟通", "被否定"]
+    result["five_affliction_review"]["疑"] = {
+        "status": "strong",
+        "evidence_span": "看三个信号",
+        "reason": "把第三句的信息缺口错算成开头命中",
+        "body_payoff": True,
+        "body_payoff_span": "先听完",
+        "revision_direction": "把强信息缺口前置到前两句",
+    }
+
+    submitted = submit_creation_stage(store, task_id, stage_key="quality_review", result=result, knowledge_root=root)
+    failures = submitted["output"]["validation"]["gate_failures"]
+
+    assert submitted["output"]["status"] == "needs_retry"
+    assert "five_affliction_review.疑.evidence_span must quote opening sentence one or two" in failures
+    assert "quality pass requires both opening sentences to be strong" in failures
+    assert "quality pass requires at least four distinct high-stimulus keywords in the first two sentences" in failures

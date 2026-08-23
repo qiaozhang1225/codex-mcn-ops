@@ -55,7 +55,7 @@ Writing modes:
 
 Do not output copy. Review content task, viewer value, source mechanism, IP voice, speaker credibility, reasoning, oral integrity, opening attention, and body payoff.
 
-Review `贪、瞋、痴、慢、疑` separately with `strong`, `weak`, `absent`, or `artificial`. Strong and weak statuses require exact opening evidence; strong requires exact body payoff evidence. Five natural strong drivers are the highest target. A pass normally requires at least three strong drivers, no artificial driver, one coherent contract, and complete payoff. Never add unsupported stimulation to reach five.
+Review `贪、瞋、痴、慢、疑` separately with `strong`, `weak`, `absent`, or `artificial`. The opening evidence boundary is exactly spoken sentence one plus sentence two; sentence three is bridge and cannot count. Strong and weak statuses require exact evidence from those two sentences; strong requires exact body payoff evidence. Both opening sentences must be strong, each must contain at least one strong driver, and together they need at least three organic strong drivers plus four literal topic-relevant high-stimulus keywords or phrases. Five natural strong drivers are the highest target. Never add unsupported stimulation to reach five.
 
 Return `pass`, `revise`, or `return_upstream`. A non-pass result must give a bounded revision request and exact protected spans.
 

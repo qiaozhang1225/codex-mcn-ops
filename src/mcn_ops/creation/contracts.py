@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -103,10 +104,10 @@ def stage_contract(stage_key: str) -> dict[str, Any]:
         "quality_review": {
             "required": [
                 "reviewed_script_run_id", "reviewed_body_hash", "verdict", "quality_dimensions", "five_affliction_review",
-                "source_mechanism_review", "body_contract_review", "protected_elements", "failed_dimensions", "revision_request",
+                "opening_scope_review", "source_mechanism_review", "body_contract_review", "protected_elements", "failed_dimensions", "revision_request",
             ],
             "enums": {"verdict": sorted(REVIEW_VERDICTS)},
-            "gate": "Quality Review is read-only. All five drivers require evidence-based review; a pass normally needs at least three strong, no artificial driver, and complete body payoff.",
+            "gate": "Quality Review is read-only. Opening evidence is limited to spoken sentences one and two; both must be strong, each must carry strong evidence, and together they need at least three strong organic drivers, four literal high-stimulus keywords, no artificial driver, and complete body payoff.",
         },
         "risk_review": {
             "required": ["reviewed_script_run_id", "reviewed_body_hash", "verdict", "issues", "overall_risk", "revision_request"],
@@ -180,6 +181,11 @@ def response_template(stage_key: str) -> dict[str, Any]:
         },
         "quality_review": {
             "reviewed_script_run_id": "", "reviewed_body_hash": "", "verdict": "pass", "quality_dimensions": {},
+            "opening_scope_review": {
+                "opening_sentence_1": "", "opening_sentence_2": "", "bridge_starts_at_sentence": 3,
+                "sentence_1_hook_task": "", "sentence_2_hook_task": "", "sentence_1_strength": "strong",
+                "sentence_2_strength": "strong", "high_stimulus_keywords": [],
+            },
             "five_affliction_review": {
                 **{driver: {"status": "absent", "evidence_span": "", "reason": "", "body_payoff": False, "body_payoff_span": "", "revision_direction": ""} for driver in AFFLICTION_DRIVERS},
                 "coherent_body_contract": True, "rationale_for_not_forcing_missing": "",
@@ -448,7 +454,7 @@ def _validate_quality_review(result: dict[str, Any], packet: dict[str, Any], str
     verdict = result.get("verdict")
     if verdict not in REVIEW_VERDICTS:
         structural.append("verdict is invalid")
-    for field in ["quality_dimensions", "five_affliction_review", "source_mechanism_review", "body_contract_review"]:
+    for field in ["quality_dimensions", "opening_scope_review", "five_affliction_review", "source_mechanism_review", "body_contract_review"]:
         if not isinstance(result.get(field), dict):
             structural.append(f"{field} must be an object")
     for field in ["protected_elements", "failed_dimensions"]:
@@ -457,7 +463,34 @@ def _validate_quality_review(result: dict[str, Any], packet: dict[str, Any], str
     review = result.get("five_affliction_review") or {}
     opening = str(script.get("opening") or "")
     body = str(script.get("body") or "")
+    sentences = [part.strip() for part in re.findall(r".+?(?:[。！？?!]+|$)", opening) if part.strip()]
+    sentence_1 = sentences[0] if sentences else ""
+    sentence_2 = sentences[1] if len(sentences) > 1 else ""
+    opening_evidence_scope = sentence_1 + sentence_2
+    scope_review = result.get("opening_scope_review") or {}
+    if scope_review.get("opening_sentence_1") != sentence_1:
+        gates.append("opening_scope_review.opening_sentence_1 must equal spoken sentence one")
+    if scope_review.get("opening_sentence_2") != sentence_2:
+        gates.append("opening_scope_review.opening_sentence_2 must equal spoken sentence two")
+    if scope_review.get("bridge_starts_at_sentence") != 3:
+        gates.append("opening_scope_review.bridge_starts_at_sentence must equal 3")
+    for field in ["sentence_1_hook_task", "sentence_2_hook_task"]:
+        if not str(scope_review.get(field) or "").strip():
+            structural.append(f"opening_scope_review.{field} must not be empty")
+    for field in ["sentence_1_strength", "sentence_2_strength"]:
+        if scope_review.get(field) not in {"strong", "weak", "absent"}:
+            structural.append(f"opening_scope_review.{field} is invalid")
+    keywords = scope_review.get("high_stimulus_keywords")
+    if not isinstance(keywords, list):
+        structural.append("opening_scope_review.high_stimulus_keywords must be a list")
+        keywords = []
+    normalized_keywords = {str(keyword).strip() for keyword in keywords if len(str(keyword).strip()) >= 2}
+    for keyword in normalized_keywords:
+        if keyword not in opening_evidence_scope:
+            gates.append(f"opening high-stimulus keyword must quote sentence one or two: {keyword}")
     strong_count = 0
+    sentence_1_strong_count = 0
+    sentence_2_strong_count = 0
     artificial = []
     for driver in AFFLICTION_DRIVERS:
         item = review.get(driver)
@@ -469,10 +502,14 @@ def _validate_quality_review(result: dict[str, Any], packet: dict[str, Any], str
             structural.append(f"five_affliction_review.{driver}.status is invalid")
             continue
         evidence = str(item.get("evidence_span") or "")
-        if status in {"strong", "weak", "artificial"} and (not evidence or evidence not in opening):
-            gates.append(f"five_affliction_review.{driver}.evidence_span must quote the opening")
+        if status in {"strong", "weak", "artificial"} and (not evidence or evidence not in opening_evidence_scope):
+            gates.append(f"five_affliction_review.{driver}.evidence_span must quote opening sentence one or two")
         if status == "strong":
             strong_count += 1
+            if evidence and evidence in sentence_1:
+                sentence_1_strong_count += 1
+            if evidence and evidence in sentence_2:
+                sentence_2_strong_count += 1
             payoff = str(item.get("body_payoff_span") or "")
             if item.get("body_payoff") is not True or not payoff or payoff not in body:
                 gates.append(f"five_affliction_review.{driver} strong status requires an exact body payoff")
@@ -480,6 +517,14 @@ def _validate_quality_review(result: dict[str, Any], packet: dict[str, Any], str
             artificial.append(driver)
     review["derived_active_driver_count"] = strong_count
     if verdict == "pass":
+        if len(sentences) < 2:
+            gates.append("quality pass requires two spoken opening sentences")
+        if scope_review.get("sentence_1_strength") != "strong" or scope_review.get("sentence_2_strength") != "strong":
+            gates.append("quality pass requires both opening sentences to be strong")
+        if sentence_1_strong_count < 1 or sentence_2_strong_count < 1:
+            gates.append("quality pass requires at least one strong five-affliction evidence span in each opening sentence")
+        if len(normalized_keywords) < 4:
+            gates.append("quality pass requires at least four distinct high-stimulus keywords in the first two sentences")
         if strong_count < 3:
             gates.append("quality pass normally requires at least three strong five-affliction drivers")
         if artificial:
