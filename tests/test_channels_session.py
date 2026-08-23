@@ -363,8 +363,12 @@ def test_refresh_page_is_bound_to_current_session_generation(tmp_path: Path) -> 
     controller, store, _task_id, fake = _controller(tmp_path)
     opened = controller.ensure_active()
     result = controller.refresh_page()
+    reused = controller.refresh_page()
     assert result["action"] == "refresh"
-    refresh_call = [call for call in fake.calls if call["action"] == "Refresh"][-1]
+    assert reused["reused"] is True
+    refresh_calls = [call for call in fake.calls if call["action"] == "Refresh"]
+    assert len(refresh_calls) == 1
+    refresh_call = refresh_calls[-1]
     assert refresh_call["session_id"] == opened["id"]
     assert refresh_call["expected_generation"] == 1
     events = store.list_channels_acquisition_events(session_id=opened["id"])

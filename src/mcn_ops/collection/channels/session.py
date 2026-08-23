@@ -422,6 +422,18 @@ class ChannelsAcquisitionController:
     def refresh_page(self) -> dict[str, Any]:
         session = self._require_open_session()
         generation = _lease_generation(session)
+        prior_events = self.store.list_channels_acquisition_events(session_id=session["id"])
+        if any(
+            event["event_type"] == "page_refreshed"
+            and int(event.get("payload", {}).get("lease_generation") or 0) == generation
+            for event in prior_events
+        ):
+            return {
+                "ok": True,
+                "action": "refresh",
+                "reused": True,
+                "status": {"session_id": session["id"], "generation": generation},
+            }
         result = self.transport.run(
             "Refresh",
             session_id=session["id"],
