@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Open", "Renew", "Status", "Close", "Recover")]
+    [ValidateSet("Open", "Renew", "Status", "Close", "Recover", "Refresh")]
     [string]$Action,
 
     [string]$SessionId = "",
@@ -72,7 +72,12 @@ function New-WxLeaseRecord {
 }
 
 function Assert-WxBootstrapReady {
-    foreach ($taskName in @($script:WxWorkerTaskName, $script:WxWatchdogTaskName)) {
+    foreach ($taskName in @(
+        $script:WxWorkerTaskName,
+        $script:WxInteractiveCleanupTaskName,
+        $script:WxRefreshTaskName,
+        $script:WxWatchdogTaskName
+    )) {
         if (!(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
             throw "required scheduled task is missing: $taskName; run bootstrap first"
         }
@@ -80,14 +85,24 @@ function Assert-WxBootstrapReady {
 }
 
 function Start-WxPinnedWorkerTask {
-    if (Get-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue) {
+    $workerTask = Get-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue
+    if ($workerTask -and [string]$workerTask.State -eq "Running") {
         Stop-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue
     }
-    Start-ScheduledTask -TaskName $script:WxWorkerTaskName
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    & schtasks.exe /Run /TN $script:WxWorkerTaskName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to dispatch the pinned Channels worker task"
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
     do {
         Start-Sleep -Milliseconds 500
-        if ((Get-WxPinnedWorkerProcesses).Count -gt 0) {
+        $startingLease = Read-WxLease
+        $startingStatus = Get-WxSanitizedStatus -Lease $startingLease
+        if (
+            [int]$startingStatus.worker_process_count -eq 1 -and
+            [int]$startingStatus.current_user_certificate_count -eq 1 -and
+            [int]$startingStatus.listener_count -gt 0
+        ) {
             return
         }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
@@ -180,7 +195,10 @@ function Invoke-WxOpen {
             $lease = New-WxLeaseRecord -TaskId $taskId -Generation 1 -State "provisioning" -ExpiresAt $expiresAt
             Write-WxAtomicJson -Path $script:WxLeasePath -Value $lease
             try {
-                Install-WxPinnedCertificate
+                # Root-store installation must run in the interactive qiaoz
+                # session. SSH is non-interactive and Windows rejects the
+                # protected CurrentUser Root write with ERROR_NOT_SUPPORTED.
+                Assert-WxPinnedArtifacts
                 Write-WxWorkerConfig -Payload $payload
             } catch {
                 $lease.state = "degraded"
@@ -286,6 +304,54 @@ function Invoke-WxStatus {
     }
 }
 
+function Invoke-WxRefresh {
+    Assert-WxSessionArgument
+    Assert-WxGenerationArgument
+    $lease = Read-WxLease
+    if ($null -eq $lease) {
+        throw "Channels session lease is missing"
+    }
+    Assert-WxSessionIdentity -Lease $lease -SessionId $SessionId -ExpectedGeneration $ExpectedGeneration
+    if ([string]$lease.state -ne "active") {
+        throw "Channels page refresh requires an active session"
+    }
+    $status = Get-WxSanitizedStatus -Lease $lease
+    if (
+        [int]$status.current_user_certificate_count -ne 1 -or
+        [int]$status.local_machine_certificate_count -ne 0 -or
+        [int]$status.worker_process_count -ne 1
+    ) {
+        throw "Channels page refresh requires a healthy worker session"
+    }
+    if (Test-Path -LiteralPath $script:WxRefreshResultPath) {
+        Remove-Item -LiteralPath $script:WxRefreshResultPath -Force
+    }
+    & schtasks.exe /Run /TN $script:WxRefreshTaskName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to dispatch the pinned WeChat Channels refresh task"
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 250
+        if (Test-Path -LiteralPath $script:WxRefreshResultPath) {
+            $refresh = Get-Content -LiteralPath $script:WxRefreshResultPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if (
+                [bool]$refresh.ok -and
+                [string]$refresh.session_id -ceq $SessionId -and
+                [long]$refresh.generation -eq $ExpectedGeneration
+            ) {
+                return [ordered]@{
+                    ok = $true
+                    action = "refresh"
+                    refreshed_at = [string]$refresh.refreshed_at
+                    status = Get-WxSanitizedStatus -Lease $lease
+                }
+            }
+        }
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "pinned WeChat Channels refresh did not complete"
+}
+
 function Invoke-WxClose {
     Assert-WxSessionArgument
     Assert-WxGenerationArgument
@@ -345,7 +411,7 @@ function Invoke-WxRecover {
             -ExpiresAt $expiresAt
         Write-WxAtomicJson -Path $script:WxLeasePath -Value $recovering
         try {
-            Install-WxPinnedCertificate
+            Assert-WxPinnedArtifacts
             Write-WxWorkerConfig -Payload $payload
         } catch {
             $recovering.state = "degraded"
@@ -399,6 +465,7 @@ if ($Action -in @("Open", "Recover")) {
             "Renew" { Invoke-WxRenew }
             "Status" { Invoke-WxStatus }
             "Close" { Invoke-WxClose }
+            "Refresh" { Invoke-WxRefresh }
         }
     } finally {
         Exit-WxSessionMutex -Mutex $mutex

@@ -89,6 +89,8 @@ class ChannelsSessionGuard(Protocol):
 
     def ensure_active(self) -> dict[str, Any]: ...
 
+    def refresh_page(self) -> dict[str, Any]: ...
+
 
 class ChannelsRemoteProvider:
     provider_name = "wechat_channels_remote"
@@ -310,6 +312,12 @@ class ChannelsRemoteProvider:
             allowed_worker_ids={worker_id},
         )
         await hub.start(self.config.host, self.config.port, ssl_context=ssl_context)
+        if self.session_guard is not None:
+            try:
+                self.session_guard.refresh_page()
+            except Exception:
+                await hub.stop()
+                raise
         return hub, ssl_context
 
 

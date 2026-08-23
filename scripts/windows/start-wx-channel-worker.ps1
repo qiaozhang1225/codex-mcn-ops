@@ -17,12 +17,31 @@ try {
         throw "Channels worker cannot start with an expired lease"
     }
     Assert-WxPinnedArtifacts
+    if (!(Test-Path -LiteralPath $script:WxConfigPath)) {
+        throw "Channels worker config is missing"
+    }
+} finally {
+    Exit-WxSessionMutex -Mutex $mutex
+}
+
+# Windows protects CurrentUser\Root writes with an interactive confirmation.
+# This script is intentionally launched by the pinned Interactive Scheduled
+# Task, while the SSH session manager remains non-interactive.
+Install-WxPinnedCertificate
+
+$mutex = $null
+try {
+    $mutex = Enter-WxSessionMutex
+    $lease = Read-WxLease
+    if ($null -eq $lease -or [string]$lease.state -notin @("provisioning", "active")) {
+        throw "Channels worker lease changed while the certificate was installed"
+    }
+    if (Test-WxLeaseExpired -Lease $lease) {
+        throw "Channels worker lease expired while the certificate was installed"
+    }
     $certificateCounts = Get-WxCertificateCounts
     if ([int]$certificateCounts.current_user -ne 1 -or [int]$certificateCounts.local_machine -ne 0) {
         throw "Channels worker cannot start without the isolated CurrentUser certificate"
-    }
-    if (!(Test-Path -LiteralPath $script:WxConfigPath)) {
-        throw "Channels worker config is missing"
     }
     foreach ($process in (Get-WxPinnedWorkerProcesses)) {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop

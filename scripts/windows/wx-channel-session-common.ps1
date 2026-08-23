@@ -5,6 +5,9 @@ $script:WxConfigPath = Join-Path $script:WxWorkDir "config.yaml"
 $script:WxCertificatePath = Join-Path $script:WxWorkDir "SunnyRoot-poc.cer"
 $script:WxWorkerPath = Join-Path $script:WxWorkDir "wx_channel_cloud_hardened_v5.6.9.exe"
 $script:WxWorkerTaskName = "CodexWxChannelWorker"
+$script:WxInteractiveCleanupTaskName = "CodexWxChannelInteractiveCleanup"
+$script:WxRefreshTaskName = "CodexWxChannelRefresh"
+$script:WxRefreshResultPath = Join-Path $script:WxSessionDir "refresh-result.json"
 $script:WxWatchdogTaskName = "CodexWxChannelLeaseGuard"
 $script:WxMutexName = "Global\CodexWxChannelSessionLeaseV1"
 $script:WxExpectedCertificateSha256 = "1A61D4F74DC31D27630B25E37AAF46C364955EDC7A6EA11EB20E4B6B05114E04"
@@ -192,6 +195,23 @@ function Remove-WxPinnedCertificate {
     }
 }
 
+function Start-WxInteractiveCleanupTask {
+    & schtasks.exe /Run /TN $script:WxInteractiveCleanupTaskName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to dispatch the interactive Channels cleanup task"
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $counts = Get-WxCertificateCounts
+        $task = Get-ScheduledTask -TaskName $script:WxInteractiveCleanupTaskName -ErrorAction SilentlyContinue
+        if ([int]$counts.current_user -eq 0 -and $task -and [string]$task.State -ne "Running") {
+            return
+        }
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "interactive Channels certificate cleanup did not complete"
+}
+
 function Assert-WxSecretValue {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
@@ -249,7 +269,7 @@ enable_log_interception: false
 cloud_enabled: true
 cloud_hub_url: "$hubUrl"
 cloud_secret: "$cloudSecret"
-machine_id: "workstation-channels-01"
+machine_id: "DEV-IyZU9C5DDMKxsY36"
 secret_token: "$secretToken"
 allowed_origins:
   - "https://channels.weixin.qq.com"
@@ -274,7 +294,7 @@ enable_log_interception: false
 cloud_enabled: false
 cloud_hub_url: ""
 cloud_secret: ""
-machine_id: "workstation-channels-01"
+machine_id: "DEV-IyZU9C5DDMKxsY36"
 secret_token: ""
 allowed_origins:
   - "https://channels.weixin.qq.com"
@@ -295,6 +315,17 @@ function Get-WxSanitizedStatus {
     }
     $counts = Get-WxCertificateCounts
     $workerProcesses = Get-WxPinnedWorkerProcesses
+    $workerTask = Get-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue
+    $workerCount = if ($workerProcesses.Count -gt 0) {
+        $workerProcesses.Count
+    } elseif ($workerTask -and [string]$workerTask.State -eq "Running") {
+        # The interactive task runs elevated. A UAC-filtered SSH token cannot
+        # read its ExecutablePath, but the pinned task remains Running for the
+        # exact lifetime of the worker wrapper.
+        1
+    } else {
+        0
+    }
     $listeners = @(
         Get-NetTCPConnection -LocalPort 2025, 2026 -State Listen -ErrorAction SilentlyContinue
     )
@@ -308,7 +339,7 @@ function Get-WxSanitizedStatus {
         expired = if ($null -ne $Lease) { Test-WxLeaseExpired -Lease $Lease } else { $false }
         current_user_certificate_count = [int]$counts.current_user
         local_machine_certificate_count = [int]$counts.local_machine
-        worker_process_count = $workerProcesses.Count
+        worker_process_count = [int]$workerCount
         listener_count = $listeners.Count
         firewall_block_enabled = [bool](
             Get-NetFirewallRule -Name "Codex-WxChannel-PoC-Block-Inbound" -ErrorAction SilentlyContinue |
@@ -341,6 +372,9 @@ function Invoke-WxPinnedCleanup {
         if (Get-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue) {
             Stop-ScheduledTask -TaskName $script:WxWorkerTaskName -ErrorAction SilentlyContinue
         }
+        if (Get-ScheduledTask -TaskName $script:WxRefreshTaskName -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $script:WxRefreshTaskName -ErrorAction SilentlyContinue
+        }
         $workerProcesses = Get-WxPinnedWorkerProcesses
         if ($workerProcesses.Count -gt 0) {
             if (!(Test-Path -LiteralPath $script:WxWorkerPath)) {
@@ -353,8 +387,11 @@ function Invoke-WxPinnedCleanup {
                 Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
             }
         }
-        Remove-WxPinnedCertificate
+        Start-WxInteractiveCleanupTask
         Write-WxSafeConfig
+        if (Test-Path -LiteralPath $script:WxRefreshResultPath) {
+            Remove-Item -LiteralPath $script:WxRefreshResultPath -Force
+        }
     } catch {
         $failedLease = [ordered]@{
             schema_version = 1

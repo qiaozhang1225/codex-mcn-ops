@@ -60,6 +60,10 @@ class FakeWindowsTransport:
             raise ChannelsSessionTimeoutError(f"fake {action} timeout")
         if action == "Status":
             return {"ok": True, "action": "status", "status": self._status()}
+        if action == "Refresh":
+            assert self.remote is not None
+            assert expected_generation == self.remote["generation"]
+            return {"ok": True, "action": "refresh", "status": self._status()}
         if action == "Open":
             assert session_id
             assert payload
@@ -170,7 +174,7 @@ def test_config_defaults_match_the_pinned_windows_tool_host() -> None:
     config = ChannelsAcquisitionConfig.from_env({})
     assert config.windows_host == "192.168.3.112"
     assert config.windows_user == "qiaoz"
-    assert config.worker_id == "workstation-channels-01"
+    assert config.worker_id == "DEV-IyZU9C5DDMKxsY36"
     assert config.ssh_key_path == DEFAULT_SSH_KEY
     assert config.known_hosts_path == DEFAULT_KNOWN_HOSTS
 
@@ -355,6 +359,18 @@ def test_recover_advances_generation_when_remote_health_is_degraded(tmp_path: Pa
     assert [call["action"] for call in fake.calls].count("Recover") == 1
 
 
+def test_refresh_page_is_bound_to_current_session_generation(tmp_path: Path) -> None:
+    controller, store, _task_id, fake = _controller(tmp_path)
+    opened = controller.ensure_active()
+    result = controller.refresh_page()
+    assert result["action"] == "refresh"
+    refresh_call = [call for call in fake.calls if call["action"] == "Refresh"][-1]
+    assert refresh_call["session_id"] == opened["id"]
+    assert refresh_call["expected_generation"] == 1
+    events = store.list_channels_acquisition_events(session_id=opened["id"])
+    assert events[-1]["event_type"] == "page_refreshed"
+
+
 def test_provider_calls_guard_before_every_ephemeral_hub_start(monkeypatch) -> None:
     class Guard:
         worker_id = "workstation-channels-01"
@@ -362,10 +378,15 @@ def test_provider_calls_guard_before_every_ephemeral_hub_start(monkeypatch) -> N
 
         def __init__(self) -> None:
             self.calls = 0
+            self.refresh_calls = 0
 
         def ensure_active(self) -> dict:
             self.calls += 1
             return {"status": "active"}
+
+        def refresh_page(self) -> dict:
+            self.refresh_calls += 1
+            return {"ok": True}
 
     hubs: list = []
 
@@ -390,6 +411,7 @@ def test_provider_calls_guard_before_every_ephemeral_hub_start(monkeypatch) -> N
     asyncio.run(provider._start_hub())
     asyncio.run(provider._start_hub())
     assert guard.calls == 2
+    assert guard.refresh_calls == 2
     assert [hub.shared_secret for hub in hubs] == ["guard-secret", "guard-secret"]
 
 

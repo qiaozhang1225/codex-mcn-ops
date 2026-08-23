@@ -13,8 +13,10 @@ $requiredScripts = @(
     "wx-channel-session-common.ps1",
     "manage-wx-channel-session.ps1",
     "cleanup-wx-channel-session.ps1",
+    "interactive-cleanup-wx-channel-session.ps1",
     "watch-wx-channel-session-lease.ps1",
-    "start-wx-channel-worker.ps1"
+    "start-wx-channel-worker.ps1",
+    "refresh-wechat-channels.ps1"
 )
 foreach ($scriptName in $requiredScripts) {
     $scriptPath = Join-Path $script:WxWorkDir $scriptName
@@ -72,6 +74,38 @@ try {
         -Principal $principal `
         -Settings $workerSettings | Out-Null
 
+    $interactiveCleanupAction = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"D:\wx-channel-poc\interactive-cleanup-wx-channel-session.ps1`""
+    $interactiveCleanupSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    if (Get-ScheduledTask -TaskName $script:WxInteractiveCleanupTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $script:WxInteractiveCleanupTaskName -Confirm:$false
+    }
+    Register-ScheduledTask `
+        -TaskName $script:WxInteractiveCleanupTaskName `
+        -Action $interactiveCleanupAction `
+        -Principal $principal `
+        -Settings $interactiveCleanupSettings | Out-Null
+
+    $refreshAction = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"D:\wx-channel-poc\refresh-wechat-channels.ps1`""
+    $refreshSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+    if (Get-ScheduledTask -TaskName $script:WxRefreshTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $script:WxRefreshTaskName -Confirm:$false
+    }
+    Register-ScheduledTask `
+        -TaskName $script:WxRefreshTaskName `
+        -Action $refreshAction `
+        -Principal $principal `
+        -Settings $refreshSettings | Out-Null
+
     $watchdogAction = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
         -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"D:\wx-channel-poc\watch-wx-channel-session-lease.ps1`""
@@ -102,6 +136,8 @@ try {
         ok = $true
         action = "bootstrap"
         worker_task = $script:WxWorkerTaskName
+        interactive_cleanup_task = $script:WxInteractiveCleanupTaskName
+        refresh_task = $script:WxRefreshTaskName
         watchdog_task = $script:WxWatchdogTaskName
         watchdog_interval_seconds = 60
         interactive_user = $InteractiveUser

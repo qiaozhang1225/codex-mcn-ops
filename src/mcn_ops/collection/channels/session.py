@@ -16,7 +16,7 @@ from ..task_contracts import ChannelsSessionStatus
 
 DEFAULT_WINDOWS_HOST = "192.168.3.112"
 DEFAULT_WINDOWS_USER = "qiaoz"
-DEFAULT_WORKER_ID = "workstation-channels-01"
+DEFAULT_WORKER_ID = "DEV-IyZU9C5DDMKxsY36"
 DEFAULT_HUB_URL = "ws://192.168.3.120:18081/ws/client"
 DEFAULT_SSH_KEY = Path("/Users/qiaoz-macmini/.ssh/codex_windows_collector_ed25519")
 DEFAULT_KNOWN_HOSTS = Path(
@@ -67,6 +67,8 @@ class SessionGuard(Protocol):
     def shared_secret(self) -> str: ...
 
     def ensure_active(self) -> dict[str, Any]: ...
+
+    def refresh_page(self) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -198,7 +200,7 @@ class WindowsSshTransport:
         payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_action = str(action).strip().title()
-        if normalized_action not in {"Open", "Renew", "Status", "Close", "Recover"}:
+        if normalized_action not in {"Open", "Renew", "Status", "Close", "Recover", "Refresh"}:
             raise ValueError(f"unsupported Channels session action: {action}")
         command = self._base_command()
         command.extend(["-Action", normalized_action])
@@ -416,6 +418,25 @@ class ChannelsAcquisitionController:
         if session is not None and bool(remote.get("session_present")):
             _require_remote_identity(session, remote)
         return {"session": session, "remote": remote}
+
+    def refresh_page(self) -> dict[str, Any]:
+        session = self._require_open_session()
+        generation = _lease_generation(session)
+        result = self.transport.run(
+            "Refresh",
+            session_id=session["id"],
+            expected_generation=generation,
+        )
+        remote = _status_body(result)
+        _require_remote_identity(session, remote)
+        if not _remote_is_healthy(remote):
+            raise ChannelsSessionError("Windows page refresh returned an unhealthy session")
+        self.store.append_channels_acquisition_event(
+            session_id=session["id"],
+            event_type="page_refreshed",
+            payload={"lease_generation": generation},
+        )
+        return result
 
     def close(
         self,
