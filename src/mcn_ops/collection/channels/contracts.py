@@ -5,12 +5,13 @@ import json
 import re
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 PROTOCOL_VERSION = "channels-lan-v1"
 REQUEST_ID_PREFIX = "clv1-"
 MAX_MESSAGE_BYTES = 10 * 1024 * 1024
+WorkerCapability = Literal["search", "feed", "profile"]
 
 
 class ChannelsProtocolError(ValueError):

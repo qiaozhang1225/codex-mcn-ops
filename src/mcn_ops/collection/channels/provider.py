@@ -80,9 +80,31 @@ class ChannelsRemoteProvider:
                 raise ProviderInputError("Channels search requires keyword")
             max_pages = _positive_int(supplied.get("max_pages"), default=1, label="max_pages")
             page_size = _positive_int(supplied.get("page_size"), default=20, label="page_size")
+            cursor = str(supplied.get("cursor") or supplied.get("next_marker") or "")
             return self.search_many(
-                [keyword], max_pages=max_pages, page_size=page_size
+                [keyword], max_pages=max_pages, page_size=page_size, cursor=cursor
             )[0]
+        if canonical == "author_feed":
+            platform_author_id = str(
+                supplied.get("platform_author_id")
+                or supplied.get("author_id")
+                or supplied.get("username")
+                or ""
+            ).strip()
+            if not platform_author_id:
+                raise ProviderInputError("Channels author feed requires platform_author_id")
+            return asyncio.run(
+                self._author_feed_once(
+                    platform_author_id=platform_author_id,
+                    cursor=str(supplied.get("cursor") or supplied.get("next_marker") or ""),
+                    max_pages=_positive_int(
+                        supplied.get("max_pages"), default=1, label="max_pages"
+                    ),
+                    page_size=_positive_int(
+                        supplied.get("page_size"), default=20, label="page_size"
+                    ),
+                )
+            )
         if canonical == "detail":
             return asyncio.run(self._detail_once(supplied))
         raise ProviderInputError(f"unsupported Channels method: {method_key}")
@@ -93,14 +115,22 @@ class ChannelsRemoteProvider:
         *,
         max_pages: int = 1,
         page_size: int = 20,
+        cursor: str = "",
     ) -> list[ProviderResult]:
         normalized_keywords = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
         if not normalized_keywords:
             raise ProviderInputError("at least one Channels keyword is required")
         if max_pages < 1 or page_size < 1:
             raise ProviderInputError("max_pages and page_size must be positive")
+        if cursor and len(normalized_keywords) != 1:
+            raise ProviderInputError("a Channels cursor can resume only one keyword")
         return asyncio.run(
-            self._search_many(normalized_keywords, max_pages=max_pages, page_size=page_size)
+            self._search_many(
+                normalized_keywords,
+                max_pages=max_pages,
+                page_size=page_size,
+                cursor=cursor,
+            )
         )
 
     def resolve_media_lease(self, detail_ref: dict[str, Any]) -> ChannelsMediaLease:
@@ -112,6 +142,7 @@ class ChannelsRemoteProvider:
         *,
         max_pages: int,
         page_size: int,
+        cursor: str,
     ) -> list[ProviderResult]:
         hub, ssl_context = await self._start_hub()
         del ssl_context
@@ -119,7 +150,7 @@ class ChannelsRemoteProvider:
             await hub.wait_for_worker(
                 self.config.worker_id,
                 timeout=self.config.wait_timeout,
-                require_search_ready=True,
+                required_capability="search",
             )
             return [
                 await _search_with_hub(
@@ -128,10 +159,39 @@ class ChannelsRemoteProvider:
                     keyword=keyword,
                     max_pages=max_pages,
                     page_size=page_size,
+                    cursor=cursor,
                     command_timeout=self.config.command_timeout,
                 )
                 for keyword in keywords
             ]
+        finally:
+            await hub.stop()
+
+    async def _author_feed_once(
+        self,
+        *,
+        platform_author_id: str,
+        cursor: str,
+        max_pages: int,
+        page_size: int,
+    ) -> ProviderResult:
+        hub, ssl_context = await self._start_hub()
+        del ssl_context
+        try:
+            await hub.wait_for_worker(
+                self.config.worker_id,
+                timeout=self.config.wait_timeout,
+                required_capability="feed",
+            )
+            return await _author_feed_with_hub(
+                hub,
+                worker_id=self.config.worker_id,
+                platform_author_id=platform_author_id,
+                cursor=cursor,
+                max_pages=max_pages,
+                page_size=page_size,
+                command_timeout=self.config.command_timeout,
+            )
         finally:
             await hub.stop()
 
@@ -142,7 +202,7 @@ class ChannelsRemoteProvider:
             await hub.wait_for_worker(
                 self.config.worker_id,
                 timeout=self.config.wait_timeout,
-                require_search_ready=True,
+                required_capability="profile",
             )
             detail = await _detail_with_hub(
                 hub,
@@ -175,7 +235,7 @@ class ChannelsRemoteProvider:
             await hub.wait_for_worker(
                 self.config.worker_id,
                 timeout=self.config.wait_timeout,
-                require_search_ready=True,
+                required_capability="profile",
             )
             detail = await _detail_with_hub(
                 hub,
@@ -214,10 +274,13 @@ async def _search_with_hub(
     max_pages: int,
     page_size: int,
     command_timeout: float,
+    cursor: str = "",
 ) -> ProviderResult:
     packages: list[dict[str, Any]] = []
     seen: set[str] = set()
-    next_marker = ""
+    initial_cursor = cursor
+    next_marker = cursor
+    seen_cursors = {cursor} if cursor else set()
     has_more = False
     stop_reason = "source_exhausted"
     captured_pages = 0
@@ -232,7 +295,7 @@ async def _search_with_hub(
                 "page_size": page_size,
             },
             timeout=command_timeout,
-            require_search_ready=True,
+            required_capability="search",
         )
         if not isinstance(data, dict) or not isinstance(data.get("list"), list):
             raise ProviderResponseError("Channels search returned an invalid list")
@@ -252,7 +315,13 @@ async def _search_with_hub(
             break
         if not marker:
             stop_reason = "cursor_missing"
+            next_marker = ""
             break
+        if marker in seen_cursors:
+            stop_reason = "cursor_cycle"
+            next_marker = ""
+            break
+        seen_cursors.add(marker)
         next_marker = marker
     else:
         stop_reason = "max_pages" if has_more else "source_exhausted"
@@ -260,12 +329,14 @@ async def _search_with_hub(
     paging = normalize_paging(
         {
             "has_next": has_more,
+            "cursor": next_marker if stop_reason == "max_pages" else None,
+            "next_cursor": next_marker if stop_reason == "max_pages" else None,
             "captured_pages": captured_pages,
             "captured_items": len(packages),
             "stop_reason": stop_reason,
-            "request_satisfied": source_exhausted or captured_pages >= max_pages,
+            "request_satisfied": stop_reason in {"source_exhausted", "max_pages"},
             "source_exhausted": source_exhausted,
-            "raw": {},
+            "raw": {"resumed_from_cursor": bool(initial_cursor)},
         },
         captured_items=len(packages),
     )
@@ -277,6 +348,171 @@ async def _search_with_hub(
         raw={},
         paging=paging,
     )
+
+
+async def _author_feed_with_hub(
+    hub: ChannelsHub,
+    *,
+    worker_id: str,
+    platform_author_id: str,
+    max_pages: int,
+    page_size: int,
+    command_timeout: float,
+    cursor: str = "",
+) -> ProviderResult:
+    packages: list[dict[str, Any]] = []
+    seen_work_ids: set[str] = set()
+    initial_cursor = cursor
+    next_marker = cursor
+    seen_cursors = {cursor} if cursor else set()
+    has_more = False
+    stop_reason = "pagination_unverified"
+    captured_pages = 0
+    for page in range(1, max_pages + 1):
+        data = await hub.call(
+            worker_id,
+            "api_call",
+            {
+                "key": "key:channels:feed_list",
+                "body": {
+                    "username": platform_author_id,
+                    "next_marker": next_marker,
+                    "page": page,
+                    "page_size": page_size,
+                },
+            },
+            timeout=command_timeout,
+            required_capability="feed",
+        )
+        items, marker, continuation = _parse_author_feed_response(data)
+        captured_pages += 1
+        for item in items:
+            package = _source_package(item)
+            work_id = str(package.get("work_id") or "")
+            if not work_id or work_id in seen_work_ids:
+                continue
+            seen_work_ids.add(work_id)
+            package["collection_notes"] = [
+                {"type": "author_feed", "platform_author_id": platform_author_id}
+            ]
+            packages.append(package)
+
+        has_more = continuation is True or (continuation is None and bool(marker))
+        if continuation is False:
+            # The pinned worker documents this flag, but its live author-feed
+            # terminal shape has not yet been captured on this installation.
+            stop_reason = "source_exhausted_unverified"
+            next_marker = ""
+            break
+        if continuation is None and not marker:
+            stop_reason = "pagination_unverified"
+            next_marker = ""
+            break
+        if not marker:
+            stop_reason = "cursor_missing"
+            next_marker = ""
+            break
+        if marker in seen_cursors:
+            stop_reason = "cursor_cycle"
+            next_marker = ""
+            break
+        seen_cursors.add(marker)
+        next_marker = marker
+    else:
+        stop_reason = "max_pages" if has_more else "pagination_unverified"
+
+    source_exhausted = False
+    paging = normalize_paging(
+        {
+            "has_next": has_more,
+            "cursor": next_marker if stop_reason == "max_pages" else None,
+            "next_cursor": next_marker if stop_reason == "max_pages" else None,
+            "captured_pages": captured_pages,
+            "captured_items": len(packages),
+            "stop_reason": stop_reason,
+            "request_satisfied": stop_reason == "max_pages",
+            "source_exhausted": source_exhausted,
+            "raw": {
+                "resumed_from_cursor": bool(initial_cursor),
+                "response_contract": "poc_fixture_only",
+            },
+        },
+        captured_items=len(packages),
+    )
+    return build_provider_result(
+        provider="wechat_channels_remote",
+        method_key="wechat_channels_author_feed",
+        endpoint="channels-lan://author-feed",
+        normalized={
+            "platform_author_id": platform_author_id,
+            "source_packages": packages,
+            "response_contract": "poc_fixture_only",
+            "capability_gate": {
+                "required_worker_capability": "feed",
+                "live_poc_verified": False,
+                "production_ready": False,
+            },
+        },
+        raw={},
+        paging=paging,
+    )
+
+
+def _parse_author_feed_response(
+    value: Any,
+) -> tuple[list[Any], str, bool | None]:
+    """Parse the pinned upstream's documented shape; live fixture validation is still required."""
+
+    error = _author_feed_error(value)
+    if error:
+        raise ProviderResponseError(f"Channels author feed returned an error: {error}")
+    payload = _find_author_feed_payload(value)
+    if payload is None:
+        raise ProviderResponseError("Channels author feed returned an unverified response shape")
+    items = payload.get("object")
+    if not isinstance(items, list):
+        raise ProviderResponseError("Channels author feed returned an invalid object list")
+    marker = str(payload.get("lastBuffer") or payload.get("lastBuff") or "")
+    raw_continuation = payload.get("continueFlag")
+    continuation: bool | None
+    if raw_continuation is None:
+        continuation = None
+    else:
+        try:
+            continuation = int(raw_continuation) != 0
+        except (TypeError, ValueError) as exc:
+            raise ProviderResponseError(
+                "Channels author feed returned an invalid continuation flag"
+            ) from exc
+    return items, marker, continuation
+
+
+def _author_feed_error(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    error_code = value.get("errCode")
+    if error_code not in (None, "", 0, "0"):
+        return str(value.get("errMsg") or error_code)
+    base_response = value.get("BaseResponse")
+    if isinstance(base_response, dict) and base_response.get("Ret") not in (None, "", 0, "0"):
+        return str(base_response.get("ErrMsg") or base_response.get("Ret"))
+    for key in ("data", "response"):
+        error = _author_feed_error(value.get(key))
+        if error:
+            return error
+    return ""
+
+
+def _find_author_feed_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("object"), list):
+        return value
+    for key in ("data", "response"):
+        found = _find_author_feed_payload(value.get(key))
+        if found is not None:
+            return found
+    return None
 
 
 async def _detail_with_hub(
@@ -309,7 +545,7 @@ async def _detail_with_hub(
             },
         },
         timeout=command_timeout,
-        require_search_ready=True,
+        required_capability="profile",
     )
     if not isinstance(data, dict):
         raise ProviderResponseError("Channels detail returned an invalid object")
@@ -391,6 +627,9 @@ def _canonical_method(method_key: str) -> str:
         "wechat_channels_detail": "detail",
         "channels_detail": "detail",
         "detail": "detail",
+        "wechat_channels_author_feed": "author_feed",
+        "channels_author_feed": "author_feed",
+        "author_feed": "author_feed",
     }
     return aliases.get(method_key.strip().lower(), method_key.strip().lower())
 

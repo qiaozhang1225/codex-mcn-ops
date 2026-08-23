@@ -27,6 +27,7 @@ def build_channels_registry(
                 "additionalProperties": False,
                 "properties": {
                     "keyword": {"type": "string"},
+                    "cursor": {"type": "string", "default": ""},
                     "max_pages": {"type": "integer", "default": 1},
                     "page_size": {"type": "integer", "default": 20},
                 },
@@ -36,6 +37,37 @@ def build_channels_registry(
                 "wechat_channels_search",
                 params={
                     "keyword": args["keyword"],
+                    "cursor": str(args.get("cursor") or ""),
+                    "max_pages": int(args.get("max_pages", 1)),
+                    "page_size": int(args.get("page_size", 20)),
+                },
+                use_cache=False,
+            ),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="channels_list_author_works",
+            description=(
+                "List public works for one WeChat Channels author. The response parser "
+                "requires live PoC fixture validation before production traversal."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "platform_author_id": {"type": "string"},
+                    "cursor": {"type": "string", "default": ""},
+                    "max_pages": {"type": "integer", "default": 1},
+                    "page_size": {"type": "integer", "default": 20},
+                },
+                "required": ["platform_author_id"],
+            },
+            handler=lambda args: provider.call(
+                "wechat_channels_author_feed",
+                params={
+                    "platform_author_id": args["platform_author_id"],
+                    "cursor": str(args.get("cursor") or ""),
                     "max_pages": int(args.get("max_pages", 1)),
                     "page_size": int(args.get("page_size", 20)),
                 },

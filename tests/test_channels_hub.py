@@ -13,6 +13,7 @@ from mcn_ops.collection.channels import (
     ChannelsRemoteError,
     ChannelsTimeoutError,
     ChannelsWorkerDisconnected,
+    ChannelsWorkerNotReady,
 )
 from mcn_ops.collection.channels.probe import run_search_probe
 from mcn_ops.collection.channels.matrix import SearchCase, parse_case, run_search_matrix
@@ -197,7 +198,8 @@ def test_hub_waits_for_search_ready_heartbeat() -> None:
                                 "api_ready": ready,
                                 "supports_search": ready,
                             },
-                            "timestamp": int(time.time()),
+                            # Freshness is based on server receipt time, not worker clock skew.
+                            "timestamp": 1,
                         }
                     )
 
@@ -211,6 +213,101 @@ def test_hub_waits_for_search_ready_heartbeat() -> None:
                 assert capabilities.supports_search is True
         finally:
             await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_hub_gates_each_declared_capability() -> None:
+    async def scenario() -> None:
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            assert action == "api_call"
+            return {"ok": True}
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            for capability in ("search", "feed", "profile"):
+                ready = await hub.wait_for_worker(
+                    "windows-01",
+                    timeout=1,
+                    required_capability=capability,
+                )
+                assert getattr(ready, f"supports_{capability}") is True
+            assert await hub.call(
+                "windows-01",
+                "api_call",
+                {"key": "key:channels:feed_list", "body": {}},
+                timeout=1,
+                required_capability="feed",
+            ) == {"ok": True}
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_hub_rejects_commands_after_server_received_heartbeat_expires() -> None:
+    async def scenario() -> None:
+        dispatched = False
+
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            nonlocal dispatched
+            dispatched = True
+            return {}
+
+        hub = ChannelsHub(
+            shared_secret="secret",
+            allowed_worker_ids={"windows-01"},
+            heartbeat_max_age_seconds=0.01,
+        )
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01",
+                timeout=1,
+                required_capability="search",
+            )
+            await asyncio.sleep(0.02)
+            with pytest.raises(ChannelsWorkerNotReady, match="generic commands.*fresh heartbeat"):
+                await hub.call(
+                    "windows-01",
+                    "search_videos",
+                    {"keyword": "AI"},
+                    timeout=1,
+                )
+            assert dispatched is False
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_hub_rejects_conflicting_legacy_and_generic_capability_flags() -> None:
+    async def scenario() -> None:
+        hub = ChannelsHub(shared_secret="secret")
+        with pytest.raises(ValueError, match="conflicts"):
+            await hub.wait_for_worker(
+                "windows-01",
+                timeout=0.01,
+                require_search_ready=True,
+                required_capability="feed",
+            )
 
     asyncio.run(scenario())
 

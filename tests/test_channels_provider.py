@@ -9,10 +9,16 @@ from mcn_ops.collection.channels.hub import ChannelsHub
 from mcn_ops.collection.channels.provider import (
     ChannelsRemoteConfig,
     ChannelsRemoteProvider,
+    _author_feed_with_hub,
     _search_with_hub,
     _source_package,
 )
-from mcn_ops.collection.douyin.errors import ProviderConfigError, ProviderInputError
+from mcn_ops.collection.channels.registry import build_channels_registry
+from mcn_ops.collection.douyin.errors import (
+    ProviderConfigError,
+    ProviderInputError,
+    ProviderResponseError,
+)
 from tests.helpers.channels_worker import MockChannelsWorker
 
 
@@ -125,3 +131,335 @@ def test_provider_fails_closed_for_insecure_lan_and_missing_keyword() -> None:
     )
     with pytest.raises(ProviderInputError, match="requires keyword"):
         provider.call("wechat_channels_search", params={"keyword": ""})
+
+
+def test_search_provider_resumes_from_cursor_and_returns_next_cursor() -> None:
+    async def scenario() -> None:
+        calls: list[dict[str, object]] = []
+
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            assert action == "search_videos"
+            calls.append(data)
+            return {
+                "list": [{"object": {"id": "work-2", "objectDesc": {}}}],
+                "next_marker": "page-3",
+                "has_more": True,
+            }
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="search"
+            )
+            result = await _search_with_hub(
+                hub,
+                worker_id="windows-01",
+                keyword="青春期孩子",
+                cursor="page-2",
+                max_pages=1,
+                page_size=20,
+                command_timeout=1,
+            )
+            assert calls[0]["next_marker"] == "page-2"
+            assert result["paging"]["next_cursor"] == "page-3"
+            assert result["paging"]["stop_reason"] == "max_pages"
+            assert result["paging"]["raw"]["resumed_from_cursor"] is True
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("returned_marker", "expected_reason"),
+    [("", "cursor_missing"), ("page-2", "cursor_cycle")],
+)
+def test_search_provider_fails_closed_for_invalid_cursor_progression(
+    returned_marker: str,
+    expected_reason: str,
+) -> None:
+    async def scenario() -> None:
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            return {"list": [], "next_marker": returned_marker, "has_more": True}
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="search"
+            )
+            result = await _search_with_hub(
+                hub,
+                worker_id="windows-01",
+                keyword="青春期孩子",
+                cursor="page-2",
+                max_pages=1,
+                page_size=20,
+                command_timeout=1,
+            )
+            assert result["paging"]["stop_reason"] == expected_reason
+            assert result["paging"]["request_satisfied"] is False
+            assert result["paging"]["next_cursor"] is None
+            assert result["paging"]["source_exhausted"] is False
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_author_feed_uses_documented_poc_shape_without_claiming_unverified_exhaustion() -> None:
+    async def scenario() -> None:
+        calls: list[dict[str, object]] = []
+
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            calls.append({"action": action, "data": data})
+            return {
+                "data": {
+                    "object": [
+                        {
+                            "id": "author-work-1",
+                            "contact": {
+                                "username": "finder-author-1",
+                                "nickname": "心理老师",
+                            },
+                            "objectDesc": {"description": "亲子沟通"},
+                            "likeCount": 2500,
+                        }
+                    ],
+                    "lastBuffer": "author-page-2",
+                }
+            }
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="feed"
+            )
+            result = await _author_feed_with_hub(
+                hub,
+                worker_id="windows-01",
+                platform_author_id="finder-author-1",
+                max_pages=1,
+                page_size=20,
+                command_timeout=1,
+            )
+            assert calls[0] == {
+                "action": "api_call",
+                "data": {
+                    "key": "key:channels:feed_list",
+                    "body": {
+                        "username": "finder-author-1",
+                        "next_marker": "",
+                        "page": 1,
+                        "page_size": 20,
+                    },
+                },
+            }
+            assert result["normalized"]["source_packages"][0]["work_id"] == "author-work-1"
+            assert result["normalized"]["response_contract"] == "poc_fixture_only"
+            assert result["normalized"]["capability_gate"] == {
+                "required_worker_capability": "feed",
+                "live_poc_verified": False,
+                "production_ready": False,
+            }
+            assert result["paging"]["next_cursor"] == "author-page-2"
+            assert result["paging"]["source_exhausted"] is False
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_author_feed_rejects_remote_business_error_before_parsing_items() -> None:
+    async def scenario() -> None:
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            return {
+                "errCode": 1001,
+                "errMsg": "finderUserPage unavailable",
+                "data": {"object": []},
+            }
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="feed"
+            )
+            with pytest.raises(ProviderResponseError, match="finderUserPage unavailable"):
+                await _author_feed_with_hub(
+                    hub,
+                    worker_id="windows-01",
+                    platform_author_id="finder-author-1",
+                    max_pages=1,
+                    page_size=20,
+                    command_timeout=1,
+                )
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_author_feed_requires_verified_terminal_signal_before_source_exhaustion() -> None:
+    async def scenario() -> None:
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            return {"data": {"object": [], "lastBuffer": ""}}
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="feed"
+            )
+            result = await _author_feed_with_hub(
+                hub,
+                worker_id="windows-01",
+                platform_author_id="finder-author-1",
+                max_pages=1,
+                page_size=20,
+                command_timeout=1,
+            )
+            assert result["paging"]["stop_reason"] == "pagination_unverified"
+            assert result["paging"]["request_satisfied"] is False
+            assert result["paging"]["source_exhausted"] is False
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_author_feed_documented_terminal_flag_remains_live_poc_gated() -> None:
+    async def scenario() -> None:
+        async def responder(action: str, data: dict[str, object]) -> dict[str, object]:
+            return {"data": {"object": [], "lastBuffer": "", "continueFlag": 0}}
+
+        hub = ChannelsHub(shared_secret="secret", allowed_worker_ids={"windows-01"})
+        await hub.start("127.0.0.1", 0)
+        worker = MockChannelsWorker(
+            uri=f"ws://127.0.0.1:{hub.listening_port}/ws/client",
+            secret="secret",
+            worker_id="windows-01",
+            responder=responder,
+        )
+        await worker.start()
+        try:
+            await hub.wait_for_worker(
+                "windows-01", timeout=1, required_capability="feed"
+            )
+            result = await _author_feed_with_hub(
+                hub,
+                worker_id="windows-01",
+                platform_author_id="finder-author-1",
+                max_pages=1,
+                page_size=20,
+                command_timeout=1,
+            )
+            assert result["paging"]["stop_reason"] == "source_exhausted_unverified"
+            assert result["paging"]["request_satisfied"] is False
+            assert result["paging"]["source_exhausted"] is False
+        finally:
+            await worker.stop()
+            await hub.stop()
+
+    asyncio.run(scenario())
+
+
+def test_channels_registry_forwards_search_and_author_cursors() -> None:
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def call(
+            self,
+            method_key: str,
+            params: dict[str, object] | None = None,
+            body: dict[str, object] | None = None,
+            use_cache: bool = True,
+        ) -> dict[str, object]:
+            del body, use_cache
+            self.calls.append((method_key, dict(params or {})))
+            return {"ok": True}
+
+    class UnusedTranscriber:
+        pass
+
+    provider = FakeProvider()
+    registry = build_channels_registry(
+        provider,  # type: ignore[arg-type]
+        transcription_provider=UnusedTranscriber(),  # type: ignore[arg-type]
+    )
+
+    registry.run(
+        "channels_search_videos",
+        {"keyword": "青春期孩子", "cursor": "search-page-2"},
+    )
+    registry.run(
+        "channels_list_author_works",
+        {
+            "platform_author_id": "finder-author-1",
+            "cursor": "author-page-2",
+        },
+    )
+
+    assert provider.calls == [
+        (
+            "wechat_channels_search",
+            {
+                "keyword": "青春期孩子",
+                "cursor": "search-page-2",
+                "max_pages": 1,
+                "page_size": 20,
+            },
+        ),
+        (
+            "wechat_channels_author_feed",
+            {
+                "platform_author_id": "finder-author-1",
+                "cursor": "author-page-2",
+                "max_pages": 1,
+                "page_size": 20,
+            },
+        ),
+    ]

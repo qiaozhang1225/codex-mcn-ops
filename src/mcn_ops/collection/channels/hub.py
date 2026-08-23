@@ -22,6 +22,7 @@ from .contracts import (
     ChannelsWorkerNotReady,
     CloudMessage,
     RemoteResponse,
+    WorkerCapability,
     WorkerCapabilities,
     decode_cloud_message,
     encode_cloud_message,
@@ -34,6 +35,7 @@ class _WorkerSession:
     worker_id: str
     connection: ServerConnection
     capabilities: WorkerCapabilities | None = None
+    heartbeat_received_at: float | None = None
     command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -45,12 +47,16 @@ class ChannelsHub:
         *,
         shared_secret: str,
         allowed_worker_ids: set[str] | None = None,
+        heartbeat_max_age_seconds: float = 60.0,
     ) -> None:
         shared_secret = shared_secret.strip()
         if not shared_secret:
             raise ValueError("shared_secret is required")
+        if heartbeat_max_age_seconds <= 0:
+            raise ValueError("heartbeat_max_age_seconds must be positive")
         self._secret = shared_secret
         self._allowed_worker_ids = set(allowed_worker_ids or [])
+        self._heartbeat_max_age_seconds = float(heartbeat_max_age_seconds)
         self._workers: dict[str, _WorkerSession] = {}
         self._pending: dict[str, tuple[str, asyncio.Future[Any]]] = {}
         self._worker_changed = asyncio.Condition()
@@ -101,16 +107,20 @@ class ChannelsHub:
         *,
         timeout: float,
         require_search_ready: bool = False,
+        required_capability: WorkerCapability | None = None,
     ) -> WorkerCapabilities:
+        capability = _resolve_required_capability(
+            require_search_ready=require_search_ready,
+            required_capability=required_capability,
+        )
+
         async def _wait() -> WorkerCapabilities:
             async with self._worker_changed:
                 while True:
-                    capabilities = self.worker_capabilities(worker_id)
-                    if capabilities is not None and (
-                        not require_search_ready
-                        or (capabilities.api_ready and capabilities.supports_search)
-                    ):
-                        return capabilities
+                    session = self._workers.get(worker_id)
+                    if session is not None and self._session_is_ready(session, capability):
+                        assert session.capabilities is not None
+                        return session.capabilities
                     await self._worker_changed.wait()
 
         try:
@@ -137,18 +147,21 @@ class ChannelsHub:
         *,
         timeout: float = 30.0,
         require_search_ready: bool = False,
+        required_capability: WorkerCapability | None = None,
     ) -> Any:
+        capability = _resolve_required_capability(
+            require_search_ready=require_search_ready,
+            required_capability=required_capability,
+        )
         session = self._workers.get(worker_id)
         if session is None:
             raise ChannelsWorkerDisconnected(f"worker {worker_id} is not connected")
-        if require_search_ready:
-            capabilities = session.capabilities
-            if capabilities is None or not capabilities.api_ready or not capabilities.supports_search:
-                raise ChannelsWorkerNotReady(f"worker {worker_id} cannot serve search commands")
+        self._require_session_ready(session, capability)
 
         async with session.command_lock:
             if self._workers.get(worker_id) is not session:
                 raise ChannelsWorkerDisconnected(f"worker {worker_id} reconnected before dispatch")
+            self._require_session_ready(session, capability)
             request_id = f"{REQUEST_ID_PREFIX}{uuid.uuid4().hex}"
             loop = asyncio.get_running_loop()
             future: asyncio.Future[Any] = loop.create_future()
@@ -221,6 +234,7 @@ class ChannelsHub:
     async def _handle_message(self, session: _WorkerSession, message: CloudMessage) -> None:
         if message.message_type == "heartbeat":
             session.capabilities = WorkerCapabilities.from_heartbeat(message)
+            session.heartbeat_received_at = time.monotonic()
             ack = CloudMessage(
                 message_id=f"ack-{message.message_id}",
                 message_type="heartbeat_ack",
@@ -252,6 +266,34 @@ class ChannelsHub:
             return
         raise ChannelsProtocolError(f"unsupported worker message type: {message.message_type}")
 
+    def _session_is_ready(
+        self,
+        session: _WorkerSession,
+        capability: WorkerCapability | None,
+    ) -> bool:
+        capabilities = session.capabilities
+        if capabilities is None or session.heartbeat_received_at is None:
+            return False
+        if time.monotonic() - session.heartbeat_received_at > self._heartbeat_max_age_seconds:
+            return False
+        if capability is None:
+            return True
+        if not capabilities.api_ready:
+            return False
+        return bool(getattr(capabilities, f"supports_{capability}"))
+
+    def _require_session_ready(
+        self,
+        session: _WorkerSession,
+        capability: WorkerCapability | None,
+    ) -> None:
+        if self._session_is_ready(session, capability):
+            return
+        command_type = capability or "generic"
+        raise ChannelsWorkerNotReady(
+            f"worker {session.worker_id} cannot serve {command_type} commands with a fresh heartbeat"
+        )
+
     async def _drop_worker(self, worker_id: str, reason: str) -> None:
         session = self._workers.pop(worker_id, None)
         if session is not None:
@@ -272,3 +314,15 @@ class ChannelsHub:
     async def _notify_worker_changed(self) -> None:
         async with self._worker_changed:
             self._worker_changed.notify_all()
+
+
+def _resolve_required_capability(
+    *,
+    require_search_ready: bool,
+    required_capability: WorkerCapability | None,
+) -> WorkerCapability | None:
+    if require_search_ready and required_capability not in (None, "search"):
+        raise ValueError("require_search_ready conflicts with required_capability")
+    if required_capability not in (None, "search", "feed", "profile"):
+        raise ValueError(f"unsupported worker capability: {required_capability}")
+    return "search" if require_search_ready else required_capability
