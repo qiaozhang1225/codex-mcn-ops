@@ -218,6 +218,8 @@ class WindowsSshTransport:
                 command,
                 input=stdin_text,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 check=False,
                 shell=False,

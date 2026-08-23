@@ -207,6 +207,9 @@ def test_ssh_transport_is_strict_and_sends_secrets_only_over_stdin(tmp_path: Pat
     assert cloud_secret in captured["input"]
     assert secret_token in captured["input"]
     assert captured["shell"] is False
+    assert captured["text"] is True
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
 
 
 def test_ssh_timeout_error_does_not_expose_secret(tmp_path: Path) -> None:
