@@ -181,16 +181,13 @@ function Install-WxPinnedCertificate {
 
 function Remove-WxPinnedCertificate {
     $counts = Get-WxCertificateCounts
+    if ([int]$counts.local_machine -gt 0) {
+        throw "refusing cleanup because the pinned SunnyNet certificate exists in LocalMachine Root"
+    }
     if ([int]$counts.current_user -gt 0) {
         & certutil.exe -user -delstore Root $script:WxExpectedCertificateThumbprint | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "failed to remove pinned SunnyNet certificate from CurrentUser Root"
-        }
-    }
-    if ([int]$counts.local_machine -gt 0) {
-        & certutil.exe -delstore Root $script:WxExpectedCertificateThumbprint | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "failed to remove pinned SunnyNet certificate from LocalMachine Root"
         }
     }
 }
