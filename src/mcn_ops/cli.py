@@ -66,6 +66,7 @@ from .migrations import (
     migrate_collection_task_orchestration_v1,
     migrate_material_inventory_v1,
 )
+from .original import OriginalWorkspace
 from .publisher import PublishRunner
 from .report import build_daily_report
 from .store import DEFAULT_DB_PATH, Store
@@ -223,6 +224,69 @@ def build_parser() -> argparse.ArgumentParser:
     create_knowledge_validate.add_argument("--role-id", required=True)
     create_knowledge_validate.add_argument("--knowledge-root", default="knowledge")
     create_knowledge_validate.add_argument("--json", action="store_true")
+
+    original = subparsers.add_parser("original", help="Knowledge-led original script creation")
+    original.add_argument("--knowledge-root", default="data/original-knowledge")
+    original_sub = original.add_subparsers(dest="original_command", required=True)
+    source = original_sub.add_parser("source", help="Manage complete private sources")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+    source_add = source_sub.add_parser("add")
+    source_add.add_argument("--role-id")
+    source_add.add_argument("--kind", required=True, choices=sorted(["viral_work", "domain_knowledge", "ip_knowledge", "ip_voice", "experience"]))
+    source_add.add_argument("--title", required=True)
+    source_add.add_argument("--origin", default="")
+    source_add.add_argument("--input", required=True, help="UTF-8 file containing the complete source")
+    source_import = source_sub.add_parser("import-material")
+    source_import.add_argument("--material-id", required=True)
+    source_import.add_argument("--role-id", required=True)
+    source_find = source_sub.add_parser("find")
+    source_find.add_argument("--role-id", required=True)
+    source_find.add_argument("--query", required=True)
+    source_find.add_argument("--limit", type=int, default=10)
+    source_read = source_sub.add_parser("read")
+    source_read.add_argument("--role-id", required=True)
+    source_read.add_argument("--source-id", required=True)
+    source_note = source_sub.add_parser("note")
+    source_note.add_argument("--source-id", required=True)
+    source_note.add_argument("--note", required=True)
+    source_note.add_argument("--quote", default="")
+    original_task = original_sub.add_parser("task", help="Create, prepare, submit, and accept original drafts")
+    original_task_sub = original_task.add_subparsers(dest="original_task_command", required=True)
+    original_new = original_task_sub.add_parser("new")
+    original_new.add_argument("--role-id", required=True)
+    original_new.add_argument("--topic", required=True)
+    original_new.add_argument("--platform", required=True, choices=list_platforms())
+    original_new.add_argument("--goal", default="")
+    original_new.add_argument("--outline", default="")
+    for name in ("show", "prepare", "submit", "accept"):
+        action = original_task_sub.add_parser(name)
+        action.add_argument("--task-id", required=True)
+        if name == "prepare":
+            action.add_argument("--source-id", action="append")
+        if name == "submit":
+            action.add_argument("--input", required=True, help="UTF-8 JSON response file")
+        if name == "accept":
+            action.add_argument("--draft-id", required=True)
+    original_performance = original_sub.add_parser("performance", help="Record and review comparable traffic observations")
+    performance_sub = original_performance.add_subparsers(dest="performance_command", required=True)
+    performance_add = performance_sub.add_parser("add")
+    performance_add.add_argument("--task-id", required=True)
+    performance_add.add_argument("--account-id", required=True)
+    performance_add.add_argument("--age-hours", required=True, type=int)
+    performance_add.add_argument("--organic-views", required=True, type=int)
+    performance_add.add_argument("--result-url", default="")
+    performance_add.add_argument("--note", default="")
+    for name in ("report", "decide"):
+        action = performance_sub.add_parser(name)
+        action.add_argument("--role-id", required=True)
+        action.add_argument("--account-id", required=True)
+        action.add_argument("--platform", required=True, choices=list_platforms())
+        action.add_argument("--age-hours", required=True, type=int)
+        if name == "decide":
+            action.add_argument("--evidence-id", action="append", required=True)
+            action.add_argument("--hypothesis", required=True)
+            action.add_argument("--decision", required=True, choices=["accept", "revise", "reject"])
+            action.add_argument("--next-variation", default="")
 
     collect_parser = subparsers.add_parser("collect", help="Material collection commands")
     collect_sub = collect_parser.add_subparsers(dest="collect_command", required=True)
@@ -705,6 +769,73 @@ def handle_content(args: argparse.Namespace, store: Store) -> int:
             print(content_id)
         return 0
     raise ValueError(args.content_command)
+
+
+def handle_original(args: argparse.Namespace, store: Store) -> int:
+    workspace = OriginalWorkspace(store, Path(args.knowledge_root))
+    workspace.init()
+    if args.original_command == "source":
+        if args.source_command == "add":
+            result = workspace.add_source(
+                role_id=args.role_id,
+                kind=args.kind,
+                title=args.title,
+                origin=args.origin,
+                text=Path(args.input).read_text(encoding="utf-8"),
+            )
+        elif args.source_command == "import-material":
+            result = workspace.import_material(args.material_id, role_id=args.role_id)
+        elif args.source_command == "find":
+            result = workspace.find_sources(args.query, role_id=args.role_id, limit=args.limit)
+        elif args.source_command == "read":
+            result = workspace.get_source(args.source_id, role_id=args.role_id)
+        elif args.source_command == "note":
+            result = workspace.add_note(args.source_id, args.note, source_quote=args.quote)
+        else:
+            raise ValueError(args.source_command)
+    elif args.original_command == "task":
+        if args.original_task_command == "new":
+            result = workspace.new_task(
+                role_id=args.role_id, topic=args.topic, platform=args.platform,
+                goal=args.goal, outline=args.outline,
+            )
+        elif args.original_task_command == "show":
+            result = workspace.task(args.task_id)
+        elif args.original_task_command == "prepare":
+            result = workspace.prepare(args.task_id, source_ids=args.source_id)
+        elif args.original_task_command == "submit":
+            payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("input must be a JSON object")
+            result = workspace.submit(args.task_id, payload)
+        elif args.original_task_command == "accept":
+            result = workspace.accept(args.task_id, args.draft_id)
+        else:
+            raise ValueError(args.original_task_command)
+    elif args.original_command == "performance":
+        if args.performance_command == "add":
+            result = workspace.add_observation(
+                args.task_id, account_id=args.account_id, age_hours=args.age_hours,
+                organic_views=args.organic_views, result_url=args.result_url, note=args.note,
+            )
+        elif args.performance_command == "report":
+            result = workspace.performance_report(
+                role_id=args.role_id, account_id=args.account_id,
+                platform=args.platform, age_hours=args.age_hours,
+            )
+        elif args.performance_command == "decide":
+            result = workspace.record_decision(
+                role_id=args.role_id, account_id=args.account_id,
+                platform=args.platform, age_hours=args.age_hours,
+                evidence_ids=args.evidence_id, hypothesis=args.hypothesis,
+                decision=args.decision, next_variation=args.next_variation,
+            )
+        else:
+            raise ValueError(args.performance_command)
+    else:
+        raise ValueError(args.original_command)
+    json_print(result)
+    return 0
 
 
 def handle_create(args: argparse.Namespace, store: Store) -> int:
@@ -2389,6 +2520,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             store.init_db()
             return handle_create(args, store)
+        if args.command == "original":
+            return handle_original(args, store)
         if args.command == "publish":
             store.init_db()
             return handle_publish(args, store)
