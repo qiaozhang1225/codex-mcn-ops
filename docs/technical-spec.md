@@ -2,9 +2,9 @@
 
 ## Methodology versions and implementation status
 
-`knowledge-original-v1` is the active direction for new writing work. `mcn original` provides complete private source import, scoped retrieval, a writing packet, candidate drafts, exact-copy acceptance, and manual comparable-traffic observations and decisions. It does not yet call an LLM itself; Codex uses the packet to research and write, then submits a JSON candidate. The existing `mcn create` v3 chain remains available for historical adaptation tasks and exports. Its opening/stimulus validators do not apply to `mcn original`.
+`knowledge-original-v1` is the active direction for new writing work. `mcn original` provides complete private source import, immutable revisions, proposed/active Markdown pages, scoped lexical retrieval, optional Qdrant semantic retrieval, a writing packet, candidate drafts, exact-copy acceptance, and manual comparable-traffic observations and decisions. It does not yet call an LLM itself; Codex uses the packet to research and write, then submits a JSON candidate. The existing `mcn create` v3 chain remains available for historical adaptation tasks and exports. Its opening/stimulus validators do not apply to `mcn original`.
 
-The target architecture adds a rebuildable semantic search index and later verified video/publishing/metric integrations. These are target capabilities, not current behavior. The initial source finder uses lexical matching and Chinese character bigrams; it may miss conceptual matches. Its source IDs and full-text read contract are stable enough to replace the ranking mechanism without changing the source authority.
+The lexical finder uses Chinese character bigrams and can miss conceptual matches. The optional semantic index is built from authoritative private sources and notes; it links matching passages to complete source text. A local Qdrant instance or on-disk local mode is supported. An OpenAI-compatible embedding endpoint is configured explicitly, with model identity in the collection name. Rebuilding after source/note changes is required and checked; SQLite and complete private files remain authoritative. Actual Chinese retrieval quality requires a real IP corpus and labeled questions on the target machine. Verified video/publishing/metric integrations remain later work.
 
 ## Architecture
 
@@ -97,11 +97,11 @@ Task state uses compare-and-swap `state_version`. Action idempotency keys bind t
 - `risk_term_observations`
 - `creation_learning_updates`
 
-Original creation adds `original_sources` and append-only `original_source_notes` through an additive local schema initialization. Source text is saved as complete UTF-8 private files under ignored `data/original-knowledge/sources/`; SQLite holds the stable ID, origin, role scope, relative path, and SHA-256 hash. Files are checked against the hash on read. A source may be shared (`role_id` null) or restricted to one role. The local operator owns the database and files; role scope is enforced by retrieval and draft submission, not an OS-level multi-user authorization boundary. Back up the SQLite ledger and source files together.
+Original creation adds `original_sources`, append-only `original_source_notes`, `original_pages`, and `original_semantic_index_builds` through additive local schema initialization. Source text is saved as complete UTF-8 private files under ignored `data/original-knowledge/sources/`; SQLite holds the stable ID, origin, role scope, relative path, version/supersession link, and SHA-256 hash. Files are checked against the hash on read. A source may be shared (`role_id` null) or restricted to one role. Private Markdown pages are immutable revisions under `data/original-knowledge/pages/`; a revision is a proposal until explicitly activated, and only active pages enter writing packets. The local operator owns the database and files; role scope is enforced by retrieval and draft submission, not an OS-level multi-user authorization boundary. Back up the SQLite ledger and private files together.
 
-Original tasks reuse `creation_tasks` with `context.creation_methodology_version = knowledge-original-v1` and a snapshot of the confirmed IP profile. Each candidate is a separate `creation_drafts` row with referenced source IDs and hashes. Acceptance creates one `content_packages` row using the selected draft's title and body verbatim. No existing v3 stage run, review pass, or material allocation is fabricated.
+Original tasks reuse `creation_tasks` with `context.creation_methodology_version = knowledge-original-v1` and snapshots of the confirmed IP profile and flexible Markdown playbook. Each candidate is a separate `creation_drafts` row with referenced source/page IDs and hashes. Acceptance atomically creates one `content_packages` row using the selected draft's title and body verbatim; retrying the same acceptance returns the same content ID. No existing v3 stage run, review pass, or material allocation is fabricated.
 
-`original_observations` holds manually supplied organic views for an accepted task, account, platform, and post age in hours. `original_iteration_decisions` stores an agent hypothesis, same-scope observation IDs, and the owner's accept/revise/reject decision and next variation. A report returns the complete comparable series and prior decisions without ranking by a single recent post. Post age and account identity are operator-provided at this stage; automated verification is deferred.
+`original_observations` holds manually supplied organic views for an accepted task, account, platform, and post age in hours. `original_iteration_decisions` stores an agent hypothesis, same-scope observation IDs, and the owner's accept/revise/reject decision and next variation. A report returns the complete comparable series and prior decisions without ranking by a single recent post. A new original task may explicitly link one decision, preserving its evidence and next variation in the task context; the task account then constrains later observations. Post age and account identity are operator-provided at this stage; automated verification is deferred.
 
 In historical v3 tasks, stage runs are immutable versions. Script drafts are owned by Script Writer. Reviews bind to one Writer stage-run ID and body hash. A new body invalidates prior Quality and Risk passes.
 
@@ -178,9 +178,11 @@ Primary command groups:
 - `mcn material inventory classify|import|list|pending|summary`
 - `mcn create task new|confirm|retry|report|export`
 - `mcn create stage prepare|submit`
-- `mcn original source add|import-material|find|read|note`
+- `mcn original source add|import-material|import-work|find|read|note`
+- `mcn original source list`, `mcn original page add|list|read|activate`, `mcn original topic suggest`
 - `mcn original task new|show|prepare|submit|accept`
 - `mcn original performance add|report|decide`
+- `mcn original index rebuild|evaluate`, `mcn original doctor`
 - `mcn publish prepare|push-assets|run|verify|feishu-payload`
 - `mcn report daily`
 
@@ -196,7 +198,7 @@ mcn --db-path data/mcn_ops.sqlite db migrate-collection-task-orchestration-v1 --
 
 Migrations must be idempotent where declared, run inside transactions, and finish with SQLite integrity and foreign-key checks. A schema-v3 rebuild writes a validated destination first; source replacement requires an explicit destination and recovery path.
 
-`mcn original` initializes its additive source tables in the selected local database. It does not rebuild existing tables. Back up both the ledger and private source directory before moving this data to another machine.
+`mcn original` initializes additive tables and adds source-version columns to a database created by the first original-writing checkpoint. It does not rebuild existing tables. Back up both the ledger and private source directory before moving this data to another machine. The optional Qdrant index is disposable and can be rebuilt from that backup.
 
 ## Publishing safety
 

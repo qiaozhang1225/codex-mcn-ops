@@ -16,6 +16,7 @@ When implementation and prose disagree, executable contracts and migrations unde
 - `material-collection-sop.md` and `douyin-provider-cli.md`: Douyin operations.
 - `adb-publishing-sop.md`, `device-calibration.md`, and `platform-rules.md`: publishing operations.
 - `../workflows/create_original.md`: current knowledge-led original writing path; `create_script.md` is historical v3 adaptation.
+- `mac-mini-integration.md`: branch handoff, private-data boundary, and collection/retrieval validation on the machine with working platform sessions.
 - `../workflows/`: concise end-to-end runbooks for collection, creation, publishing, and reporting.
 
 ## Repository policy

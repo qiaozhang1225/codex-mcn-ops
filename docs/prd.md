@@ -9,7 +9,7 @@ Traffic is the business outcome. For published work, compare organic views at th
 ## Current capabilities and next boundaries
 
 - Collection and transcription remain available as shared infrastructure. Their historical `formal_rewrite_base` classification is not required for original creation.
-- `mcn original` stores complete private sources with provenance, IP scope, optional source-grounded notes, and simple text retrieval. It creates an original task, prepares a writing packet, preserves candidate drafts, and accepts one exact body into the existing content-package ledger.
+- `mcn original` stores complete private source versions with provenance and IP scope. Optional notes and human-activated, versioned IP Markdown pages add curated knowledge. It supports simple text retrieval plus a rebuildable optional Qdrant semantic index. It creates an original task, prepares a writing packet, preserves candidate drafts, and accepts one exact body into the existing content-package ledger.
 - The original path has no v3 stage chain, required single-source adaptation, hook-count gate, body template, or mandatory CTA. Codex is the writing and research agent; the CLI persists its inputs and outputs.
 - `mcn create` remains the historical v3 adaptation workflow for existing tasks. Its validators and stages are not product requirements for new original tasks.
 - Original tasks can store manually observed organic views by account, platform, and post age; a comparable-series report supports a human-recorded iteration decision. Publishing preparation and manual tracking exist. ADB final submission is stopped by default. End-to-end unattended publishing, automatic creator-center metrics, and digital-human generation are not yet implemented here.

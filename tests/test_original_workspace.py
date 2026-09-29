@@ -45,7 +45,7 @@ def test_complete_sources_are_searchable_without_analysis_and_isolated_by_ip(tmp
         title="家庭沟通资料",
         text="青春期沟通需要区分拒绝交流和需要独处。",
     )
-    original.add_note(work["id"], "先听的表达值得分析", source_quote="先听完一句")
+    original.add_note(work["id"], "先听的表达值得分析", role_id=first_role, source_quote="先听完一句")
 
     found = original.find_sources("青春期亲子沟通", role_id=first_role)
     assert {item["id"] for item in found} == {work["id"], domain["id"]}
@@ -56,10 +56,18 @@ def test_complete_sources_are_searchable_without_analysis_and_isolated_by_ip(tmp
         text="孩子不肯说话时，先听完一句，再问他需要什么。",
     )["id"] == work["id"]
     assert original.find_sources("青春期", role_id=second_role) == []
+    assert {item["id"] for item in original.list_sources(role_id=first_role)} == {work["id"], domain["id"]}
+    assert original.audit()["ok"]
     with pytest.raises(PermissionError):
         original.get_source(work["id"], role_id=second_role)
+    with pytest.raises(PermissionError):
+        original.add_note(work["id"], "越界批注", role_id=second_role)
     with pytest.raises(ValueError, match="source quote"):
-        original.add_note(work["id"], "错误引文", source_quote="原文没有")
+        original.add_note(work["id"], "错误引文", role_id=first_role, source_quote="原文没有")
+    shared = original.add_source(kind="domain_knowledge", title="共同资料", text="共同原文")
+    original.add_note(shared["id"], "只供甲 IP 使用的解读", role_id=first_role)
+    assert len(original.get_source(shared["id"], role_id=first_role)["notes"]) == 1
+    assert original.get_source(shared["id"], role_id=second_role)["notes"] == []
 
 
 def test_original_task_keeps_candidates_and_exact_accepted_copy(tmp_path: Path) -> None:
@@ -89,6 +97,7 @@ def test_original_task_keeps_candidates_and_exact_accepted_copy(tmp_path: Path) 
     package = store.get_content_package(accepted["content_id"])
     assert package["body"] == revised_body
     assert package["title"] == "别急着追问"
+    assert original.accept(task_id, second["draft_id"]) == accepted
     with pytest.raises(ValueError, match="already"):
         original.accept(task_id, first["draft_id"])
 
@@ -105,6 +114,7 @@ def test_original_submission_rejects_cross_ip_source_and_detects_tampering(tmp_p
     (original.root / private_path).write_text("篡改", encoding="utf-8")
     with pytest.raises(ValueError, match="integrity"):
         original.get_source(source["id"], role_id=second_role)
+    assert original.audit()["file_problems"][0]["id"] == source["id"]
 
 
 def test_existing_collected_work_imports_without_rewrite_classification(tmp_path: Path) -> None:
@@ -126,6 +136,23 @@ def test_existing_collected_work_imports_without_rewrite_classification(tmp_path
     source = original.import_material(material_id, role_id=role_id)
     assert original.get_source(source["id"], role_id=role_id)["text"].startswith("完整口播")
     assert source["origin"] == "https://example.org/viral"
+
+
+def test_transcribed_source_work_imports_without_formal_material(tmp_path: Path) -> None:
+    original, store, role_id = workspace(tmp_path)
+    work_id = store.upsert_source_work(
+        platform="douyin", platform_work_id="123", title="亲子沟通",
+        canonical_url="https://www.douyin.com/video/123",
+    )
+    with pytest.raises(ValueError, match="no complete transcript"):
+        original.import_work(work_id, role_id=role_id)
+    store.insert_material_transcription(
+        source_work_id=work_id, provider="test", model="test", options_fingerprint="test",
+        identity_key="work-test-123", transcript_text="完整口播：先听孩子说完。",
+    )
+    source = original.import_work(work_id, role_id=role_id)
+    assert source["origin"] == "https://www.douyin.com/video/123"
+    assert original.get_source(source["id"], role_id=role_id)["text"] == "完整口播：先听孩子说完。"
 
 
 def test_cli_original_source_and_task_journey(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -167,6 +194,12 @@ def test_performance_keeps_comparable_series_and_human_decision(tmp_path: Path) 
     original.add_observation(task_ids[2], account_id="experiment", age_hours=48, organic_views=4000)
     report = original.performance_report(role_id=role_id, account_id="experiment", platform="douyin", age_hours=24)
     assert [item["organic_views"] for item in report["observations"]] == [120, 900]
+    assert report["distinct_content_count"] == 2
+    assert report["duplicate_content_ids"] == []
+    original.add_observation(task_ids[0], account_id="experiment", age_hours=24, organic_views=125)
+    repeated = original.performance_report(role_id=role_id, account_id="experiment", platform="douyin", age_hours=24)
+    assert repeated["distinct_content_count"] == 2
+    assert repeated["duplicate_content_ids"] == [first["content_id"]]
     with pytest.raises(ValueError, match="same IP"):
         original.record_decision(
             role_id=role_id, account_id="experiment", platform="douyin", age_hours=48,
@@ -180,3 +213,108 @@ def test_performance_keeps_comparable_series_and_human_decision(tmp_path: Path) 
     )
     assert decision["decision"] == "revise"
     assert len(original.performance_report(role_id=role_id, account_id="experiment", platform="douyin", age_hours=24)["decisions"]) == 1
+    followup = original.new_task(
+        role_id=role_id, topic="更具体的困境场景", platform="douyin",
+        account_id="experiment", decision_id=decision["id"],
+    )
+    packet = original.prepare(followup["id"])
+    assert packet["iteration_context"]["next_variation"] == "再试一个更具体的困境场景"
+    assert packet["iteration_context"]["evidence_ids"] == [first["id"], second["id"]]
+    draft = original.submit(followup["id"], {
+        "title": "后续稿", "angle": "更具体", "body": "正文", "source_ids": [],
+    })
+    original.accept(followup["id"], draft["draft_id"])
+    with pytest.raises(ValueError, match="task account"):
+        original.add_observation(followup["id"], account_id="real-person", age_hours=24, organic_views=100)
+
+
+def test_source_revisions_and_curated_pages_keep_history(tmp_path: Path) -> None:
+    original, store, role_id = workspace(tmp_path)
+    other_role = role(store, "乙")
+    first = original.add_source(
+        role_id=role_id, kind="domain_knowledge", title="沟通", origin="book:1",
+        text="先观察孩子。",
+    )
+    revised = original.add_source(
+        role_id=role_id, kind="domain_knowledge", title="沟通", origin="book:1",
+        text="先观察孩子，再问他的感受。",
+    )
+    assert revised["version"] == 2
+    assert revised["supersedes_id"] == first["id"]
+    rolled_back = original.add_source(
+        role_id=role_id, kind="domain_knowledge", title="沟通", origin="book:1",
+        text="先观察孩子。",
+    )
+    assert rolled_back["version"] == 3
+    assert rolled_back["supersedes_id"] == revised["id"]
+    assert original.get_source(first["id"], role_id=role_id)["text"] == "先观察孩子。"
+    assert [item["id"] for item in original.find_sources("孩子", role_id=role_id)] == [rolled_back["id"]]
+    assert {item["id"] for item in original.list_sources(role_id=role_id, include_history=True)} == {first["id"], revised["id"], rolled_back["id"]}
+
+    proposal = original.add_page(
+        role_id=role_id, page_key="voice", text="# 表达风格\n先解释，再给建议。",
+        source_ids=[revised["id"]],
+    )
+    assert original.list_pages(role_id=role_id, active_only=True) == []
+    original.activate_page(proposal["id"], role_id=role_id)
+    task_id = original.new_task(role_id=role_id, topic="孩子沉默", platform="douyin")["id"]
+    packet = original.prepare(task_id)
+    assert packet["active_pages"][0]["text"].startswith("# 表达风格")
+    draft = original.submit(task_id, {
+        "title": "孩子沉默", "angle": "家长视角", "body": "先听孩子说完。",
+        "source_ids": [revised["id"]], "page_ids": [proposal["id"]],
+    })
+    assert draft["metadata"]["page_hashes"][proposal["id"]] == proposal["content_hash"]
+    second = original.add_page(role_id=role_id, page_key="voice", text="# 表达风格\n更多例子。")
+    original.activate_page(second["id"], role_id=role_id)
+    assert original.get_page(proposal["id"], role_id=role_id)["status"] == "retired"
+    assert original.get_page(proposal["id"], role_id=role_id)["text"].endswith("给建议。")
+    with pytest.raises(PermissionError):
+        original.get_page(second["id"], role_id=other_role)
+
+
+def test_upgrade_first_original_source_schema_without_losing_data(tmp_path: Path) -> None:
+    original, store, role_id = workspace(tmp_path)
+    source = original.add_source(role_id=role_id, kind="ip_knowledge", title="旧资料", text="旧文本")
+    with store.connect() as conn:
+        conn.execute("ALTER TABLE original_sources RENAME TO original_sources_with_versions")
+        conn.execute(
+            """CREATE TABLE original_sources AS SELECT id, role_id, kind, title, origin,
+                      source_hash, private_path, created_at FROM original_sources_with_versions"""
+        )
+        conn.execute("DROP TABLE original_sources_with_versions")
+    original.init()
+    assert original.get_source(source["id"], role_id=role_id)["text"] == "旧文本"
+    assert original.get_source(source["id"], role_id=role_id)["version"] == 1
+
+
+def test_long_source_packet_points_to_complete_read_without_dumping_book(tmp_path: Path) -> None:
+    original, _, role_id = workspace(tmp_path)
+    full_text = "背景" * 4000 + "青春期沉默需要先理解" + "补充" * 4000
+    source = original.add_source(role_id=role_id, kind="domain_knowledge", title="长资料", text=full_text)
+    task_id = original.new_task(role_id=role_id, topic="青春期沉默", platform="douyin")["id"]
+    packet = original.prepare(task_id, source_ids=[source["id"]])
+    item = packet["sources"][0]
+    assert item["truncated"] is True
+    assert "青春期沉默" in item["preview"]
+    assert "text" not in item
+    assert source["id"] in item["read_command"]
+    assert original.get_source(source["id"], role_id=role_id)["text"] == full_text
+
+
+def test_playbook_snapshot_and_proposed_page_are_not_silent_writing_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original, _, role_id = workspace(tmp_path)
+    playbook = tmp_path / "playbook.md"
+    playbook.write_text("first guidance", encoding="utf-8")
+    monkeypatch.setattr("mcn_ops.original.workspace.PLAYBOOK_PATH", playbook)
+    first_task = original.new_task(role_id=role_id, topic="话题 A", platform="douyin")["id"]
+    page = original.add_page(role_id=role_id, page_key="voice", text="提案内容")
+    assert original.prepare(first_task)["active_pages"] == []
+    with pytest.raises(ValueError, match="proposed page"):
+        original.submit(first_task, {
+            "title": "A", "angle": "A", "body": "A", "source_ids": [], "page_ids": [page["id"]],
+        })
+    playbook.write_text("second guidance", encoding="utf-8")
+    second_task = original.new_task(role_id=role_id, topic="话题 B", platform="douyin")["id"]
+    assert original.prepare(first_task)["playbook"] == "first guidance"
+    assert original.prepare(second_task)["playbook"] == "second guidance"
