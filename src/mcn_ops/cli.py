@@ -66,6 +66,8 @@ from .migrations import (
     migrate_collection_task_orchestration_v1,
     migrate_material_inventory_v1,
 )
+from .original import OriginalWorkspace
+from .original.semantic import OpenAICompatibleEmbedder, SemanticIndex, evaluate_retrieval
 from .publisher import PublishRunner
 from .report import build_daily_report
 from .store import DEFAULT_DB_PATH, Store
@@ -223,6 +225,109 @@ def build_parser() -> argparse.ArgumentParser:
     create_knowledge_validate.add_argument("--role-id", required=True)
     create_knowledge_validate.add_argument("--knowledge-root", default="knowledge")
     create_knowledge_validate.add_argument("--json", action="store_true")
+
+    original = subparsers.add_parser("original", help="Knowledge-led original script creation")
+    original.add_argument("--knowledge-root", default="data/original-knowledge")
+    original.add_argument("--qdrant-url", default=os.environ.get("MCN_QDRANT_URL"))
+    original.add_argument("--embedding-url", default=os.environ.get("MCN_EMBEDDING_URL"))
+    original.add_argument("--embedding-model", default=os.environ.get("MCN_EMBEDDING_MODEL"))
+    original_sub = original.add_subparsers(dest="original_command", required=True)
+    source = original_sub.add_parser("source", help="Manage complete private sources")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+    source_add = source_sub.add_parser("add")
+    source_add.add_argument("--role-id")
+    source_add.add_argument("--kind", required=True, choices=sorted(["viral_work", "domain_knowledge", "ip_knowledge", "ip_voice", "experience"]))
+    source_add.add_argument("--title", required=True)
+    source_add.add_argument("--origin", default="")
+    source_add.add_argument("--input", required=True, help="UTF-8 file containing the complete source")
+    source_import = source_sub.add_parser("import-material")
+    source_import.add_argument("--material-id", required=True)
+    source_import.add_argument("--role-id", required=True)
+    source_import_work = source_sub.add_parser("import-work")
+    source_import_work.add_argument("--source-work-id", required=True)
+    source_import_work.add_argument("--role-id", required=True)
+    source_find = source_sub.add_parser("find")
+    source_find.add_argument("--role-id", required=True)
+    source_find.add_argument("--query", required=True)
+    source_find.add_argument("--limit", type=int, default=10)
+    source_find.add_argument("--semantic", action="store_true")
+    source_list = source_sub.add_parser("list")
+    source_list.add_argument("--role-id", required=True)
+    source_list.add_argument("--include-history", action="store_true")
+    source_read = source_sub.add_parser("read")
+    source_read.add_argument("--role-id", required=True)
+    source_read.add_argument("--source-id", required=True)
+    source_note = source_sub.add_parser("note")
+    source_note.add_argument("--source-id", required=True)
+    source_note.add_argument("--role-id", required=True)
+    source_note.add_argument("--note", required=True)
+    source_note.add_argument("--quote", default="")
+    original_page = original_sub.add_parser("page", help="Review and activate versioned private Markdown")
+    page_sub = original_page.add_subparsers(dest="page_command", required=True)
+    page_add = page_sub.add_parser("add")
+    page_add.add_argument("--role-id", required=True)
+    page_add.add_argument("--key", required=True)
+    page_add.add_argument("--input", required=True)
+    page_add.add_argument("--source-id", action="append", default=[])
+    page_list = page_sub.add_parser("list")
+    page_list.add_argument("--role-id", required=True)
+    page_list.add_argument("--active-only", action="store_true")
+    for name in ("read", "activate"):
+        action = page_sub.add_parser(name)
+        action.add_argument("--role-id", required=True)
+        action.add_argument("--page-id", required=True)
+    original_task = original_sub.add_parser("task", help="Create, prepare, submit, and accept original drafts")
+    original_task_sub = original_task.add_subparsers(dest="original_task_command", required=True)
+    original_new = original_task_sub.add_parser("new")
+    original_new.add_argument("--role-id", required=True)
+    original_new.add_argument("--topic", required=True)
+    original_new.add_argument("--platform", required=True, choices=list_platforms())
+    original_new.add_argument("--goal", default="")
+    original_new.add_argument("--outline", default="")
+    original_new.add_argument("--account-id", default="")
+    original_new.add_argument("--decision-id")
+    for name in ("show", "prepare", "submit", "accept"):
+        action = original_task_sub.add_parser(name)
+        action.add_argument("--task-id", required=True)
+        if name == "prepare":
+            action.add_argument("--source-id", action="append")
+            action.add_argument("--semantic", action="store_true")
+        if name == "submit":
+            action.add_argument("--input", required=True, help="UTF-8 JSON response file")
+        if name == "accept":
+            action.add_argument("--draft-id", required=True)
+    original_performance = original_sub.add_parser("performance", help="Record and review comparable traffic observations")
+    performance_sub = original_performance.add_subparsers(dest="performance_command", required=True)
+    performance_add = performance_sub.add_parser("add")
+    performance_add.add_argument("--task-id", required=True)
+    performance_add.add_argument("--account-id", required=True)
+    performance_add.add_argument("--age-hours", required=True, type=int)
+    performance_add.add_argument("--organic-views", required=True, type=int)
+    performance_add.add_argument("--result-url", default="")
+    performance_add.add_argument("--note", default="")
+    for name in ("report", "decide"):
+        action = performance_sub.add_parser(name)
+        action.add_argument("--role-id", required=True)
+        action.add_argument("--account-id", required=True)
+        action.add_argument("--platform", required=True, choices=list_platforms())
+        action.add_argument("--age-hours", required=True, type=int)
+        if name == "decide":
+            action.add_argument("--evidence-id", action="append", required=True)
+            action.add_argument("--hypothesis", required=True)
+            action.add_argument("--decision", required=True, choices=["accept", "revise", "reject"])
+            action.add_argument("--next-variation", default="")
+    original_index = original_sub.add_parser("index", help="Rebuild the optional Qdrant semantic index")
+    original_index_sub = original_index.add_subparsers(dest="index_command", required=True)
+    original_index_sub.add_parser("rebuild")
+    index_evaluate = original_index_sub.add_parser("evaluate")
+    index_evaluate.add_argument("--input", required=True, help="Private JSON query cases")
+    index_evaluate.add_argument("--limit", type=int, default=10)
+    original_topic = original_sub.add_parser("topic", help="Prepare IP-grounded topic suggestions")
+    topic_sub = original_topic.add_subparsers(dest="topic_command", required=True)
+    topic_suggest = topic_sub.add_parser("suggest")
+    topic_suggest.add_argument("--role-id", required=True)
+    topic_suggest.add_argument("--theme", default="")
+    original_sub.add_parser("doctor", help="Check SQLite and private knowledge-file integrity")
 
     collect_parser = subparsers.add_parser("collect", help="Material collection commands")
     collect_sub = collect_parser.add_subparsers(dest="collect_command", required=True)
@@ -705,6 +810,146 @@ def handle_content(args: argparse.Namespace, store: Store) -> int:
             print(content_id)
         return 0
     raise ValueError(args.content_command)
+
+
+def _original_semantic_index(args: argparse.Namespace, workspace: OriginalWorkspace) -> SemanticIndex:
+    if not args.embedding_url or not args.embedding_model:
+        raise ValueError("set MCN_EMBEDDING_URL and MCN_EMBEDDING_MODEL for semantic search")
+    api_key = os.environ.get("MCN_EMBEDDING_API_KEY", "")
+    embedder = OpenAICompatibleEmbedder(
+        url=args.embedding_url, model_id=args.embedding_model, api_key=api_key,
+    )
+    return SemanticIndex(
+        workspace, embedder,
+        url=args.qdrant_url if args.qdrant_url else None,
+        local_path=None if args.qdrant_url else workspace.root / "qdrant-index",
+    )
+
+
+def handle_original(args: argparse.Namespace, store: Store) -> int:
+    workspace = OriginalWorkspace(store, Path(args.knowledge_root))
+    workspace.init()
+    if args.original_command == "source":
+        if args.source_command == "add":
+            result = workspace.add_source(
+                role_id=args.role_id,
+                kind=args.kind,
+                title=args.title,
+                origin=args.origin,
+                text=Path(args.input).read_text(encoding="utf-8"),
+            )
+        elif args.source_command == "import-material":
+            result = workspace.import_material(args.material_id, role_id=args.role_id)
+        elif args.source_command == "import-work":
+            result = workspace.import_work(args.source_work_id, role_id=args.role_id)
+        elif args.source_command == "find":
+            if args.semantic:
+                index = _original_semantic_index(args, workspace)
+                try:
+                    result = index.find(args.query, role_id=args.role_id, limit=args.limit)
+                finally:
+                    index.close()
+            else:
+                result = workspace.find_sources(args.query, role_id=args.role_id, limit=args.limit)
+        elif args.source_command == "list":
+            result = workspace.list_sources(role_id=args.role_id, include_history=args.include_history)
+        elif args.source_command == "read":
+            result = workspace.get_source(args.source_id, role_id=args.role_id)
+        elif args.source_command == "note":
+            result = workspace.add_note(args.source_id, args.note, role_id=args.role_id, source_quote=args.quote)
+        else:
+            raise ValueError(args.source_command)
+    elif args.original_command == "task":
+        if args.original_task_command == "new":
+            result = workspace.new_task(
+                role_id=args.role_id, topic=args.topic, platform=args.platform,
+                goal=args.goal, outline=args.outline,
+                account_id=args.account_id, decision_id=args.decision_id,
+            )
+        elif args.original_task_command == "show":
+            result = workspace.task(args.task_id)
+        elif args.original_task_command == "prepare":
+            if args.semantic and args.source_id is not None:
+                raise ValueError("choose semantic retrieval or explicit source IDs")
+            source_ids = args.source_id
+            source_previews = None
+            if args.semantic:
+                task = workspace.task(args.task_id)
+                index = _original_semantic_index(args, workspace)
+                try:
+                    hits = index.find(task["topic"], role_id=task["role_id"])
+                    source_ids = [item["id"] for item in hits]
+                    source_previews = {str(item["id"]): str(item["passage"]) for item in hits}
+                finally:
+                    index.close()
+            result = workspace.prepare(args.task_id, source_ids=source_ids, source_previews=source_previews)
+        elif args.original_task_command == "submit":
+            payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("input must be a JSON object")
+            result = workspace.submit(args.task_id, payload)
+        elif args.original_task_command == "accept":
+            result = workspace.accept(args.task_id, args.draft_id)
+        else:
+            raise ValueError(args.original_task_command)
+    elif args.original_command == "page":
+        if args.page_command == "add":
+            result = workspace.add_page(
+                role_id=args.role_id, page_key=args.key,
+                text=Path(args.input).read_text(encoding="utf-8"), source_ids=args.source_id,
+            )
+        elif args.page_command == "list":
+            result = workspace.list_pages(role_id=args.role_id, active_only=args.active_only)
+        elif args.page_command == "read":
+            result = workspace.get_page(args.page_id, role_id=args.role_id)
+        elif args.page_command == "activate":
+            result = workspace.activate_page(args.page_id, role_id=args.role_id)
+        else:
+            raise ValueError(args.page_command)
+    elif args.original_command == "performance":
+        if args.performance_command == "add":
+            result = workspace.add_observation(
+                args.task_id, account_id=args.account_id, age_hours=args.age_hours,
+                organic_views=args.organic_views, result_url=args.result_url, note=args.note,
+            )
+        elif args.performance_command == "report":
+            result = workspace.performance_report(
+                role_id=args.role_id, account_id=args.account_id,
+                platform=args.platform, age_hours=args.age_hours,
+            )
+        elif args.performance_command == "decide":
+            result = workspace.record_decision(
+                role_id=args.role_id, account_id=args.account_id,
+                platform=args.platform, age_hours=args.age_hours,
+                evidence_ids=args.evidence_id, hypothesis=args.hypothesis,
+                decision=args.decision, next_variation=args.next_variation,
+            )
+        else:
+            raise ValueError(args.performance_command)
+    elif args.original_command == "index":
+        index = _original_semantic_index(args, workspace)
+        try:
+            if args.index_command == "rebuild":
+                result = index.rebuild()
+            elif args.index_command == "evaluate":
+                cases = json.loads(Path(args.input).read_text(encoding="utf-8"))
+                if not isinstance(cases, list):
+                    raise ValueError("evaluation input must be a JSON array")
+                result = evaluate_retrieval(workspace, index, cases, limit=args.limit)
+            else:
+                raise ValueError(args.index_command)
+        finally:
+            index.close()
+    elif args.original_command == "topic":
+        if args.topic_command != "suggest":
+            raise ValueError(args.topic_command)
+        result = workspace.topic_packet(role_id=args.role_id, theme=args.theme)
+    elif args.original_command == "doctor":
+        result = workspace.audit()
+    else:
+        raise ValueError(args.original_command)
+    json_print(result)
+    return 0
 
 
 def handle_create(args: argparse.Namespace, store: Store) -> int:
@@ -2389,6 +2634,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             store.init_db()
             return handle_create(args, store)
+        if args.command == "original":
+            return handle_original(args, store)
         if args.command == "publish":
             store.init_db()
             return handle_publish(args, store)

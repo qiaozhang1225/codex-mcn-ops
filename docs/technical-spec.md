@@ -1,5 +1,11 @@
 # Technical Specification
 
+## Methodology versions and implementation status
+
+`knowledge-original-v1` is the active direction for new writing work. `mcn original` provides complete private source import, immutable revisions, proposed/active Markdown pages, scoped lexical retrieval, optional Qdrant semantic retrieval, a writing packet, candidate drafts, exact-copy acceptance, and manual comparable-traffic observations and decisions. It does not yet call an LLM itself; Codex uses the packet to research and write, then submits a JSON candidate. The existing `mcn create` v3 chain remains available for historical adaptation tasks and exports. Its opening/stimulus validators do not apply to `mcn original`.
+
+The lexical finder uses Chinese character bigrams and can miss conceptual matches. The optional semantic index is built from authoritative private sources and notes; it links matching passages to complete source text. A local Qdrant instance or on-disk local mode is supported. An OpenAI-compatible embedding endpoint is configured explicitly, with model identity in the collection name. Rebuilding after source/note changes is required and checked; SQLite and complete private files remain authoritative. Actual Chinese retrieval quality requires a real IP corpus and labeled questions on the target machine. Verified video/publishing/metric integrations remain later work.
+
 ## Architecture
 
 `codex-mcn-ops` is a Python 3.11+ CLI with a local SQLite ledger. It has no application server.
@@ -26,6 +32,7 @@ The Mac owns orchestration, persistence, review, media verification, transcripti
 - Channels wire contract: `src/mcn_ops/collection/channels/contracts.py`.
 - Creation stage contracts and validation: `src/mcn_ops/creation/contracts.py`.
 - Creation orchestration: `src/mcn_ops/creation/workflow.py` and `stage_io.py`.
+- Original creation and scoped full-source retrieval: `src/mcn_ops/original/workspace.py`.
 - Human-operable procedures: `workflows/` and current documents under `docs/`.
 
 Do not maintain a second static creation JSON Schema. The Python contract generates the response template, validates submissions, and is covered by executable tests.
@@ -90,7 +97,13 @@ Task state uses compare-and-swap `state_version`. Action idempotency keys bind t
 - `risk_term_observations`
 - `creation_learning_updates`
 
-Stage runs are immutable versions. Script drafts are owned by Script Writer. Reviews bind to one Writer stage-run ID and body hash. A new body invalidates prior Quality and Risk passes.
+Original creation adds `original_sources`, append-only `original_source_notes`, `original_pages`, and `original_semantic_index_builds` through additive local schema initialization. Source text is saved as complete UTF-8 private files under ignored `data/original-knowledge/sources/`; SQLite holds the stable ID, origin, role scope, relative path, version/supersession link, and SHA-256 hash. Files are checked against the hash on read. A source may be shared (`role_id` null) or restricted to one role. Private Markdown pages are immutable revisions under `data/original-knowledge/pages/`; a revision is a proposal until explicitly activated, and only active pages enter writing packets. The local operator owns the database and files; role scope is enforced by retrieval and draft submission, not an OS-level multi-user authorization boundary. Back up the SQLite ledger and private files together.
+
+Original tasks reuse `creation_tasks` with `context.creation_methodology_version = knowledge-original-v1` and snapshots of the confirmed IP profile and flexible Markdown playbook. Each candidate is a separate `creation_drafts` row with referenced source/page IDs and hashes. Acceptance atomically creates one `content_packages` row using the selected draft's title and body verbatim; retrying the same acceptance returns the same content ID. No existing v3 stage run, review pass, or material allocation is fabricated.
+
+`original_observations` holds manually supplied organic views for an accepted task, account, platform, and post age in hours. `original_iteration_decisions` stores an agent hypothesis, same-scope observation IDs, and the owner's accept/revise/reject decision and next variation. A report returns the complete comparable series and prior decisions without ranking by a single recent post. A new original task may explicitly link one decision, preserving its evidence and next variation in the task context; the task account then constrains later observations. Post age and account identity are operator-provided at this stage; automated verification is deferred.
+
+In historical v3 tasks, stage runs are immutable versions. Script drafts are owned by Script Writer. Reviews bind to one Writer stage-run ID and body hash. A new body invalidates prior Quality and Risk passes.
 
 ## Collection architecture
 
@@ -122,7 +135,7 @@ Short-lived media URLs, decode keys, Hub secrets, cookies, and authorization hea
 
 Raw results, saved transcripts, and automatic role matches are intermediate evidence. A role-targeted task completes only when the target number of distinct, unused source works have reviewed primary `formal_rewrite_base` classifications for the confirmed role.
 
-## Content Creation Workflow v3
+## Historical Content Creation Workflow v3
 
 Adaptation and half-original stages:
 
@@ -131,7 +144,7 @@ material_selection -> creation_brief -> script_writing
 -> quality_review -> risk_review -> publish_format -> delivery
 ```
 
-Original work starts at `creation_brief`.
+The historical v3 `original` mode starts at `creation_brief`; it is distinct from `mcn original`.
 
 `mcn create stage prepare` builds the context packet and response template. Codex produces one JSON response. `mcn create stage submit` runs structural and semantic gates before persisting a stage run. `create task run` is a deterministic fallback for testing or legacy execution and is not formal agent output.
 
@@ -151,7 +164,7 @@ Quality Review evaluates `贪、瞋、痴、慢、疑` with `strong`, `weak`, `a
 - Every strong driver requires an exact body-payoff span.
 - Artificial drivers and unsupported stimulation cannot pass.
 
-Legacy methodology-v2 stage records remain readable, but new formal tasks use v3.
+This opening gate is historical v3 behavior only. It is not a gate for `knowledge-original-v1`. Methodology-v2 and v3 records remain readable.
 
 ## CLI surface
 
@@ -165,12 +178,17 @@ Primary command groups:
 - `mcn material inventory classify|import|list|pending|summary`
 - `mcn create task new|confirm|retry|report|export`
 - `mcn create stage prepare|submit`
+- `mcn original source add|import-material|import-work|find|read|note`
+- `mcn original source list`, `mcn original page add|list|read|activate`, `mcn original topic suggest`
+- `mcn original task new|show|prepare|submit|accept`
+- `mcn original performance add|report|decide`
+- `mcn original index rebuild|evaluate`, `mcn original doctor`
 - `mcn publish prepare|push-assets|run|verify|feishu-payload`
 - `mcn report daily`
 
 ## Migrations
 
-Existing databases are upgraded only through explicit commands:
+Collection databases are upgraded through explicit commands:
 
 ```bash
 mcn --db-path data/mcn_ops.sqlite db migrate-collection-schema-v3 --json
@@ -179,6 +197,8 @@ mcn --db-path data/mcn_ops.sqlite db migrate-collection-task-orchestration-v1 --
 ```
 
 Migrations must be idempotent where declared, run inside transactions, and finish with SQLite integrity and foreign-key checks. A schema-v3 rebuild writes a validated destination first; source replacement requires an explicit destination and recovery path.
+
+`mcn original` initializes additive tables and adds source-version columns to a database created by the first original-writing checkpoint. It does not rebuild existing tables. Back up both the ledger and private source directory before moving this data to another machine. The optional Qdrant index is disposable and can be rebuilt from that backup.
 
 ## Publishing safety
 
@@ -194,7 +214,7 @@ Fail closed for:
 - missing or unconfirmed IP roles;
 - expired login, CAPTCHA, platform risk control, unavailable worker, or stale cursor;
 - missing/invalid transcript or media verification failure;
-- stale review hashes, invalid creation contracts, or missing body payoff;
+- stale v3 review hashes and invalid creation contracts for historical v3 tasks; original tasks enforce only their own data and scope invariants;
 - SQLite integrity, foreign-key, migration, or task-state conflicts;
 - unverified Windows certificate/worker cleanup;
 - any final publish action without explicit operator authorization.

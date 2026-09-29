@@ -1,75 +1,34 @@
 # Codex MCN Ops PRD
 
-## Product definition
+## Product goal
 
-`codex-mcn-ops` is a local, Codex-operated production system for one creator-operations owner. It turns a business content objective into an auditable sequence of source collection, transcript review, material classification, script creation, publish preparation, and result review.
+Build a repeatable system for creating original short-video scripts for each IP and improving them through comparable traffic observations. The IP's views, knowledge, and experience supply substance. Complete high-performing works supply topic and expression reference. An agent may research further and choose its own angle and structure after the owner sets or approves a direction.
 
-The product surface is a Python CLI plus Markdown knowledge and runbooks. SQLite is the local operational ledger. Feishu is a delivery surface, not the source of truth. Logged-in browsers, the Windows WeChat worker, and Android apps are external execution environments.
+Traffic is the business outcome. For published work, compare organic views at the same post age on the same platform and account. Do not substitute a model's prose score, perceived professionalism, or a single recent hit for that outcome. The owner participates in substantive iteration decisions.
 
-## Primary user outcomes
+## Current capabilities and next boundaries
 
-1. Collect public Douyin or WeChat Channels evidence without confusing search candidates with approved material.
-2. Know exactly which unused, reviewed materials can support one confirmed IP and content allocation.
-3. Create a script through one linear Writer → Quality Review → Risk Review chain with traceable revisions.
-4. Prepare a platform package and reach the final Android publish checkpoint without silently submitting.
-5. Retain enough local evidence to explain what happened without committing runtime data or research artifacts to Git.
+- Collection and transcription remain available as shared infrastructure. Their historical `formal_rewrite_base` classification is not required for original creation.
+- `mcn original` stores complete private source versions with provenance and IP scope. Optional notes and human-activated, versioned IP Markdown pages add curated knowledge. It supports simple text retrieval plus a rebuildable optional Qdrant semantic index. It creates an original task, prepares a writing packet, preserves candidate drafts, and accepts one exact body into the existing content-package ledger.
+- The original path has no v3 stage chain, required single-source adaptation, hook-count gate, body template, or mandatory CTA. Codex is the writing and research agent; the CLI persists its inputs and outputs.
+- `mcn create` remains the historical v3 adaptation workflow for existing tasks. Its validators and stages are not product requirements for new original tasks.
+- Original tasks can store manually observed organic views by account, platform, and post age; a comparable-series report supports a human-recorded iteration decision. Publishing preparation and manual tracking exist. ADB final submission is stopped by default. End-to-end unattended publishing, automatic creator-center metrics, and digital-human generation are not yet implemented here.
 
-## Product capabilities
+## Core journeys
 
-### Collection
+1. Confirm an IP role and add complete IP knowledge, professional/domain sources, creator works, and voice/experience material. Any source is usable before it receives an analysis note. Keep client material outside public Git history.
+2. Set a topic and optional outline, or have the agent suggest topics from the IP's knowledge and audience. Search and reread full sources. The agent may fill a knowledge gap through supplementary research, record what it used, and create multiple original candidates. It must not invent the IP's first-person experience or silently adopt another creator's claims.
+3. The owner accepts one candidate. The accepted title and body move unchanged into a content package for the existing production and publishing system.
+4. As observations accumulate, compare the same-age traffic of works on the same platform/account, distinguish observations from hypotheses, and propose a concrete next variation. The owner records acceptance, revision, or rejection. No fixed corpus, post, or call threshold is required.
+5. Later, a consistent digital-human production process supplies a video asset. A separately verified ADB path publishes to a designated experimental account, and creator-center reading adds observations. The real-person account has separately identified works and results.
 
-- Douyin search, detail, author works, media access, and ASR through the signed-in Ego Lite/direct-provider path.
-- WeChat Channels search, cursor continuation, author inspection, detail/media acquisition, and task-bound Windows session control through the authenticated LAN worker.
-- Durable task actions, events, frontiers, semantic material reviews, and resumable task state.
-- Explicit separation of source identity, observations, transcriptions, candidates, formal materials, role matches, and reviewed inventory.
-- A formal WeChat Channels material retains a verified public `weixin.qq.com/sph` source link resolved from its stable work ID.
+## Product boundaries
 
-### Material governance
+- Private sources, drafts, media, credentials, and metrics stay outside the public repository. SQLite is the local operational ledger; complete source files are the source authority; any future semantic index is rebuildable.
+- Use reusable reasoning guidance rather than universal copy templates. Data integrity, source scope, and IP identity are hard checks; creative choices are left to the agent and owner.
+- Do not auto-promote performance correlations into permanent writing rules. Preserve contrary observations and earlier versions.
+- Live posting, account changes, and production migration require their own verified delivery work. A working content package is not proof of a published video or improved traffic.
 
-- Confirmed IP-role ownership and versioning.
-- Evidence-bearing classification into formal rewrite base, topic clue, or rejection.
-- One reviewed primary allocation per material/role, with optional secondary retrieval directions.
-- Completion based on distinct, unused, reviewed primary formal bases—not raw result or transcript counts.
+## Acceptance direction
 
-### Content creation
-
-- Adaptation, half-original, and original modes.
-- Formal stage packets and validated JSON submissions.
-- Script Writer as the only viewer-copy owner.
-- Read-only Quality Review and Risk Review bound to the latest Writer run and body hash.
-- `贪、瞋、痴、慢、疑` evidence restricted to the first two spoken sentences, with exact body payoff.
-- Publish formatting that cannot rewrite the double-reviewed body.
-
-### Publishing and reporting
-
-- Platform-specific validation and ADB job preparation for Douyin, Xiaohongshu, WeChat Channels, and Kuaishou.
-- Evidence capture and a default stop before final submission.
-- Manual verification snapshots, daily reports, and Feishu-ready payloads.
-
-## Operating principles
-
-- Fail closed on unavailable login, CAPTCHA, provider uncertainty, stale cursor, missing transcript, database integrity failure, or unverifiable cleanup.
-- Store stable facts and audit state in SQLite; keep short-lived credentials and signed locators in memory or ignored runtime directories.
-- Preserve source identity, metrics, traversal completeness, transcript provenance, and IP-fit evidence separately.
-- Do not treat automatic rules or popularity as semantic approval.
-- Do not let reviewers write replacement copy or let publish formatting modify approved copy.
-- Keep the Git repository limited to code, durable contracts, current documentation, knowledge, and reusable workflows.
-
-## Non-goals
-
-- A browser-based operations center or always-on application server.
-- Bypassing platform login challenges, CAPTCHA, signatures, or account risk control.
-- Public exposure of the Windows worker or direct access from Windows to the Mac SQLite database.
-- Automatic promotion of candidates into formal rewrite bases.
-- Unattended final publishing without explicit operator authorization.
-- Storing production databases, transcripts, media, research batches, or generated client deliverables in Git.
-
-## Acceptance criteria
-
-- A collection task can resume from persisted state and truthfully distinguish bounded sampling from source exhaustion.
-- A reviewed material decision atomically preserves transcript evidence, role decision, inventory classification, and task progress.
-- A creation task can complete the v3 chain and publish only the latest Writer body approved by both reviewers.
-- Quality Review rejects third-sentence opening evidence, weak opening sentences, artificial drivers, sparse stimulus evidence, and missing body payoff.
-- A Channels task can fail closed when its worker/session is unavailable and verify pinned cleanup before terminal completion or cancellation.
-- A publish job can reach the final app checkpoint with logs and screenshots while stopping before submit by default.
-- The repository remains reproducible from tracked code/docs while all operational data stays local.
+The first usable checkpoint is a realistic path from a complete work and a substantive IP/domain source through retrieval, original drafts, and an unchanged accepted copy, with no dependency on v3 template gates. Long-term success requires a traceable script-to-video-to-post-to-observation loop and sustained organic-view improvement under comparable conditions.

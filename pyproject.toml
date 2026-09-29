@@ -13,6 +13,9 @@ dependencies = [
   "websockets>=17.0.1,<18",
 ]
 
+[project.optional-dependencies]
+semantic = ["qdrant-client>=1.14,<2"]
+
 [project.scripts]
 mcn = "mcn_ops.cli:main"
 mcn-channels-probe = "mcn_ops.collection.channels.probe:main"
@@ -24,6 +27,9 @@ mcn-channels-transcribe-candidate = "mcn_ops.collection.channels.transcribe_cli:
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"mcn_ops.original" = ["playbook.md"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

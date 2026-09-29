@@ -1,4 +1,6 @@
-# Content Creation Workflow v3
+# Historical Content Creation Workflow v3
+
+This runbook is retained for existing v3 adaptation tasks. New knowledge-led original work uses [`create_original.md`](create_original.md); its creative work is not subject to the gates below.
 
 Use one session with three linear roles. Do not create persistent role agents. Script Writer is the only role allowed to modify viewer-facing copy.
 
@@ -10,7 +12,7 @@ Adaptation and half-original work:
 material_selection → creation_brief → script_writing → quality_review → risk_review → publish_format → delivery
 ```
 
-Original work starts at `creation_brief`.
+The v3 `original` mode starts at `creation_brief`; it is separate from `mcn original`.
 
 ## Task
 
